@@ -1807,9 +1807,12 @@ def persist_preview(config: Config, preview: OrderPreview) -> None:
     mappings = InventoryMappings(
         config.workflow_database, connection=config.workflow_connection
     )
-    import sqlite3
     observed = datetime.now().astimezone().isoformat(timespec="seconds")
-    connection = sqlite3.connect(config.workflow_database)
+    connection = config.workflow_connection
+    owns_connection = connection is None
+    if connection is None:
+        import sqlite3
+        connection = sqlite3.connect(config.workflow_database)
     try:
         connection.execute(
             "delete from material_items where order_id=? and source_type in ('aihouse','derived')",
@@ -1858,7 +1861,8 @@ def persist_preview(config: Config, preview: OrderPreview) -> None:
                 )
         connection.commit()
     finally:
-        connection.close()
+        if owns_connection:
+            connection.close()
 
 
 def _material_inventory_name(kind: str, thickness: float, color: str = "") -> str:

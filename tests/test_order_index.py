@@ -233,8 +233,14 @@ class OrderIndexTests(unittest.TestCase):
                 ["plywood", "plywood", "plywood", "panel", "panel", "edge"],
             )
             store = OrderIndexStore(config.workflow_database)
-            self.assertEqual(store.connection.execute("select count(*) from orders").fetchone()[0], 0)
-            store.close()
+            try:
+                self.assertEqual(store.connection.execute("select count(*) from orders").fetchone()[0], 0)
+                self.assertEqual(
+                    store.connection.execute("select count(*) from material_items").fetchone()[0],
+                    0,
+                )
+            finally:
+                store.close()
 
     def test_server_confirmation_writes_materials_and_factory_hardware_after_mapping(self):
         with tempfile.TemporaryDirectory() as temp:
