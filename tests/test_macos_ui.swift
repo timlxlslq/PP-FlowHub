@@ -269,6 +269,12 @@ private struct MacOSUIRegressionTests {
             OrderMaterialPreview(kind: "panel", thickness: 19.1, color: "Woodline 4", quantity: 2),
         ]
         require(orderDashboardPanelColors(materials) == ["Basalto SM", "Woodline 4"], "订单中心 Panel 颜色未按颜色去重")
+        let sameColorDifferentThickness = [
+            OrderMaterialPreview(kind: "panel", thickness: 19.1, color: "Woodline 4", quantity: 2, productCode: "M0019", brand: "LIOHER"),
+            OrderMaterialPreview(kind: "panel", thickness: 8, color: "Woodline 4", quantity: 1, productCode: "M0019", brand: "LIOHER"),
+        ]
+        let panelMaterials = orderDashboardPanelMaterials(sameColorDifferentThickness)
+        require(panelMaterials.count == 1 && panelMaterials[0].productCode == "M0019", "同一颜色不同厚度未共用同一个Panel图片身份")
 
         let stockRows = [
             OrderStockPreview(id: "A", productCode: "A", productName: "Basalto SM", unit: "张", travelerNames: [], required: 7, available: 6, shortage: 1, sufficient: false),
@@ -754,19 +760,19 @@ private struct MacOSUIRegressionTests {
         )
         require(
             !orderDashboardHasShippedSelection(["F200"], statuses: ["F100": "已出库", "F200": "需要更新"]),
-            "需要更新工厂单应允许进入更新出库"
+            "历史状态工厂单应允许进入出货"
         )
         require(
             orderDashboardNeedsOutboundUpdateSelection(["F200"], statuses: ["F100": "已出库", "F200": "需要更新"]),
-            "需要更新工厂单应被识别为更新出库"
+            "历史状态工厂单应保留状态识别"
         )
         require(
-            orderDashboardOutboundActionTitle(["F200"], statuses: ["F100": "已出库", "F200": "需要更新"]) == "更新出库",
-            "需要更新工厂单的按钮不能继续显示创建出库"
+            orderDashboardOutboundActionTitle(["F200"], statuses: ["F100": "已出库", "F200": "需要更新"]) == "出货",
+            "出货按钮应统一显示出货"
         )
         require(
-            orderDashboardOutboundActionTitle(["F100"], statuses: ["F100": "已出库", "F200": "需要更新"]) == "创建出库",
-            "普通未出库选择应显示创建出库"
+            orderDashboardOutboundActionTitle(["F100"], statuses: ["F100": "已出库", "F200": "需要更新"]) == "出货",
+            "出货按钮应统一显示出货"
         )
         require(
             !orderDashboardStageMatchesFilter("已出货", statusFilter: "未完成订单")

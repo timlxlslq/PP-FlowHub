@@ -163,6 +163,39 @@ def ensure_schema(path: Path) -> None:
                 unique(order_id, material_type, color, thickness, unit, edge, source_type, source_path)
             );
             create index if not exists idx_material_items_order on material_items(order_id);
+            create table if not exists manual_production_batches(
+                batch_id integer primary key,
+                batch_number text not null unique,
+                order_id text not null,
+                production_time text not null default '',
+                source text not null default 'manual',
+                status text not null default 'prepared',
+                created_at text not null,
+                updated_at text not null
+            );
+            create table if not exists manual_production_batch_factories(
+                batch_id integer not null,
+                order_id text not null,
+                factory_order text not null,
+                primary key(batch_id, factory_order),
+                foreign key(batch_id) references manual_production_batches(batch_id)
+            );
+            create table if not exists manual_production_batch_materials(
+                batch_id integer not null,
+                order_id text not null,
+                material_type text not null default '',
+                color text not null default '',
+                thickness text not null default '',
+                edge text not null default '',
+                unit text not null default '',
+                quantity real not null default 0,
+                primary key(batch_id, material_type, color, thickness, edge, unit),
+                foreign key(batch_id) references manual_production_batches(batch_id)
+            );
+            create index if not exists idx_manual_production_factory
+                on manual_production_batch_factories(order_id, factory_order);
+            create index if not exists idx_manual_production_material
+                on manual_production_batch_materials(order_id, material_type, color, thickness, edge, unit);
             create table if not exists server_material_allocations(
                 id integer primary key,
                 source_material_id integer not null,

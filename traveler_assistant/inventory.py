@@ -90,6 +90,7 @@ class Product:
     remark: str = ""
     unit: str = ""
     cost_price: float | None = None
+    brand: str = ""
 
 
 @dataclass
@@ -466,6 +467,9 @@ def database_document_items(
     config: Config,
     order_id: str,
     selected_factory_orders: Iterable[str] | None = None,
+    *,
+    production_batch_number: str = "",
+    shipment_only: bool = False,
 ) -> tuple[str, dict[str, list[TravelerItem]], list[TravelerItem], dict[str, dict]]:
     """Build outbound source documents directly from persisted order facts.
 
@@ -492,7 +496,26 @@ def database_document_items(
     order_type = str(detail.get("order", {}).get("order_type", "")).strip()
     scope = outbound_scope_decisions(config, normalized_order_id, requested)
     material_requirement = scope["material"]["requirement"]
-    materials = list(detail.get("materials", []))
+    materials = [] if shipment_only else list(detail.get("materials", []))
+    if production_batch_number:
+        connection = sqlite3.connect(config.workflow_database)
+        connection.row_factory = sqlite3.Row
+        try:
+            batch = connection.execute(
+                "select batch_id, order_id, status from manual_production_batches where batch_number=?",
+                (production_batch_number.strip(),),
+            ).fetchone()
+            if batch is None or str(batch["order_id"]).upper() != normalized_order_id:
+                raise RuleError("production_batch_unknown", f"找不到订单 {normalized_order_id} 的生产批次：{production_batch_number}")
+            if batch["status"] not in {"prepared", "completed"}:
+                raise RuleError("production_batch_status", "生产批次当前不能出库")
+            materials = [dict(row) for row in connection.execute(
+                """select material_type, color, thickness, quantity, unit, edge
+                   from manual_production_batch_materials where batch_id=? order by material_type, color, thickness""",
+                (batch["batch_id"],),
+            ).fetchall()]
+        finally:
+            connection.close()
     documents: dict[str, list[TravelerItem]] = {normalized_order_id: []}
     zero_items: list[TravelerItem] = []
     row_number = 1
@@ -520,7 +543,7 @@ def database_document_items(
         else:
             documents[normalized_order_id].append(item)
 
-    for row in detail.get("hardware", []):
+    for row in ([] if production_batch_number else detail.get("hardware", [])):
         factory_order = str(row.get("factory_order", "")).strip().upper()
         if requested and factory_order not in requested:
             continue
@@ -683,10 +706,15 @@ def build_database_preview(
     config: Config,
     order_id: str,
     selected_factory_orders: Iterable[str] | None = None,
+    *,
+    production_batch_number: str = "",
+    shipment_only: bool = False,
 ) -> InventoryPreview:
     """Map persisted SQLite order facts without generating a Traveler file."""
     normalized_order_id, documents, zero_items, _ = database_document_items(
-        config, order_id, selected_factory_orders
+        config, order_id, selected_factory_orders,
+        production_batch_number=production_batch_number,
+        shipment_only=shipment_only,
     )
     selected_factory_ids = tuple(sorted({
         str(value).strip().upper()
@@ -697,6 +725,8 @@ def build_database_preview(
     detail, factory_rows = _database_factory_rows(config, normalized_order_id)
     excluded_items: list[dict] = []
     material_requirement = scope["material"]["requirement"]
+    if shipment_only or production_batch_number:
+        material_requirement = "required"
     if material_requirement in {"customer_supplied", "remainder", "not_required"}:
         label = {
             "customer_supplied": "客户提供",
@@ -1287,7 +1317,7 @@ class ProductCatalog:
                 break
         if not header_row:
             raise RuleError("product_catalog_schema", f"商品资料缺少必要表头：{sorted(REQUIRED_PRODUCT_HEADERS)}")
-        optional = {"备注": None, "计量单位": None, "预计采购价": None}
+        optional = {"备注": None, "计量单位": None, "预计采购价": None, "品牌": None}
         for label in optional:
             optional[label] = header_map.get(label)
         for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
@@ -1301,6 +1331,7 @@ class ProductCatalog:
                 name=name,
                 spec=_text(row[header_map["规格型号"]] if header_map["规格型号"] < len(row) else None),
                 status=_text(row[header_map["状态"]] if header_map["状态"] < len(row) else None),
+                brand=_text(row[optional["品牌"]] if optional["品牌"] is not None and optional["品牌"] < len(row) else None),
                 remark=_text(row[optional["备注"]] if optional["备注"] is not None and optional["备注"] < len(row) else None),
                 unit=_text(row[optional["计量单位"]] if optional["计量单位"] is not None and optional["计量单位"] < len(row) else None),
                 cost_price=_catalog_cost_price(
@@ -1358,6 +1389,16 @@ def _ensure_product_cost_column(connection: sqlite3.Connection) -> None:
         connection.commit()
 
 
+def _ensure_product_brand_column(connection: sqlite3.Connection) -> None:
+    columns = {
+        str(row[1])
+        for row in connection.execute("pragma table_info(products)").fetchall()
+    }
+    if "brand" not in columns:
+        connection.execute("alter table products add column brand text not null default ''")
+        connection.commit()
+
+
 class ProductDatabase:
     """SQLite-backed product catalog used by runtime lookups."""
 
@@ -1378,6 +1419,7 @@ class ProductDatabase:
             ).fetchone() is None:
                 raise RuleError("product_database_schema", "库存商品数据库缺少 products 表")
             _ensure_product_cost_column(self.connection)
+            _ensure_product_brand_column(self.connection)
         except RuleError:
             self.connection.close()
             raise
@@ -1403,16 +1445,17 @@ class ProductDatabase:
             name=str(row[2] or ""),
             spec=str(row[3] or ""),
             status=str(row[4] or ""),
-            remark=str(row[5] or ""),
-            unit=str(row[6] or ""),
-            cost_price=None if row[7] is None else float(row[7]),
+            brand=str(row[5] or ""),
+            remark=str(row[6] or ""),
+            unit=str(row[7] or ""),
+            cost_price=None if row[8] is None else float(row[8]),
         )
 
     @property
     def products(self) -> list[Product]:
         rows = self.connection.execute(
             """
-            select category, code, name, spec, status, remark, unit, cost_price
+            select category, code, name, spec, status, brand, remark, unit, cost_price
             from products order by code
             """
         ).fetchall()
@@ -1424,7 +1467,7 @@ class ProductDatabase:
     def require_code(self, code: str) -> Product:
         rows = self.connection.execute(
             """
-            select category, code, name, spec, status, remark, unit, cost_price
+            select category, code, name, spec, status, brand, remark, unit, cost_price
             from products where normalized_code = ?
             """,
             (_normalize_name(code),),
@@ -1462,7 +1505,7 @@ class ProductDatabase:
             )
             parameters.extend([f"%{token}%"] * 5)
         query = """
-            select category, code, name, spec, status, remark, unit, cost_price
+            select category, code, name, spec, status, brand, remark, unit, cost_price
             from products
         """
         if clauses:
@@ -1500,6 +1543,7 @@ def _create_product_database(path: Path) -> None:
                 name text not null default '',
                 spec text not null default '',
                 status text not null default '',
+                brand text not null default '',
                 remark text not null default '',
                 unit text not null default '',
                 cost_price real,
@@ -1541,10 +1585,10 @@ def _replace_product_database(path: Path, products: list[Product]) -> None:
         connection.executemany(
             """
             insert into products(
-                category, code, name, spec, status, remark, unit, cost_price,
+                category, code, name, spec, status, brand, remark, unit, cost_price,
                 normalized_code, normalized_name, normalized_spec,
                 normalized_category, normalized_remark
-            ) values(?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             [
                 (
@@ -1553,6 +1597,7 @@ def _replace_product_database(path: Path, products: list[Product]) -> None:
                     product.name,
                     product.spec,
                     product.status,
+                    product.brand,
                     product.remark,
                     product.unit,
                     product.cost_price,
@@ -1581,8 +1626,9 @@ class InventoryMappings:
     application call sites pass the central workflow SQLite database. Runtime
     data is therefore read from and written to SQLite only.
     """
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, connection: sqlite3.Connection | None = None):
         self.path = path
+        self._connection = connection
         self._legacy_path = path if path.suffix.lower() == ".json" else None
         self.database_path = (
             path.parent.parent / "workflow.sqlite3"
@@ -1602,10 +1648,11 @@ class InventoryMappings:
                 except (OSError, json.JSONDecodeError) as exc:
                     raise RuleError("inventory_mapping", f"库存商品映射无法读取：{path}") from exc
             return
-        ensure_schema(self.database_path)
+        if self._connection is None:
+            ensure_schema(self.database_path)
 
     def _rows(self, rule_type: str | None = None) -> list[sqlite3.Row]:
-        connection = sqlite3.connect(self.database_path)
+        connection = self._connection or sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
         try:
             if rule_type:
@@ -1619,7 +1666,8 @@ class InventoryMappings:
                 "order by source_name"
             ).fetchall()
         finally:
-            connection.close()
+            if self._connection is None:
+                connection.close()
 
     def entries(self) -> tuple[list[dict], list[dict]]:
         if self._legacy_path is not None:
@@ -1642,7 +1690,7 @@ class InventoryMappings:
         normalized = _normalize_name(name)
         if self._legacy_path is not None:
             return self.ignored.get(normalized)
-        connection = sqlite3.connect(self.database_path)
+        connection = self._connection or sqlite3.connect(self.database_path)
         try:
             row = connection.execute(
                 "select reason from inventory_resolution_rules where normalized_name=? and rule_type='ignore'",
@@ -1650,13 +1698,14 @@ class InventoryMappings:
             ).fetchone()
             return str(row[0]) if row else None
         finally:
-            connection.close()
+            if self._connection is None:
+                connection.close()
 
     def manual_code(self, name: str) -> str | None:
         normalized = _normalize_name(name)
         if self._legacy_path is not None:
             return self.manual.get(normalized)
-        connection = sqlite3.connect(self.database_path)
+        connection = self._connection or sqlite3.connect(self.database_path)
         try:
             row = connection.execute(
                 "select product_code from inventory_resolution_rules where normalized_name=? and rule_type='mapping'",
@@ -1664,7 +1713,8 @@ class InventoryMappings:
             ).fetchone()
             return str(row[0]) if row else None
         finally:
-            connection.close()
+            if self._connection is None:
+                connection.close()
 
     def save_ignored(self, name: str, reason: str) -> None:
         normalized = _normalize_name(name)
@@ -2620,6 +2670,7 @@ def _catalog_change_summary(previous: list[Product], current: list[Product]) -> 
             product.name,
             product.spec,
             product.status,
+            product.brand,
             product.remark,
             product.unit,
             "" if product.cost_price is None else f"{product.cost_price:.12g}",
@@ -2978,7 +3029,9 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
             selected_document_remarks: Iterable[str] | None = None,
             selected_factory_orders: Iterable[str] | None = None,
             order_id: str = "",
-            room_material: bool = False) -> dict:
+            room_material: bool = False,
+            production_batch_number: str = "",
+            shipment_only: bool = False) -> dict:
     operation_started = time.perf_counter()
     progress(f"库存系统：开始准备 {action} 操作")
     username = _local_setting(config, "jdy_username")
@@ -3010,7 +3063,11 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                     raise RuleError("inventory_argument", "按房间出库必须只选择一个工厂单")
                 preview = build_factory_room_preview(config, order_id, selected[0])
             else:
-                preview = build_database_preview(config, order_id, selected_factory_orders)
+                preview = build_database_preview(
+                    config, order_id, selected_factory_orders,
+                    production_batch_number=production_batch_number,
+                    shipment_only=shipment_only,
+                )
         else:
             if not traveler_path:
                 raise RuleError("inventory_argument", "出库必须提供订单号或 Traveler")
@@ -3071,7 +3128,10 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                     "message": "本订单已明确标记为无需出库，未打开库存系统，也未创建出库单",
                 }
             raise RuleError("inventory_empty", "当前订单没有需要出库的板材、封边或五金")
-        if selected_factory_orders:
+        if selected_factory_orders and shipment_only:
+            from .production import assert_shipment_allowed
+            assert_shipment_allowed(config, preview.traveler.order_id, selected_factory_orders)
+        elif selected_factory_orders:
             from .order_index import assert_factory_orders_outbound_allowed
 
             changed_factory_orders = changed_factory_orders_for_documents(
@@ -3230,6 +3290,10 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                 raise RuleError("jdy_save_result", "库存单已返回成功，但缺少分单结果或单据编号；结果需要人工核实")
             store = InventorySyncStore(_sync_path(config), config.backup_root)
             store.save_success(preview, results)
+            if production_batch_number:
+                from .production import complete_production_batch
+                response["production"] = complete_production_batch(config, production_batch_number)
+                response["productionCompleted"] = True
             response["syncRecorded"] = True
             try:
                 from .order_index import (
@@ -3362,6 +3426,8 @@ def inventory_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--product-code", default="")
     parser.add_argument("--include-hardware", action="store_true")
     parser.add_argument("--room-material", action="store_true")
+    parser.add_argument("--production-batch", default="")
+    parser.add_argument("--shipment-only", action="store_true")
     args = parser.parse_args(argv)
     config = Config()
     config.load_settings()
@@ -3384,7 +3450,11 @@ def inventory_main(argv: list[str] | None = None) -> int:
         elif args.action == "order-preview":
             if not args.order_id:
                 raise RuleError("inventory_argument", "order-preview 必须提供 --order-id")
-            result = build_database_preview(config, args.order_id, args.factory_order).payload()
+            result = build_database_preview(
+                config, args.order_id, args.factory_order,
+                production_batch_number=args.production_batch,
+                shipment_only=args.shipment_only,
+            ).payload()
         elif args.action == "get-outbound-scope":
             if not args.order_id:
                 raise RuleError("inventory_argument", "读取出库范围需要订单号")
@@ -3470,6 +3540,8 @@ def inventory_main(argv: list[str] | None = None) -> int:
                 selected_factory_orders=args.factory_order,
                 order_id=args.order_id,
                 room_material=args.room_material,
+                production_batch_number=args.production_batch,
+                shipment_only=args.shipment_only,
             )
         logger.event("backend.command.completed", "库存系统操作完成", details={"action": args.action})
         print(json.dumps(result, ensure_ascii=False, indent=2))

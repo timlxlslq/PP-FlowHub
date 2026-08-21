@@ -455,7 +455,7 @@ class InventoryTests(unittest.TestCase):
         self.assertIn("value: row.quantity.formatted()", detail)
         self.assertNotIn("model.loadOrderDetailFromDatabase(order)", detail)
         self.assertNotIn("if model.selectedOrderId.caseInsensitiveCompare(order.orderId)", detail)
-        self.assertIn('Text("订单材料")', swift)
+        self.assertIn('本次生产消耗材料', swift)
         self.assertIn("orderDetailGridColumnCount", detail)
         self.assertIn("inventoryIgnoredMappings", swift)
         self.assertIn("inventoryManualMappings", swift)

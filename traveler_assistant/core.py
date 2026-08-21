@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -58,6 +59,9 @@ class Config:
     aimes_retry_delays: tuple[float, float] = (2.0, 4.0)
     operation_log_enabled: bool = True
     storage_prepared: bool = False
+    # Server previews use one process-local database connection.  It is
+    # intentionally not part of persisted settings or command-line state.
+    workflow_connection: sqlite3.Connection | None = None
 
     @property
     def operation_log_file(self) -> Path:

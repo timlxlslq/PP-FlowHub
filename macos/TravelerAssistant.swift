@@ -87,6 +87,15 @@ struct OrderDashboardFactory: Identifiable {
     let optimized: Bool
     let outboundStatus: String
     let outboundDocument: String
+    let produced: Bool
+}
+
+struct ProductionMaterialDraft: Identifiable {
+    let id: String
+    let key: String
+    let label: String
+    let remainingQuantity: Double
+    var quantity: String
 }
 
 struct OrderInstallationDay: Identifiable, Equatable {
@@ -113,8 +122,10 @@ struct OrderDashboardItem: Identifiable {
     let materialStatus: String
     let factoryCount: Int
     let optimizedCount: Int
+    let producedCount: Int
     let shippedCount: Int
     let optimizationProgress: String
+    let productionProgress: String
     let outboundProgress: String
     let userNote: String
     let plannedInstallationDays: [OrderInstallationDay]
@@ -211,6 +222,85 @@ struct ServerWriteHardwarePreview: Identifiable {
     }
 }
 
+struct ServerWriteMaterialChange: Identifiable {
+    let id: String
+    let changeType: String
+    let materialType: String
+    let color: String
+    let thickness: String
+    let unit: String
+    let oldQuantity: Double
+    let newQuantity: Double
+    let delta: Double
+
+    init?(row: [String: Any], index: Int) {
+        let type = row["material_type"] as? String ?? ""
+        guard !type.isEmpty else { return nil }
+        self.id = "\(index)|\(type)|\(row["color"] as? String ?? "")|\(row["thickness"] as? String ?? "")"
+        self.changeType = row["change_type"] as? String ?? "数量变化"
+        self.materialType = type
+        self.color = row["color"] as? String ?? ""
+        self.thickness = row["thickness"] as? String ?? ""
+        self.unit = row["unit"] as? String ?? ""
+        self.oldQuantity = (row["old_quantity"] as? NSNumber)?.doubleValue ?? 0
+        self.newQuantity = (row["new_quantity"] as? NSNumber)?.doubleValue ?? 0
+        self.delta = (row["delta"] as? NSNumber)?.doubleValue ?? 0
+    }
+}
+
+struct ServerWriteHardwareChange: Identifiable {
+    let id: String
+    let factoryOrder: String
+    let changeType: String
+    let productCode: String
+    let name: String
+    let spec: String
+    let unit: String
+    let oldQuantity: Double
+    let newQuantity: Double
+    let delta: Double
+
+    init?(row: [String: Any], index: Int) {
+        let factory = row["factory_order"] as? String ?? ""
+        let name = row["name"] as? String ?? ""
+        guard !factory.isEmpty, !name.isEmpty else { return nil }
+        self.id = "\(index)|\(factory)|\(row["product_code"] as? String ?? "")|\(name)"
+        self.factoryOrder = factory
+        self.changeType = row["change_type"] as? String ?? "数量变化"
+        self.productCode = row["product_code"] as? String ?? ""
+        self.name = name
+        self.spec = row["spec"] as? String ?? ""
+        self.unit = row["unit"] as? String ?? ""
+        self.oldQuantity = (row["old_quantity"] as? NSNumber)?.doubleValue ?? 0
+        self.newQuantity = (row["new_quantity"] as? NSNumber)?.doubleValue ?? 0
+        self.delta = (row["delta"] as? NSNumber)?.doubleValue ?? 0
+    }
+}
+
+struct ServerHardwareMappingRequirement: Identifiable {
+    let id: String
+    let name: String
+    let sourceCode: String
+    let factoryOrders: [String]
+    let orderIDs: [String]
+    let sourcePaths: [String]
+    let quantity: Double
+    let message: String
+
+    init?(row: [String: Any]) {
+        let name = row["name"] as? String ?? ""
+        guard !name.isEmpty else { return nil }
+        self.id = name
+        self.name = name
+        self.sourceCode = row["source_code"] as? String ?? ""
+        self.factoryOrders = row["factory_orders"] as? [String] ?? []
+        self.orderIDs = row["order_ids"] as? [String] ?? []
+        self.sourcePaths = row["source_paths"] as? [String] ?? []
+        self.quantity = (row["quantity"] as? NSNumber)?.doubleValue ?? 0
+        self.message = row["message"] as? String ?? "需要指定库存 SKU"
+    }
+}
+
 struct ServerWriteFactoryPreview: Identifiable {
     let id: String
     let factoryOrder: String
@@ -219,8 +309,11 @@ struct ServerWriteFactoryPreview: Identifiable {
     let sourceFolder: String
     let ownershipStatus: String
     let reportState: String
+    let outboundDocument: String
     let batchID: String
     let hardware: [ServerWriteHardwarePreview]
+    let changeType: String
+    let hardwareChanges: [ServerWriteHardwareChange]
 
     init?(row: [String: Any]) {
         let number = row["factory_order"] as? String ?? ""
@@ -232,9 +325,14 @@ struct ServerWriteFactoryPreview: Identifiable {
         self.sourceFolder = row["source_folder"] as? String ?? ""
         self.ownershipStatus = row["ownership_status"] as? String ?? ""
         self.reportState = row["report_state"] as? String ?? ""
+        self.outboundDocument = row["outbound_document"] as? String ?? ""
         self.batchID = row["production_batch_id"] as? String ?? (row["production_batch_id"] as? NSNumber)?.stringValue ?? ""
         self.hardware = (row["hardware"] as? [[String: Any]] ?? []).enumerated().compactMap {
             ServerWriteHardwarePreview(row: $0.element, index: $0.offset)
+        }
+        self.changeType = row["change_type"] as? String ?? ""
+        self.hardwareChanges = (row["hardware_changes"] as? [[String: Any]] ?? []).enumerated().compactMap {
+            ServerWriteHardwareChange(row: $0.element, index: $0.offset)
         }
     }
 }
@@ -242,28 +340,40 @@ struct ServerWriteFactoryPreview: Identifiable {
 struct ServerWriteOrderPreview: Identifiable {
     let id: String
     let orderID: String
+    let orderType: String
     let sourceFolder: String
     let validationStatus: String
     let validationMessage: String
     let materials: [ServerWriteMaterialPreview]
+    let materialChanges: [ServerWriteMaterialChange]
     let factories: [ServerWriteFactoryPreview]
+    let excludedFactories: [ServerWriteFactoryPreview]
+    let hardwareChanges: [ServerWriteHardwareChange]
 
     init(
         id: String,
         orderID: String,
+        orderType: String,
         sourceFolder: String,
         validationStatus: String,
         validationMessage: String,
         materials: [ServerWriteMaterialPreview],
-        factories: [ServerWriteFactoryPreview]
+        materialChanges: [ServerWriteMaterialChange],
+        factories: [ServerWriteFactoryPreview],
+        excludedFactories: [ServerWriteFactoryPreview],
+        hardwareChanges: [ServerWriteHardwareChange]
     ) {
         self.id = id
         self.orderID = orderID
+        self.orderType = orderType
         self.sourceFolder = sourceFolder
         self.validationStatus = validationStatus
         self.validationMessage = validationMessage
         self.materials = materials
+        self.materialChanges = materialChanges
         self.factories = factories
+        self.excludedFactories = excludedFactories
+        self.hardwareChanges = hardwareChanges
     }
 
     init?(row: [String: Any]) {
@@ -271,41 +381,53 @@ struct ServerWriteOrderPreview: Identifiable {
         guard !orderID.isEmpty else { return nil }
         self.id = orderID
         self.orderID = orderID
+        self.orderType = row["order_type"] as? String ?? ""
         self.sourceFolder = row["source_folder"] as? String ?? ""
         self.validationStatus = row["validation_status"] as? String ?? ""
         self.validationMessage = row["validation_message"] as? String ?? ""
         self.materials = (row["materials"] as? [[String: Any]] ?? []).enumerated().compactMap {
             ServerWriteMaterialPreview(row: $0.element, index: $0.offset)
         }
+        self.materialChanges = (row["material_changes"] as? [[String: Any]] ?? []).enumerated().compactMap {
+            ServerWriteMaterialChange(row: $0.element, index: $0.offset)
+        }
         self.factories = (row["factories"] as? [[String: Any]] ?? []).compactMap(ServerWriteFactoryPreview.init)
+        self.excludedFactories = (row["excluded_factories"] as? [[String: Any]] ?? []).compactMap(ServerWriteFactoryPreview.init)
+        self.hardwareChanges = (row["hardware_changes"] as? [[String: Any]] ?? []).enumerated().compactMap {
+            ServerWriteHardwareChange(row: $0.element, index: $0.offset)
+        }
     }
 }
 
 struct ServerWritePreview {
-    let token: String
+    let payload: [String: Any]
     let sourceFolders: [String]
     let materials: [ServerWriteMaterialPreview]
     let orders: [ServerWriteOrderPreview]
+    let hardwareMappingRequirements: [ServerHardwareMappingRequirement]
 
-    init(token: String, sourceFolders: [String], materials: [ServerWriteMaterialPreview], orders: [ServerWriteOrderPreview]) {
-        self.token = token
+    init(payload: [String: Any], sourceFolders: [String], materials: [ServerWriteMaterialPreview], orders: [ServerWriteOrderPreview], hardwareMappingRequirements: [ServerHardwareMappingRequirement] = []) {
+        self.payload = payload
         self.sourceFolders = sourceFolders
         self.materials = materials
         self.orders = orders
+        self.hardwareMappingRequirements = hardwareMappingRequirements
     }
 
     init?(object: [String: Any]) {
         guard let payload = object["server_write_preview"] as? [String: Any],
-              let token = payload["token"] as? String, !token.isEmpty else { return nil }
+              payload["write_records"] is [String: Any] else { return nil }
         let materials = (payload["materials"] as? [[String: Any]] ?? []).enumerated().compactMap {
             ServerWriteMaterialPreview(row: $0.element, index: $0.offset)
         }
         let orders = (payload["orders"] as? [[String: Any]] ?? []).compactMap(ServerWriteOrderPreview.init)
+        let hardwareMappingRequirements = (payload["hardware_mapping_requirements"] as? [[String: Any]] ?? []).compactMap(ServerHardwareMappingRequirement.init)
         guard !orders.isEmpty else { return nil }
-        self.token = token
+        self.payload = payload
         self.sourceFolders = payload["source_folders"] as? [String] ?? []
         self.materials = materials
         self.orders = orders
+        self.hardwareMappingRequirements = hardwareMappingRequirements
     }
 }
 
@@ -597,6 +719,24 @@ struct OrderMaterialPreview: Identifiable {
     let thickness: Double
     let color: String
     let quantity: Double
+    let productCode: String
+    let brand: String
+
+    init(
+        kind: String,
+        thickness: Double,
+        color: String,
+        quantity: Double,
+        productCode: String = "",
+        brand: String = ""
+    ) {
+        self.kind = kind
+        self.thickness = thickness
+        self.color = color
+        self.quantity = quantity
+        self.productCode = productCode
+        self.brand = brand
+    }
 }
 
 func orderMaterialDisplayName(_ row: OrderMaterialPreview) -> String {
@@ -1010,6 +1150,8 @@ final class AppModel: ObservableObject {
     @Published var selectedInventoryOrderID = ""
     @Published var selectedInventoryDocumentRemarks: Set<String> = []
     @Published var selectedInventoryFactoryOrders: Set<String> = []
+    @Published var inventoryProductionBatchNumber = ""
+    @Published var inventoryShipmentOnly = false
     @Published var inventoryPreviewRows: [InventoryPreviewRow] = []
     @Published var inventoryErrors: [String] = []
     @Published var inventoryWriteBlocked = false
@@ -1033,6 +1175,8 @@ final class AppModel: ObservableObject {
     @Published var inventoryMappingRequestPath = ""
     @Published var showInventoryMappingWorkspace = false
     @Published var inventoryMappingTargetNames: [String] = []
+    @Published var productionMaterials: [ProductionMaterialDraft] = []
+    @Published var productionPreviewStatus = ""
     private var pendingInventoryMappingFolder = ""
     private var pendingDashboardOutboundRefresh = false
     @Published var orderFolders: [OrderFolderItem] = []
@@ -1062,6 +1206,7 @@ final class AppModel: ObservableObject {
     @Published var pendingServerFolderURL: URL?
     @Published var showServerProcessingOptions = false
     @Published var serverWritePreview: ServerWritePreview?
+    @Published var serverHardwareMappingRequirements: [ServerHardwareMappingRequirement] = []
     @Published var showServerWriteConfirmation = false
     @Published var serverWriteConfirmationNotice = ""
     @Published var serverWriteConfirmationNoticeIsError = false
@@ -1518,7 +1663,8 @@ final class AppModel: ObservableObject {
                     hasHardware: (factory["has_hardware"] as? NSNumber)?.boolValue ?? false,
                     optimized: (factory["optimized"] as? NSNumber)?.boolValue ?? false,
                     outboundStatus: factory["outbound_status"] as? String ?? "未查询",
-                    outboundDocument: factory["outbound_document"] as? String ?? ""
+                    outboundDocument: factory["outbound_document"] as? String ?? "",
+                    produced: (factory["produced"] as? NSNumber)?.boolValue ?? false
                 )
             }
             let number = { (key: String) -> Int in
@@ -1552,8 +1698,10 @@ final class AppModel: ObservableObject {
                 materialStatus: row["material_status"] as? String ?? "待校验",
                 factoryCount: number("factory_count"),
                 optimizedCount: number("optimized_count"),
+                producedCount: number("produced_count"),
                 shippedCount: number("shipped_count"),
                 optimizationProgress: row["optimization_progress"] as? String ?? "—",
+                productionProgress: row["production_progress"] as? String ?? "—",
                 outboundProgress: row["outbound_progress"] as? String ?? "—",
                 userNote: row["user_note"] as? String ?? "",
                 plannedInstallationDays: installationDays("planned"),
@@ -1576,6 +1724,7 @@ final class AppModel: ObservableObject {
             return
         }
         serverWritePreview = preview
+        serverHardwareMappingRequirements = preview.hardwareMappingRequirements
         serverWriteConfirmationNotice = ""
         serverWriteConfirmationNoticeIsError = false
         serverWriteConfirmationFinished = false
@@ -2053,14 +2202,23 @@ final class AppModel: ObservableObject {
         beginDashboardOperation("server", label: "确认写入 Server 工厂单")
         dashboardServerStatus = "正在写入订单 \(trimmedOrder) 的工厂单 \(trimmedFactory)…"
         dashboardSyncStatus = dashboardServerStatus
+        var inputPayload = preview.payload
+        inputPayload["confirmation_order_id"] = trimmedOrder
+        inputPayload["confirmation_factory_order"] = trimmedFactory
+        guard let inputData = try? JSONSerialization.data(withJSONObject: inputPayload) else {
+            finishDashboardOperation("server")
+            serverWriteConfirmationNotice = "❌ 内存预览无法编码，需重新读取 Server 文件"
+            serverWriteConfirmationNoticeIsError = true
+            return
+        }
         runOrder(
             [
-                "confirm-server-preview",
-                "--preview-token", preview.token,
+                "confirm-server-preview-memory",
                 "--order-id", trimmedOrder,
                 "--factory-order", trimmedFactory,
                 "--confirm-write",
             ],
+            input: inputData,
             failureStatus: "Server 工厂单写入失败",
             onFailure: {
                 self.finishDashboardOperation("server")
@@ -2080,19 +2238,24 @@ final class AppModel: ObservableObject {
                 return ServerWriteOrderPreview(
                     id: order.id,
                     orderID: order.orderID,
+                    orderType: order.orderType,
                     sourceFolder: order.sourceFolder,
                     validationStatus: order.validationStatus,
                     validationMessage: order.validationMessage,
                     materials: order.materials,
-                    factories: remainingFactories
+                    materialChanges: order.materialChanges,
+                    factories: remainingFactories,
+                    excludedFactories: order.excludedFactories,
+                    hardwareChanges: order.hardwareChanges
                 )
             }
             self.serverWritePreview = remainingOrders.map {
                 ServerWritePreview(
-                    token: preview.token,
+                    payload: preview.payload,
                     sourceFolders: preview.sourceFolders,
                     materials: preview.materials,
-                    orders: $0
+                    orders: $0,
+                    hardwareMappingRequirements: preview.hardwareMappingRequirements
                 )
             }
             if self.serverWritePreview == nil {
@@ -2103,22 +2266,32 @@ final class AppModel: ObservableObject {
             self.serverWriteConfirmationFinished = self.serverWritePreview == nil
             self.dashboardServerStatus = "✅ 已确认写入 \(trimmedOrder) / \(trimmedFactory)"
             self.dashboardSyncStatus = self.dashboardServerStatus
-            self.refreshDashboardAfterServerWrite()
+            if self.serverWritePreview == nil {
+                self.refreshDashboardAfterServerWrite()
+            }
             _ = object
         }
     }
 
-    func confirmServerMaterialPreview() {
+    func confirmServerMaterialPreview(skipHardwareOrderIDs: Set<String> = []) {
         guard let preview = serverWritePreview, !orderRunning else { return }
         beginDashboardOperation("server", label: "确认写入 Server 材料")
-        dashboardServerStatus = "正在写入 Server 订单材料…"
+        dashboardServerStatus = "正在写入 Server 订单材料和五金…"
         dashboardSyncStatus = dashboardServerStatus
+        var inputPayload = preview.payload
+        inputPayload["confirmation_skip_hardware_order_ids"] = skipHardwareOrderIDs.sorted()
+        guard let inputData = try? JSONSerialization.data(withJSONObject: inputPayload) else {
+            finishDashboardOperation("server")
+            serverWriteConfirmationNotice = "❌ 内存预览无法编码，需重新读取 Server 文件"
+            serverWriteConfirmationNoticeIsError = true
+            return
+        }
         runOrder(
             [
-                "confirm-server-material-preview",
-                "--preview-token", preview.token,
+                "confirm-server-material-preview-memory",
                 "--confirm-write",
-            ],
+            ] + skipHardwareOrderIDs.sorted().flatMap { ["--skip-hardware-order", $0] },
+            input: inputData,
             failureStatus: "Server 材料写入失败",
             onFailure: {
                 self.finishDashboardOperation("server")
@@ -2133,10 +2306,12 @@ final class AppModel: ObservableObject {
             self.finishDashboardOperation("server")
             let orders = (object["orders"] as? [String]) ?? []
             let orderText = orders.isEmpty ? "订单材料" : orders.joined(separator: "、")
-            self.serverWriteConfirmationNotice = "✅ 已成功写入 \(orderText) 的材料"
+            let skipped = (object["hardware_skipped_orders"] as? [String] ?? [])
+            let skippedText = skipped.isEmpty ? "" : "；以下来料加工订单本次未写入五金：\(skipped.joined(separator: "、"))"
+            self.serverWriteConfirmationNotice = "✅ 已成功写入 \(orderText) 的材料和对应工厂单五金\(skippedText)"
             self.serverWriteConfirmationNoticeIsError = false
             self.serverWriteConfirmationFinished = true
-            self.dashboardServerStatus = "✅ 已确认写入 \(orderText) 的材料"
+            self.dashboardServerStatus = "✅ 已确认写入 \(orderText) 的材料和五金\(skippedText)"
             self.dashboardSyncStatus = self.dashboardServerStatus
             self.showServerWriteConfirmation = false
             self.refreshDashboardAfterServerWrite()
@@ -2558,12 +2733,16 @@ final class AppModel: ObservableObject {
     func previewOrderInventory(
         orderID: String,
         factoryOrderNames: [String],
-        factoryOrders: [String] = []
+        factoryOrders: [String] = [],
+        productionBatchNumber: String = "",
+        shipmentOnly: Bool = false
     ) {
         selectedInventoryOrderID = orderID
         selectedInventoryPaths = []
         selectedInventoryDocumentRemarks = Set(factoryOrderNames.filter { !$0.isEmpty })
         selectedInventoryFactoryOrders = Set(factoryOrders.filter { !$0.isEmpty })
+        inventoryProductionBatchNumber = productionBatchNumber
+        inventoryShipmentOnly = shipmentOnly
         inventorySteps.removeAll()
         inventoryStderrBuffer = ""
         inventoryRawErrors = ""
@@ -2577,6 +2756,8 @@ final class AppModel: ObservableObject {
         for factoryOrder in selectedInventoryFactoryOrders.sorted() {
             arguments += ["--factory-order", factoryOrder]
         }
+        if !productionBatchNumber.isEmpty { arguments += ["--production-batch", productionBatchNumber] }
+        if shipmentOnly { arguments += ["--shipment-only"] }
         runInventory(arguments) { object in
             self.applyInventoryPreviewObject(object, accumulated: [])
             self.inventoryStatus = self.inventoryErrors.isEmpty
@@ -2587,6 +2768,43 @@ final class AppModel: ObservableObject {
                 detail: self.inventoryErrors.isEmpty ? "订单出库数据预检完成" : "订单出库数据预检未通过",
                 state: self.inventoryErrors.isEmpty ? "success" : "failure"
             )
+        }
+    }
+
+    func loadProductionPreview(orderID: String, factoryOrders: [String], completion: @escaping (Bool) -> Void = { _ in }) {
+        productionPreviewStatus = "正在读取订单材料剩余数量…"
+        var arguments = ["production-preview", "--order-id", orderID, "--factory-orders-json"]
+        let encoded = (try? JSONSerialization.data(withJSONObject: factoryOrders)) ?? Data("[]".utf8)
+        arguments.append(String(data: encoded, encoding: .utf8) ?? "[]")
+        runOrder(arguments, onFailure: {
+            self.productionPreviewStatus = self.orderError.isEmpty ? "生产预览读取失败" : self.orderError
+            completion(false)
+        }) { object in
+            let materials = (object["materials"] as? [[String: Any]] ?? []).compactMap { item -> ProductionMaterialDraft? in
+                guard let key = item["key"] as? String else { return nil }
+                let kind = item["material_type"] as? String ?? ""
+                let color = item["color"] as? String ?? ""
+                let thickness = item["thickness"] as? String ?? ""
+                let unit = item["unit"] as? String ?? ""
+                let remaining = (item["remaining_quantity"] as? NSNumber)?.doubleValue ?? 0
+                let label = [kind, color, thickness, unit].filter { !$0.isEmpty }.joined(separator: " · ")
+                return ProductionMaterialDraft(id: key, key: key, label: label, remainingQuantity: remaining, quantity: remaining > 0 ? String(format: "%g", remaining) : "0")
+            }
+            self.productionMaterials = materials
+            self.productionPreviewStatus = "已读取 (materials.count) 项订单材料；可按本次实际消耗修改数量"
+            completion(true)
+        }
+    }
+
+    func prepareProduction(orderID: String, factoryOrders: [String], materials: [ProductionMaterialDraft], completion: @escaping (String?) -> Void) {
+        let materialObjects: [[String: Any]] = materials.map { ["key": $0.key, "quantity": Double($0.quantity) ?? 0] }
+        let factoryData = (try? JSONSerialization.data(withJSONObject: factoryOrders)) ?? Data("[]".utf8)
+        let materialData = (try? JSONSerialization.data(withJSONObject: materialObjects)) ?? Data("[]".utf8)
+        let arguments = ["prepare-production", "--order-id", orderID, "--factory-orders-json", String(data: factoryData, encoding: .utf8) ?? "[]", "--materials-json", String(data: materialData, encoding: .utf8) ?? "[]"]
+        runOrder(arguments, onFailure: {
+            completion(nil)
+        }) { object in
+            completion(object["batch_number"] as? String)
         }
     }
 
@@ -2679,6 +2897,8 @@ final class AppModel: ObservableObject {
         for factoryOrder in selectedInventoryFactoryOrders.sorted() {
             arguments += ["--factory-order", factoryOrder]
         }
+        if !inventoryProductionBatchNumber.isEmpty { arguments += ["--production-batch", inventoryProductionBatchNumber] }
+        if inventoryShipmentOnly { arguments += ["--shipment-only"] }
         arguments.append("--confirm-save")
         runInventory(arguments, onFailure: { reason in
             self.inventoryWriteBlocked = true
@@ -2711,9 +2931,11 @@ final class AppModel: ObservableObject {
                 }.joined(separator: "；")
                 let numberText = numbers.isEmpty ? "未知单号" : numbers.joined(separator: "、")
                 self.inventoryWriteCompleted = true
-                self.inventoryStatus = "✅✅ 出库处理成功！\(numberText)"
-                self.inventorySuccessMessage = "出库处理成功！\(detail)"
-                self.addInventoryStep("✅ 出库处理成功", "\(detail)；本机同步记录已更新", "success")
+                let production = self.inventoryProductionBatchNumber.isEmpty ? "" : "生产材料已登记，所选工厂单已标记为已生产。"
+                let shipment = self.inventoryShipmentOnly ? "所选工厂单五金已出货。" : ""
+                self.inventoryStatus = production.isEmpty && shipment.isEmpty ? "✅✅ 出库处理成功！\(numberText)" : "✅ 操作完成！\(numberText)"
+                self.inventorySuccessMessage = production + shipment + "\(detail)"
+                self.addInventoryStep("✅ 操作成功", "\(production)\(shipment)\(detail)；本机同步记录已更新", "success")
                 if orderID.isEmpty {
                     self.markInventoryTravelerSaved(path: paths[0], documentNumber: numberText)
                     self.addInventoryStep("左侧状态已更新", "当前 Traveler 已立即标记为“已出库”", "success")
@@ -2929,6 +3151,50 @@ final class AppModel: ObservableObject {
             self.previewSelectedInventory()
             self.rereadPendingSourceFolder()
         }
+    }
+
+    func saveServerHardwareMapping(name: String, productCode: String) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCode = productCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard !trimmedName.isEmpty, !trimmedCode.isEmpty else { return }
+        beginInventoryOperation("保存本次五金映射")
+        runInventory([
+            "set-mapping", "--item-name", trimmedName,
+            "--product-code", trimmedCode,
+        ]) { _ in
+            self.removeServerHardwareMappingRequirement(trimmedName)
+            self.serverWriteConfirmationNotice = "✅ 已完成五金 SKU 映射：(trimmedName) → (trimmedCode)；请继续核对并确认写入"
+            self.serverWriteConfirmationNoticeIsError = false
+        }
+    }
+
+    func saveServerHardwareIgnoredMapping(name: String, reason: String) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return }
+        let trimmedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        beginInventoryOperation("保存本次五金忽略")
+        runInventory([
+            "ignore-item", "--item-name", trimmedName,
+            "--reason", trimmedReason.isEmpty ? "用户在 Server 订单材料确认中选择忽略五金" : trimmedReason,
+        ]) { _ in
+            self.removeServerHardwareMappingRequirement(trimmedName)
+            self.serverWriteConfirmationNotice = "✅ 已忽略五金：(trimmedName)；请继续核对并确认写入"
+            self.serverWriteConfirmationNoticeIsError = false
+        }
+    }
+
+    private func removeServerHardwareMappingRequirement(_ name: String) {
+        serverHardwareMappingRequirements.removeAll {
+            $0.name.caseInsensitiveCompare(name) == .orderedSame
+        }
+        guard let preview = serverWritePreview else { return }
+        serverWritePreview = ServerWritePreview(
+            payload: preview.payload,
+            sourceFolders: preview.sourceFolders,
+            materials: preview.materials,
+            orders: preview.orders,
+            hardwareMappingRequirements: serverHardwareMappingRequirements
+        )
     }
 
     @discardableResult
@@ -3298,6 +3564,7 @@ final class AppModel: ObservableObject {
 
     private func runOrder(
         _ arguments: [String],
+        input: Data? = nil,
         failureStatus: String = "校验未通过",
         onFailure: (() -> Void)? = nil,
         completion: @escaping ([String: Any]) -> Void
@@ -3318,12 +3585,14 @@ final class AppModel: ObservableObject {
             let process = Process()
             let output = Pipe()
             let errors = Pipe()
+            let standardInput: Pipe? = input == nil ? nil : Pipe()
             process.executableURL = command
             process.arguments = ["order"] + arguments
             process.currentDirectoryURL = root
             process.environment = self.environmentForOperation(operationID)
             process.standardOutput = output
             process.standardError = errors
+            process.standardInput = standardInput
             errors.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
@@ -3331,6 +3600,10 @@ final class AppModel: ObservableObject {
             }
             do {
                 try process.run()
+                if let input, let standardInput {
+                    standardInput.fileHandleForWriting.write(input)
+                    standardInput.fileHandleForWriting.closeFile()
+                }
                 let data = output.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
                 errors.fileHandleForReading.readabilityHandler = nil
@@ -3554,7 +3827,9 @@ final class AppModel: ObservableObject {
                 kind: $0["kind"] as? String ?? "",
                 thickness: ($0["thickness"] as? NSNumber)?.doubleValue ?? 0,
                 color: $0["color"] as? String ?? "",
-                quantity: ($0["quantity"] as? NSNumber)?.doubleValue ?? 0
+                quantity: ($0["quantity"] as? NSNumber)?.doubleValue ?? 0,
+                productCode: $0["product_code"] as? String ?? "",
+                brand: $0["brand"] as? String ?? ""
             )
         }
         orderEdgeBanding = (payload["edge_banding"] as? [String: NSNumber] ?? [:])
@@ -3631,7 +3906,14 @@ final class AppModel: ObservableObject {
             let materials: [[String: Any]] = materialRows.compactMap { row in
                 guard let kind = row["material_type"] as? String else { return nil }
                 let thickness = Double(row["thickness"] as? String ?? "") ?? (row["thickness"] as? NSNumber)?.doubleValue ?? 0
-                return ["kind": kind, "thickness": thickness, "color": row["color"] as? String ?? "", "quantity": row["quantity"] as? NSNumber ?? 0]
+                return [
+                    "kind": kind,
+                    "thickness": thickness,
+                    "color": row["color"] as? String ?? "",
+                    "quantity": row["quantity"] as? NSNumber ?? 0,
+                    "product_code": row["product_code"] as? String ?? "",
+                    "brand": row["brand"] as? String ?? "",
+                ]
             }
             var edges: [String: NSNumber] = [:]
             for row in materialRows where (row["material_type"] as? String) == "edge" {
@@ -4995,7 +5277,20 @@ struct InventoryMappingSheet: View {
     @ObservedObject var model: AppModel
     let travelerName: String
     @Binding var isPresented: Bool
+    let saveAction: ((String, String) -> Void)?
     @State private var query = ""
+
+    init(
+        model: AppModel,
+        travelerName: String,
+        isPresented: Binding<Bool>,
+        saveAction: ((String, String) -> Void)? = nil
+    ) {
+        self.model = model
+        self.travelerName = travelerName
+        self._isPresented = isPresented
+        self.saveAction = saveAction
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -5035,10 +5330,14 @@ struct InventoryMappingSheet: View {
                             }
                             Spacer()
                             Button("使用此商品") {
-                                model.saveInventoryMapping(
-                                    travelerName: travelerName,
-                                    productCode: product.code
-                                )
+                                if let saveAction {
+                                    saveAction(travelerName, product.code)
+                                } else {
+                                    model.saveInventoryMapping(
+                                        travelerName: travelerName,
+                                        productCode: product.code
+                                    )
+                                }
                                 isPresented = false
                             }
                             .disabled(model.inventoryRunning)
@@ -5156,8 +5455,19 @@ struct PendingInventoryMappingWorkspace: View {
 struct PendingInventoryIgnoreSheet: View {
     @ObservedObject var model: AppModel
     let travelerName: String
+    let saveAction: ((String, String) -> Void)?
     @Environment(\.dismiss) private var dismiss
     @State private var reason = "用户在待处理中心选择全局忽略"
+
+    init(
+        model: AppModel,
+        travelerName: String,
+        saveAction: ((String, String) -> Void)? = nil
+    ) {
+        self.model = model
+        self.travelerName = travelerName
+        self.saveAction = saveAction
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -5190,7 +5500,11 @@ struct PendingInventoryIgnoreSheet: View {
                 Button("取消") { dismiss() }
                     .appActionButton(minWidth: 80)
                 Button("加入全局忽略") {
-                    model.saveInventoryIgnoredMapping(name: travelerName, reason: reason)
+                    if let saveAction {
+                        saveAction(travelerName, reason)
+                    } else {
+                        model.saveInventoryIgnoredMapping(name: travelerName, reason: reason)
+                    }
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)
@@ -5250,6 +5564,8 @@ struct InventoryView: View {
     }
 
     private var confirmationTitle: String {
+        if !model.inventoryProductionBatchNumber.isEmpty { return model.inventoryWriteBlocked ? "重试生产出库" : "确认生产出库" }
+        if model.inventoryShipmentOnly { return model.inventoryWriteBlocked ? "重试出货" : "确认出货" }
         if model.inventoryWriteBlocked { return "重试出库" }
         return customerSuppliedOnly || hasMappedOutboundRows ? "确认出库" : "确认无需出库"
     }
@@ -5299,7 +5615,7 @@ struct InventoryView: View {
         VStack(spacing: 0) {
                 AppPageHeader(
                     systemImage: "shippingbox.fill",
-                    title: "订单出库",
+                    title: model.inventoryShipmentOnly ? "订单出货" : (model.inventoryProductionBatchNumber.isEmpty ? "订单出库" : "生产材料出库"),
                     subtitle: "订单 \(model.selectedOrderId)"
             ) {
                 AppStatusBadge(
@@ -5316,7 +5632,7 @@ struct InventoryView: View {
             }
             Divider()
             HStack(spacing: 10) {
-                outboundStep(1, "选择工厂单", active: selectedTravelerCount == 0)
+                outboundStep(1, model.inventoryShipmentOnly ? "选择工厂单" : (model.inventoryProductionBatchNumber.isEmpty ? "选择工厂单" : "选择材料数量"), active: selectedTravelerCount == 0)
                 Image(systemName: "chevron.right").font(.caption).foregroundColor(.secondary)
                 outboundStep(2, "数据预检", active: selectedTravelerCount > 0 && !model.inventoryPreviewRows.isEmpty && !model.inventoryWriteCompleted)
                 Image(systemName: "chevron.right").font(.caption).foregroundColor(.secondary)
@@ -5363,7 +5679,7 @@ struct InventoryView: View {
                             }.frame(maxWidth: .infinity, minHeight: 220)
                         } else {
                             HStack {
-                                Text("订单材料").frame(maxWidth: .infinity, alignment: .leading)
+                        Text(model.inventoryShipmentOnly ? "工厂单五金" : (model.inventoryProductionBatchNumber.isEmpty ? "订单材料／五金" : "本次生产消耗材料")).frame(maxWidth: .infinity, alignment: .leading)
                                 Text("状态").frame(width: 58, alignment: .leading)
                                 Text("商品编号").frame(width: 82, alignment: .leading)
                                 Text("本地映射商品／说明").frame(width: 250, alignment: .leading)
@@ -5477,7 +5793,7 @@ struct InventoryView: View {
                 HStack(spacing: 8) {
                     Button("取消") { confirmRealSave = false }
                         .appActionButton(minWidth: 80)
-                    Button("确认出库") {
+                    Button(model.inventoryShipmentOnly ? "确认出货" : (model.inventoryProductionBatchNumber.isEmpty ? "确认出库" : "确认生产出库")) {
                         confirmRealSave = false
                         model.openAndFillSelectedInventory()
                     }

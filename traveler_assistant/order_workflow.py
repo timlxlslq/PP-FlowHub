@@ -1634,7 +1634,9 @@ def preview_order(
             # This is an intentional App write to the source workbook.
             from .order_index import OrderIndexStore, _record_generated_material_baseline
 
-            baseline_store = OrderIndexStore(config.workflow_database)
+            baseline_store = OrderIndexStore(
+                config.workflow_database, connection=config.workflow_connection
+            )
             try:
                 _record_generated_material_baseline(
                     baseline_store,
@@ -1732,7 +1734,9 @@ def preview_order(
         fittings = {factory: [] for factory in names}
     if not fittings:
         raise RuleError("missing_factory_orders", "板材清单和五金文件都无法取得工厂单号，不能生成 Traveler")
-    mappings = InventoryMappings(config.workflow_database)
+    mappings = InventoryMappings(
+        config.workflow_database, connection=config.workflow_connection
+    )
     normalized = {
         factory: _normalize_fittings(items, mappings)
         for factory, items in sorted(fittings.items())
@@ -1800,7 +1804,9 @@ def persist_preview(config: Config, preview: OrderPreview) -> None:
             f"订单存在未完成商品 SKU 处理：{names}。请先设置映射或加入全局忽略清单，再写入数据库。",
             missing_items=resolution["missing"],
         )
-    mappings = InventoryMappings(config.workflow_database)
+    mappings = InventoryMappings(
+        config.workflow_database, connection=config.workflow_connection
+    )
     import sqlite3
     observed = datetime.now().astimezone().isoformat(timespec="seconds")
     connection = sqlite3.connect(config.workflow_database)
@@ -3119,7 +3125,7 @@ def _config_from_args(args) -> Config:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pp-flowhub order")
-    parser.add_argument("command", choices=("list", "list-index", "detail", "cost", "cost-export", "backup-status", "backup-now", "sync-index", "process-server-changes", "process-server-folder", "preview-server-changes", "confirm-server-preview", "confirm-server-material-preview", "sync-aimes", "scan-server", "ignore-server-folder", "ignore-aimes", "restore-aimes-ignore", "assign-aimes-order", "restore-aimes-assignment", "auto-resolve-issue", "resolve-issue", "save-order-annotations", "preview", "preview-related", "refresh-aimes", "stock-check", "set-ignore", "generate", "generate-db", "temporary", "generate-material", "generate-material-from-travelers", "update", "update-related", "add-hardware", "add-factory", "assign-material", "create-test-data"))
+    parser.add_argument("command", choices=("list", "list-index", "detail", "cost", "cost-export", "backup-status", "backup-now", "sync-index", "process-server-changes", "process-server-folder", "preview-server-changes", "confirm-server-preview", "confirm-server-material-preview", "confirm-server-preview-memory", "confirm-server-material-preview-memory", "sync-aimes", "scan-server", "ignore-server-folder", "ignore-aimes", "restore-aimes-ignore", "assign-aimes-order", "restore-aimes-assignment", "auto-resolve-issue", "resolve-issue", "save-order-annotations", "production-preview", "prepare-production", "migrate-production-state", "preview", "preview-related", "refresh-aimes", "stock-check", "set-ignore", "generate", "generate-db", "temporary", "generate-material", "generate-material-from-travelers", "update", "update-related", "add-hardware", "add-factory", "assign-material", "create-test-data"))
     parser.add_argument("--folder", type=Path)
     parser.add_argument("--server-folder", type=Path, action="append", default=[])
     parser.add_argument("--name", action="append", default=[])
@@ -3148,9 +3154,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--full-refresh", action="store_true")
     parser.add_argument("--server-snapshot", type=Path)
     parser.add_argument("--preview-token", default="")
+    parser.add_argument(
+        "--skip-hardware-order",
+        action="append",
+        default=[],
+        help="本次 Server 材料确认中，来料加工订单级跳过五金写入",
+    )
     parser.add_argument("--material-id", type=int)
     parser.add_argument("--ignore-key", action="append", default=[])
     parser.add_argument("--issue-key", default="")
+    parser.add_argument("--factory-orders-json", default="[]")
+    parser.add_argument("--materials-json", default="[]")
     args = parser.parse_args(argv)
     config = _config_from_args(args)
     logger = configure_operation_log(config)
@@ -3171,6 +3185,21 @@ def main(argv: list[str] | None = None) -> int:
                 raise RuleError("invalid_arguments", "detail 需要 --order-id")
             from .order_details import order_detail
             result = order_detail(config, args.order_id)
+        elif args.command in {"production-preview", "prepare-production"}:
+            if not args.order_id:
+                raise RuleError("invalid_arguments", f"{args.command} 需要 --order-id")
+            try:
+                factory_orders = json.loads(args.factory_orders_json)
+            except json.JSONDecodeError as exc:
+                raise RuleError("invalid_arguments", "工厂单选择不是有效 JSON") from exc
+            from .production import prepare_production, production_preview
+            if args.command == "production-preview":
+                result = production_preview(config, args.order_id, factory_orders)
+            else:
+                result = prepare_production(config, args.order_id, factory_orders, args.materials_json)
+        elif args.command == "migrate-production-state":
+            from .production import migrate_legacy_production_state
+            result = migrate_legacy_production_state(config)
         elif args.command in {"cost", "cost-export"}:
             if not args.order_id:
                 raise RuleError("invalid_arguments", f"{args.command} 需要 --order-id")
@@ -3246,9 +3275,36 @@ def main(argv: list[str] | None = None) -> int:
                     config,
                     args.preview_token,
                     confirm_write=args.confirm_write,
+                    skip_hardware_order_ids=args.skip_hardware_order,
                 )
             except ValueError as exc:
                 raise RuleError("invalid_arguments", str(exc)) from exc
+        elif args.command in {"confirm-server-preview-memory", "confirm-server-material-preview-memory"}:
+            try:
+                payload = json.loads(sys.stdin.read() or "{}")
+            except json.JSONDecodeError as exc:
+                raise RuleError("invalid_arguments", "内存预览不是有效 JSON") from exc
+            if not isinstance(payload, dict):
+                raise RuleError("invalid_arguments", "内存预览格式无效")
+            if args.command == "confirm-server-preview-memory":
+                if not args.order_id or not args.factory_order:
+                    raise RuleError("invalid_arguments", "确认 Server 工厂单需要订单号和工厂单号")
+                from .order_index import confirm_server_preview_memory
+                result = confirm_server_preview_memory(
+                    config,
+                    payload,
+                    args.order_id,
+                    args.factory_order,
+                    confirm_write=args.confirm_write,
+                )
+            else:
+                from .order_index import confirm_server_material_preview_memory
+                result = confirm_server_material_preview_memory(
+                    config,
+                    payload,
+                    confirm_write=args.confirm_write,
+                    skip_hardware_order_ids=args.skip_hardware_order,
+                )
         elif args.command == "sync-aimes":
             from .order_index import sync_aimes_index
             result = sync_aimes_index(

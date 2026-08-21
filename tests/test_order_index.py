@@ -37,6 +37,7 @@ from traveler_assistant.order_index import (
     _server_folder_rename_pairs,
     _server_folders_for_sync,
     _server_data_change_message,
+    _server_preview_payload,
     _source_path_in_dashboard_scope,
     _valid_aimes_order_id,
     _visible_aimes_row,
@@ -51,7 +52,10 @@ from traveler_assistant.order_index import (
     preview_server_changes,
     allocate_server_material,
     confirm_server_material_allocations,
+    confirm_server_material_preview,
+    confirm_server_material_preview_memory,
     confirm_server_preview,
+    confirm_server_preview_memory,
     record_temporary_outbound,
     restore_aimes_factories,
     restore_aimes_order_assignment,
@@ -63,6 +67,133 @@ from traveler_assistant.inventory import InventoryMappings
 
 
 class OrderIndexTests(unittest.TestCase):
+    def test_desktop_cs004_and_pp0072_are_offline_memory_preview_fixtures(self):
+        """The desktop copies exercise parsing only, not current Server state."""
+        desktop = Path.home() / "Desktop"
+        folders = [desktop / "cs004", desktop / "pp0072"]
+        if not all(folder.is_dir() for folder in folders):
+            self.skipTest("Desktop CS004/PP0072 fixtures are not available")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(
+                state_dir=root / "state",
+                source_root=desktop,
+                order_root=root / "orders",
+            )
+            config.prepare_storage()
+            preview = preview_server_changes(config, folders)["server_write_preview"]
+            self.assertNotIn("token", preview)
+            self.assertEqual(
+                {row["order_id"] for row in preview["orders"]},
+                {"CS004", "PP0072"},
+            )
+            self.assertIn("write_records", preview)
+            self.assertFalse((config.state_dir / "server-previews").exists())
+
+    def test_server_preview_summarizes_changes_and_excludes_shipped_factory_orders(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state")
+            config.prepare_storage()
+            folder = root / "server" / "CUT TO SIZE" / "cs004"
+            folder.mkdir(parents=True)
+            source_path = str(folder / "cs004 material.xlsx")
+            current = OrderIndexStore(config.workflow_database)
+            current.upsert_order("CS004", validation_status="正常")
+            current.upsert_factory(
+                "F-KITCHEN", order_id="CS004", factory_name="CS004-KITCHEN",
+                sales_order_name="CS004", name_source="AIMES", ownership_status="已确认",
+                optimized=True, outbound_status="已出库", outbound_document="QTCK-001",
+            )
+            current.connection.execute(
+                """insert into material_items(
+                    order_id, material_type, color, thickness, quantity, unit, edge,
+                    source_type, source_path, source_fingerprint, updated_at
+                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
+                ("CS004", "panel", "Woodline 4", "19.1", 4, "pcs", "",
+                 "aihouse", source_path, "old", "2026-08-20T10:00:00"),
+            )
+            current.connection.execute(
+                """insert into material_items(
+                    order_id, material_type, color, thickness, quantity, unit, edge,
+                    source_type, source_path, source_fingerprint, updated_at
+                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
+                ("CS004", "edge", "Woodline 4", "", 100, "m", "",
+                 "aihouse", source_path, "old", "2026-08-20T10:00:00"),
+            )
+            current.connection.execute(
+                """insert into hardware_items(
+                    order_id, factory_order, product_code, name, spec, quantity,
+                    unit, source_type, source_path, active, updated_at
+                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
+                ("CS004", "F-KITCHEN", "H1", "Hinge", "", 2, "pcs",
+                 "aicnc", "", 1, "2026-08-20T10:00:00"),
+            )
+            current.commit()
+            current.close()
+
+            preview_path = root / "preview.sqlite3"
+            preview = OrderIndexStore(preview_path)
+            preview.upsert_order("CS004", validation_status="正常", source_folder=str(folder))
+            preview.upsert_factory(
+                "F-KITCHEN", order_id="CS004", factory_name="CS004-KITCHEN",
+                sales_order_name="CS004", name_source="AIMES", ownership_status="已确认",
+                optimized=True, outbound_status="已出库", outbound_document="QTCK-001",
+            )
+            preview.upsert_factory(
+                "F-VANITY", order_id="CS004", factory_name="CS004-vanity",
+                sales_order_name="CS004", name_source="AIMES", ownership_status="已确认",
+                optimized=True, outbound_status="未查询",
+            )
+            preview.connection.executemany(
+                """insert into material_items(
+                    order_id, material_type, color, thickness, quantity, unit, edge,
+                    source_type, source_path, source_fingerprint, updated_at
+                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    ("CS004", "panel", "Woodline 4", "19.1", 5, "pcs", "",
+                     "aihouse", source_path, "new", "2026-08-20T10:30:00"),
+                    ("CS004", "edge", "Woodline 4", "", 120, "m", "",
+                     "aihouse", source_path, "new", "2026-08-20T10:30:00"),
+                ],
+            )
+            preview.connection.execute(
+                """insert into hardware_items(
+                    order_id, factory_order, product_code, name, spec, quantity,
+                    unit, source_type, source_path, active, updated_at
+                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
+                ("CS004", "F-VANITY", "H2", "Drawer slide", "", 4, "pcs",
+                 "aicnc", "", 1, "2026-08-20T10:30:00"),
+            )
+            preview.commit()
+            preview.close()
+
+            payload = _server_preview_payload(
+                config, preview_path, "token", [folder], include_hardware=True
+            )
+            order = payload["orders"][0]
+            self.assertEqual(
+                [item["factory_order"] for item in order["factories"]], ["F-VANITY"]
+            )
+            self.assertEqual(
+                [(item["factory_order"], item["outbound_document"])
+                 for item in order["excluded_factories"]],
+                [("F-KITCHEN", "QTCK-001")],
+            )
+            material_changes = {
+                (item["material_type"], item["old_quantity"], item["new_quantity"])
+                for item in order["material_changes"]
+            }
+            self.assertEqual(
+                material_changes,
+                {("panel", 4.0, 5.0), ("edge", 100.0, 120.0)},
+            )
+            self.assertEqual(
+                [(item["factory_order"], item["name"], item["new_quantity"])
+                 for item in order["hardware_changes"]],
+                [("F-VANITY", "Drawer slide", 4.0)],
+            )
+
     def test_server_preview_requires_factory_confirmation_before_production_write(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -105,11 +236,105 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(store.connection.execute("select count(*) from orders").fetchone()[0], 0)
             store.close()
 
+    def test_server_confirmation_writes_materials_and_factory_hardware_after_mapping(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(
+                state_dir=root / "state",
+                source_root=root / "source",
+                order_root=root / "orders",
+            )
+            config.prepare_storage()
+            folder = config.source_root / "PP9999"
+            report = folder / "Report"
+            report.mkdir(parents=True)
+            from tests.test_order_workflow import make_board_material_report, make_fittings, make_materials
+            make_materials(folder / "PP9999 materials.xlsx")
+            make_board_material_report(report / "pp-板材清单.xlsx", factory="F100", name="PP9999-KITCHEN")
+            make_fittings(report / "Fittingslist.xlsx", [("F100", 2)])
+
+            fitting = SimpleNamespace(
+                code="WJ-UNMAPPED", name="Unmapped Hinge", size="Full", unit="Piece", quantity=2
+            )
+
+            def resolve_items(current_config, pairs):
+                mappings = InventoryMappings(current_config.workflow_database)
+                if not any(item.section == "五金" for item, _ in pairs):
+                    return {"missing": [], "ignored": [], "outbound": []}
+                if mappings.manual_code("Unmapped Hinge"):
+                    return {"missing": [], "ignored": [], "outbound": []}
+                return {
+                    "missing": [{
+                        "name": "Unmapped Hinge",
+                        "source_code": "WJ-UNMAPPED",
+                        "quantity": 2,
+                        "message": "找不到有效库存 SKU",
+                    }],
+                    "ignored": [],
+                    "outbound": [],
+                }
+
+            with patch(
+                "traveler_assistant.order_workflow.parse_fittings_groups",
+                return_value=[("F100", [fitting])],
+            ), patch(
+                "traveler_assistant.inventory.resolve_inventory_items",
+                side_effect=resolve_items,
+            ):
+                preview = preview_server_changes(config, [folder])
+
+            payload = preview["server_write_preview"]
+            self.assertEqual(
+                [item["name"] for item in payload["hardware_mapping_requirements"]],
+                ["Unmapped Hinge"],
+            )
+            with patch(
+                "traveler_assistant.order_workflow.parse_fittings_groups",
+                return_value=[("F100", [fitting])],
+            ), patch(
+                "traveler_assistant.inventory.resolve_inventory_items",
+                side_effect=resolve_items,
+            ), self.assertRaises(RuleError) as blocked:
+                confirm_server_material_preview_memory(config, payload, confirm_write=True)
+            self.assertEqual(blocked.exception.code, "hardware_mapping_required")
+
+            InventoryMappings(config.workflow_database).save_manual("Unmapped Hinge", "M1001")
+            with patch(
+                "traveler_assistant.order_workflow.parse_fittings_groups",
+                return_value=[("F100", [fitting])],
+            ), patch(
+                "traveler_assistant.inventory.resolve_inventory_items",
+                side_effect=resolve_items,
+            ):
+                confirmed = confirm_server_material_preview_memory(
+                    config, payload, confirm_write=True
+                )
+
+            self.assertEqual(confirmed["confirmation_mode"], "order_materials_and_factory_hardware")
+            self.assertEqual(confirmed["factory_orders"], ["F100"])
+            store = OrderIndexStore(config.workflow_database)
+            try:
+                self.assertEqual(
+                    store.connection.execute(
+                        "select count(*) from material_items where order_id='PP9999'"
+                    ).fetchone()[0],
+                    6,
+                )
+                hardware = store.connection.execute(
+                    "select order_id, factory_order, product_code, name, quantity from hardware_items"
+                ).fetchall()
+                self.assertEqual(hardware, [("PP9999", "F100", "WJ-UNMAPPED", "Unmapped Hinge", 2.0)])
+                self.assertNotIn("factory_order", {
+                    row[1] for row in store.connection.execute("pragma table_info(material_items)").fetchall()
+                })
+            finally:
+                store.close()
+
             with self.assertRaises(RuleError):
-                confirm_server_preview(config, payload["token"], "PP9999", "F100")
-            confirm_server_preview(
+                confirm_server_preview_memory(config, payload, "PP9999", "F100")
+            confirm_server_preview_memory(
                 config,
-                payload["token"],
+                payload,
                 "PP9999",
                 "F100",
                 confirm_write=True,
@@ -139,6 +364,92 @@ class OrderIndexTests(unittest.TestCase):
             )
             store.close()
 
+    def test_cut_to_size_server_confirmation_can_skip_hardware_for_entire_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(
+                state_dir=root / "state",
+                source_root=root / "source",
+                order_root=root / "orders",
+            )
+            config.prepare_storage()
+            folder = config.source_root / "CS999"
+            report = folder / "Report"
+            report.mkdir(parents=True)
+            from tests.test_order_workflow import make_board_material_report, make_fittings, make_materials
+            make_materials(folder / "CS999 materials.xlsx")
+            make_board_material_report(report / "cs-板材清单.xlsx", factory="F200", name="CS999-VANITY")
+            make_fittings(report / "Fittingslist.xlsx", [("F200", 2)])
+
+            fitting = SimpleNamespace(
+                code="WJ-CUSTOMER", name="Customer Hinge", size="Full", unit="Piece", quantity=2
+            )
+
+            resolution_calls = 0
+
+            def unresolved(current_config, pairs):
+                nonlocal resolution_calls
+                resolution_calls += 1
+                if resolution_calls == 1:
+                    # Let the normal read-only index build complete; the
+                    # preview refresh below is the SKU gate under test.
+                    return {"missing": [], "ignored": [], "outbound": []}
+                return {
+                    "missing": [{
+                        "name": "Customer Hinge",
+                        "source_code": "WJ-CUSTOMER",
+                        "quantity": 2,
+                        "message": "找不到有效库存 SKU",
+                    }],
+                    "ignored": [],
+                    "outbound": [],
+                }
+
+            with patch(
+                "traveler_assistant.order_workflow.parse_fittings_groups",
+                return_value=[("F200", [fitting])],
+            ), patch(
+                "traveler_assistant.inventory.resolve_inventory_items",
+                side_effect=unresolved,
+            ):
+                preview = preview_server_changes(config, [folder])
+                payload = preview["server_write_preview"]
+                self.assertEqual(payload["orders"][0]["order_type"], "cutToSize")
+                self.assertEqual(
+                    [item["name"] for item in payload["hardware_mapping_requirements"]],
+                    ["Customer Hinge"],
+                )
+                confirmed = confirm_server_material_preview_memory(
+                    config,
+                    payload,
+                    confirm_write=True,
+                    skip_hardware_order_ids=["CS999"],
+                )
+
+            self.assertEqual(confirmed["hardware_skipped_orders"], ["CS999"])
+            self.assertEqual(confirmed["factory_orders"], ["F200"])
+            store = OrderIndexStore(config.workflow_database)
+            try:
+                self.assertEqual(
+                    store.connection.execute(
+                        "select order_id from factory_orders where factory_order='F200'"
+                    ).fetchone()[0],
+                    "CS999",
+                )
+                self.assertEqual(
+                    store.connection.execute(
+                        "select count(*) from hardware_items where factory_order='F200'"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    store.connection.execute(
+                        "select count(*) from material_items where order_id='CS999'"
+                    ).fetchone()[0],
+                    6,
+                )
+            finally:
+                store.close()
     def test_server_scan_blocks_material_preview_until_source_file_is_fixed(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1868,7 +2179,7 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(row["factory_count"], 2)
         self.assertEqual(row["optimized_count"], 2)
         self.assertEqual(row["shipped_count"], 1)
-        self.assertEqual(row["stage"], "部分出货")
+        self.assertEqual(row["stage"], "部分生产，部分出货")
         self.assertEqual(row["optimization_progress"], "2 / 2")
         self.assertEqual(row["outbound_progress"], "1 / 2")
         self.assertEqual(row["latest_split_time"], "2026-08-02T10:00:00")

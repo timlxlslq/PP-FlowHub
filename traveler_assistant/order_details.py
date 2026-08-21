@@ -3,11 +3,66 @@
 from __future__ import annotations
 
 import sqlite3
+import re
 from pathlib import Path
 
-from .core import Config
+from .core import Config, _normalize_name
 from .database import ensure_schema
 from .inventory import InventoryMappings, ignored_hardware_reason
+
+
+def _panel_products_by_name(connection: sqlite3.Connection) -> dict[str, list[dict[str, str]]]:
+    """Return active Panel catalog rows grouped by their canonical name.
+
+    Material facts intentionally keep the business color and thickness only.
+    The product catalog supplies the presentation-only SKU, brand and image key.
+    """
+    table = connection.execute(
+        "select 1 from sqlite_master where type='table' and name='products'"
+    ).fetchone()
+    if table is None:
+        return {}
+    columns = {str(row[1]) for row in connection.execute("pragma table_info(products)").fetchall()}
+    if "brand" not in columns:
+        return {}
+    rows = connection.execute(
+        """
+        select code, name, brand, spec, status
+        from products
+        where normalized_category = ?
+        order by code
+        """,
+        (_normalize_name("Panel"),),
+    ).fetchall()
+    grouped: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        if row[4] not in ("", "启用"):
+            continue
+        grouped.setdefault(_normalize_name(row[1]), []).append({
+            "code": str(row[0] or ""),
+            "name": str(row[1] or ""),
+            "brand": str(row[2] or ""),
+            "spec": str(row[3] or ""),
+        })
+    return grouped
+
+
+def _panel_product_for_color(
+    products: dict[str, list[dict[str, str]]], color: str
+) -> dict[str, str]:
+    """Choose one color-level image identity, independent of thickness."""
+    candidates = list(products.get(_normalize_name(color), []))
+    if not candidates:
+        return {"product_code": "", "brand": ""}
+
+    def rank(item: dict[str, str]) -> tuple[int, str]:
+        numbers = re.findall(r"\d+(?:\.\d+)?", item["spec"])
+        thickness = float(numbers[0]) if numbers else 0.0
+        # Prefer the standard 19.1mm product as the canonical color image.
+        return (0 if abs(thickness - 19.1) < 0.6 else 1, item["code"])
+
+    selected = sorted(candidates, key=rank)[0]
+    return {"product_code": selected["code"], "brand": selected["brand"]}
 
 
 def order_detail(config: Config, order_id: str) -> dict:
@@ -58,6 +113,15 @@ def order_detail(config: Config, order_id: str) -> dict:
             from material_items where order_id=? order by material_type, color, thickness
             """, (order_id.upper(),)
         ).fetchall()
+        panel_products = _panel_products_by_name(connection)
+        material_records = []
+        for row in materials:
+            record = dict(row)
+            if record.get("material_type") == "panel":
+                record.update(_panel_product_for_color(panel_products, record.get("color", "")))
+            else:
+                record.update({"product_code": "", "brand": ""})
+            material_records.append(record)
         hardware_rows = connection.execute(
             """
             select factory_order, scope, product_code, name, spec, quantity,
@@ -105,7 +169,7 @@ def order_detail(config: Config, order_id: str) -> dict:
             "order": dict(order) if order else {"order_id": order_id.upper()},
             "installation": installation,
             "factory_orders": [dict(row) for row in factories],
-            "materials": [dict(row) for row in materials],
+            "materials": material_records,
             "hardware": [dict(row) for row in hardware],
             "outbound_documents": [dict(row) for row in outbound],
             "issues": [dict(row) for row in issues],
