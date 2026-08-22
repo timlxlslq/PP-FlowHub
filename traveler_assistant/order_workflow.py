@@ -7,6 +7,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import tempfile
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
@@ -32,6 +33,7 @@ from .inventory import (
     ignored_hardware_reason,
     parse_traveler,
     resolve_inventory_items,
+    resolved_product_code,
     set_ignored_mapping,
     TravelerItem,
 )
@@ -1792,7 +1794,8 @@ def persist_preview(config: Config, preview: OrderPreview) -> None:
     """Persist parsed material/hardware facts; raw reports remain the source evidence."""
     if not config.storage_prepared:
         return
-    resolution = resolve_inventory_items(config, _preview_inventory_resolution_items(preview))
+    resolution_items = _preview_inventory_resolution_items(preview)
+    resolution = resolve_inventory_items(config, resolution_items)
     if resolution["missing"]:
         names = "、".join(dict.fromkeys(
             str(item.get("name", "")).strip()
@@ -1846,16 +1849,20 @@ def persist_preview(config: Config, preview: OrderPreview) -> None:
             "delete from hardware_items where order_id=? and source_type='aicnc'",
             (preview.order_id.upper(),),
         )
+        resolution_index = len(preview.materials) + len(preview.edge_banding)
         for factory in preview.factories:
             for item in factory.fittings:
-                if item.ignored or ignored_hardware_reason(mappings, item.name, item.code) is not None:
+                accepted = resolution.get("accepted", [])[resolution_index] if resolution_index < len(resolution.get("accepted", [])) else {}
+                resolution_index += 1
+                if item.ignored or accepted.get("ignored") or ignored_hardware_reason(mappings, item.name, item.code) is not None:
                     continue
+                product_code = resolved_product_code(resolution, resolution_index - 1, item.code)
                 connection.execute(
                     """insert into hardware_items(
-                        order_id,factory_order,scope,product_code,name,spec,quantity,unit,
+                        order_id,factory_order,scope,product_code,source_code,name,spec,quantity,unit,
                         source_type,source_path,remarks,updated_at
-                    ) values(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (preview.order_id.upper(), factory.factory_order, "factory_order", item.code,
+                    ) values(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (preview.order_id.upper(), factory.factory_order, "factory_order", product_code, item.code,
                      item.name, item.size, float(item.quantity), item.unit, "aicnc",
                      str(preview.folder), "", observed),
                 )
@@ -2804,10 +2811,10 @@ def add_manual_hardware(
                 )
             connection.execute(
                 """insert into hardware_items(
-                    order_id,factory_order,scope,product_code,name,spec,quantity,unit,
+                    order_id,factory_order,scope,product_code,source_code,name,spec,quantity,unit,
                     source_type,source_path,remarks,updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (order_id.upper(), preview["factory_name"], "factory_order", preview["product_code"],
+                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (order_id.upper(), preview["factory_name"], "factory_order", preview["product_code"], preview["product_code"],
                  preview["product_name"], preview["spec"], float(preview["quantity"]), "pcs/个",
                  "manual", "", preview["remarks"], observed),
             )

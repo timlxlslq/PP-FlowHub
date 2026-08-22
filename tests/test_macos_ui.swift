@@ -73,6 +73,7 @@ private struct MacOSUIRegressionTests {
         testOrderDashboardRules()
         testPendingInventorySourceFolderPath()
         testOrderOutboundFactorySelection()
+        testProductionFeedbackAndDashboardProgress()
         testSharedPageHeaderHeight()
         testInventoryActionLayoutRules()
         testProductionOrderPaths()
@@ -86,6 +87,7 @@ private struct MacOSUIRegressionTests {
         testOperationLogReader()
         testOperationLogMaintenance()
         testRunningProgressReusesOperationRow()
+        testDashboardInventoryProgressText()
         testInventoryProgressKeepsStageHistory()
         testOrderOperationDurationFormatting()
         print("macOS UI regression tests passed")
@@ -178,6 +180,23 @@ private struct MacOSUIRegressionTests {
         require(orderMaterialDisplayName(material("panel", 19.1, "Woodline 4")) == "Woodline 4", "19.1mm Panel 应只显示颜色")
         require(orderMaterialDisplayName(material("panel", 8, "Ivory Oak")) == "Ivory Oak", "8mm Panel 应只显示颜色")
         require(orderMaterialDisplayName(material("panel", 9, "Basalto")) == "Basalto", "9mm Panel 应只显示颜色")
+
+        let productionPanel = ProductionMaterialDraft(
+            id: "panel|Woodline 4|19.1|pcs",
+            key: "panel|Woodline 4|19.1||pcs",
+            label: "panel · Woodline 4 · 19.1 · pcs",
+            materialType: "panel",
+            color: "Woodline 4",
+            thickness: "19.1",
+            edge: "",
+            unit: "pcs",
+            remainingQuantity: 1,
+            quantity: "1"
+        )
+        require(
+            productionMaterialName(productionPanel) == "Woodline 4 · 19.1mm",
+            "生产弹窗 Panel 应显示真实厚度，而不是厚度占位文本"
+        )
 
         let mixed = [
             material("panel", 19.1, "Woodline 4"),
@@ -413,6 +432,19 @@ private struct MacOSUIRegressionTests {
         let aimesSummary = dashboardMessageSummaryText(aimesPerformance!)
         require(aimesSummary.contains("总计用时 61.95 秒"), "消息标题没有显示 AIMES 总计用时")
         require(!aimesSummary.contains("启动 AIMES 浏览器"), "消息标题不应显示阶段明细")
+        let runningSummary = dashboardMessageSummaryText(
+            DashboardMessage(
+                id: "running",
+                source: "sync",
+                time: "12:04:00",
+                title: "订单数据",
+                detail: "正在读取本地订单缓存…",
+                state: "info",
+                duration: 0
+            ),
+            showsDuration: false
+        )
+        require(!runningSummary.contains("总计用时"), "当前操作不应显示尚未完成的总计用时")
         require(aimesPerformance?.contextDetails.contains(where: { $0.contains("PP0018 DRAWER") }) == true, "销售单异常明细没有进入消息上下文")
         let duplicateStatusMessages = dashboardMessages(
             syncStatus: "⚠️ AIMES 发现 1 条销售单格式异常",
@@ -517,9 +549,9 @@ private struct MacOSUIRegressionTests {
             activity: dashboardLog
         )
         require(combinedDashboardMessages.count == 4, "当前状态和历史记录没有合并到同一个消息框")
-        require(combinedDashboardMessages.suffix(3).map(\.source) == ["sync", "aimes", "server"], "当前状态没有按更新时间排列到消息底部")
-        require(!combinedDashboardMessages[1].detail.hasPrefix("✅"), "消息记录正文不应重复显示状态图标")
-        require(combinedDashboardMessages.suffix(3).allSatisfy { !$0.time.isEmpty }, "当前状态消息没有显示时间")
+        require(combinedDashboardMessages.map(\.source) == ["sync", "aimes", "server", "activity"], "消息没有按统一时间顺序排列")
+        require(!combinedDashboardMessages[0].detail.hasPrefix("✅"), "消息记录正文不应重复显示状态图标")
+        require(combinedDashboardMessages.dropFirst().allSatisfy { !$0.time.isEmpty }, "消息记录没有显示时间")
         let tracedDashboardMessages = dashboardMessages(
             syncStatus: "✅ 订单数据同步完成",
             syncTime: "12:01:00",
@@ -591,6 +623,19 @@ private struct MacOSUIRegressionTests {
         let visibleWhileRunning = dashboardVisibleMessages(runningMessages, isRunning: true)
         require(!visibleWhileRunning.contains(where: { dashboardStatusIsInProgress($0.detail) }), "进行中的操作不应显示在消息列表")
         require(dashboardVisibleMessages(runningMessages, isRunning: false).count == runningMessages.count, "操作完成后不应隐藏消息记录")
+        let orderedMessages = dashboardMessages(
+            syncStatus: "✅ 订单列表刷新完成",
+            syncTime: "12:00:03",
+            aimesStatus: "✅ AIMES 完成",
+            aimesTime: "12:00:01",
+            serverStatus: "✅ Server 完成",
+            serverTime: "12:00:02",
+            activity: [InventoryStep(time: "12:00:00", title: "生产", detail: "生产完成", state: "success")]
+        )
+        require(
+            orderedMessages.map(\.time) == ["12:00:00", "12:00:01", "12:00:02", "12:00:03"],
+            "消息列表没有按统一时间队列排列"
+        )
         let serverRows = serverChangePreviews([
             [
                 "id": "added:/Volumes/server/CS003 PP0047",
@@ -782,6 +827,88 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    private static func testProductionFeedbackAndDashboardProgress() {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let dashboard = try! String(
+            contentsOf: root.appendingPathComponent("macos/OrderDashboardView.swift"),
+            encoding: .utf8
+        )
+        let assistant = try! String(
+            contentsOf: root.appendingPathComponent("macos/TravelerAssistant.swift"),
+            encoding: .utf8
+        )
+        require(
+            dashboard.contains("let panelMaterialHoverDelay: TimeInterval = 1.0"),
+            "Panel 图片悬停延迟没有固定为 1 秒"
+        )
+        require(
+            dashboard.contains("DispatchQueue.main.asyncAfter(deadline: .now() + panelMaterialHoverDelay)"),
+            "Panel 图片没有使用延迟悬停触发"
+        )
+        require(
+            dashboard.contains("operationState == .success ? \"完成\" : \"关闭\"") &&
+                dashboard.contains("Button(\"重试\")") &&
+                dashboard.contains("productionOperationBanner"),
+            "生产弹窗没有保留成功/失败/重试结果提示"
+        )
+        require(
+            assistant.contains("struct ProductionOperationResult") &&
+                assistant.contains("本地生产记录已保存") &&
+                assistant.contains("state: uncertain ? .uncertain : .failure"),
+            "生产操作没有向弹窗返回完整结果状态"
+        )
+        require(
+            dashboard.contains("accessibilityTitle: \"出货进度\"") &&
+                dashboard.contains("completed: item.shippedCount"),
+            "订单行出货进度没有使用与优化进度相同的进度条格式"
+        )
+        require(
+            dashboard.contains("tableHeader(\"生产进度\")") &&
+                dashboard.contains("accessibilityTitle: \"生产进度\"") &&
+                dashboard.contains("completed: item.producedCount") &&
+                dashboard.contains("Text(item.productionProgress)"),
+            "订单行没有使用生产完成数显示生产进度列"
+        )
+        let materialHeader = dashboard.range(of: "tableHeader(\"材料\")")
+        let optimizationHeader = dashboard.range(of: "tableHeader(\"优化进度\")")
+        require(
+            materialHeader != nil && optimizationHeader != nil && materialHeader!.lowerBound < optimizationHeader!.lowerBound,
+            "材料列应显示在优化进度列前面"
+        )
+        require(
+            dashboard.contains("remainingQuantity <= 0"),
+            "生产弹窗没有禁用零剩余材料输入框"
+        )
+        require(
+            dashboard.contains("Button(\"确认生产并扣减材料\")") &&
+                !dashboard.contains("Button(\"确认生产并出库\")"),
+            "生产按钮没有明确区分材料扣减与工厂单出货"
+        )
+        require(
+            assistant.contains("已读取 \\(materials.count) 项订单材料") &&
+                assistant.contains("其中 \\(availableCount) 项有待分配数量") &&
+                !assistant.contains("已读取 (materials.count) 项订单材料"),
+            "生产弹窗材料数量没有显示真实总项数和可分配项数"
+        )
+        require(
+            dashboard.contains(".frame(width: 620, height: 560)") &&
+                dashboard.contains("Text(\"类型\")") &&
+                dashboard.contains("Text(\"材料名\")") &&
+                dashboard.contains("Text(\"单位\")") &&
+                dashboard.contains("Text(\"剩余\")") &&
+                dashboard.contains("Text(\"数量\")") &&
+                assistant.contains("sortedProductionMaterialDrafts"),
+            "生产弹窗没有显示材料表头或按业务顺序排序"
+        )
+        require(
+            assistant.contains("static func aggregated(_ changes: [ServerWriteMaterialChange])") &&
+                assistant.contains("Server 材料写入完成") &&
+                assistant.contains("duration: duration") &&
+                !assistant.contains("self.showServerWriteConfirmation = false\n            self.refreshDashboardAfterServerWrite()"),
+            "Server 确认写入没有汇总材料、保留成功提示或记录耗时"
+        )
+    }
+
     private static func testInventoryTravelerNewestFirst() {
         let rows = [
             traveler("old-a", folder: "PP0001", modifiedAt: "2026-07-01T10:00:00"),
@@ -876,6 +1003,28 @@ private struct MacOSUIRegressionTests {
         require(updated[0].id == id, "后台进度更新不应更换操作行标识")
         require(updated[0].state == "running", "后台进度不应被标记为成功")
         require(updated[0].detail == "正在后台连接库存系统", "后台进度文案未更新")
+    }
+
+    private static func testDashboardInventoryProgressText() {
+        require(
+            dashboardInventoryProgressText("[+47.75s] 库存系统：正在填写 1/2：M1001") == "正在填写 1/2：M1001",
+            "库存进度标题没有去掉耗时和库存系统前缀"
+        )
+        require(
+            dashboardInventoryProgressText("[+49.48s] 库存系统：已填写商品 M1001，数量 16") == "正在处理：已填写商品 M1001，数量 16",
+            "已完成的库存阶段没有转成当前处理中提示"
+        )
+        let messages = dashboardMessages(
+            syncStatus: "正在填写 1/2：M1001",
+            syncTime: "12:00:01",
+            aimesStatus: "AIMES 尚未检查",
+            aimesTime: "12:00:02",
+            serverStatus: "Server 尚未扫描",
+            serverTime: "12:00:03",
+            activity: []
+        )
+        let current = dashboardCurrentOperation(messages: messages, isRunning: true)
+        require(current?.isRunning == true && current?.message.detail == "正在填写 1/2：M1001", "库存当前步骤没有进入订单中心标题行")
     }
 
     private static func testInventoryProgressKeepsStageHistory() {

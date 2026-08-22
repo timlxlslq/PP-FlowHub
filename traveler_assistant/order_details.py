@@ -124,7 +124,7 @@ def order_detail(config: Config, order_id: str) -> dict:
             material_records.append(record)
         hardware_rows = connection.execute(
             """
-            select factory_order, scope, product_code, name, spec, quantity,
+            select factory_order, scope, product_code, source_code, name, spec, quantity,
                    unit, source_type, active, remarks, updated_at
             from hardware_items
             where order_id=? and active=1
@@ -140,7 +140,7 @@ def order_detail(config: Config, order_id: str) -> dict:
         mappings = InventoryMappings(config.workflow_database)
         hardware = [
             row for row in hardware_rows
-            if ignored_hardware_reason(mappings, row[3], row[2]) is None
+            if ignored_hardware_reason(mappings, row[4], row[2], row[3]) is None
         ]
         outbound = connection.execute(
             """

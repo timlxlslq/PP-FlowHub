@@ -135,6 +135,7 @@ const waitForVisibleFrame = async (page, predicate, timeoutMs = 15000) => {
   const attempts = Math.max(1, Math.ceil(timeoutMs / 250));
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     for (const frame of page.frames().filter(predicate).reverse()) {
+      if (frame === page.mainFrame()) return frame;
       const frameElement = await frame.frameElement().catch(() => null);
       if (frameElement && await frameElement.isVisible().catch(() => false)) return frame;
     }
@@ -149,6 +150,83 @@ const hasVisibleLocator = async (frame, selector) => {
     return false;
   }
 };
+const isOutboundSaveControlDisabled = async control => {
+  const disabled = await control.getAttribute("disabled").catch(() => null);
+  const ariaDisabled = await control.getAttribute("aria-disabled").catch(() => null);
+  const className = await control.getAttribute("class").catch(() => "") || "";
+  return disabled !== null || ariaDisabled === "true" ||
+    /(?:^|\s)(?:disabled|is-disabled|ui-btn-dis)(?:\s|$)/i.test(className);
+};
+const visibleOutboundSaveControls = frame => [
+  {
+    selector: '#edit:visible',
+    locator: frame.locator('#edit:visible').filter({ hasText: /^\s*保存\s*$/ }),
+  },
+  {
+    selector: '#save:visible',
+    locator: frame.locator('#save:visible').filter({ hasText: /^\s*保存\s*$/ }),
+  },
+  {
+    selector: 'a:visible,button:visible',
+    locator: frame.locator('a:visible,button:visible').filter({ hasText: /^\s*保存\s*$/ }),
+  },
+];
+const hasVisibleOutboundSaveControl = async frame => {
+  for (const candidate of visibleOutboundSaveControls(frame)) {
+    if (await candidate.locator.count() > 0) return true;
+  }
+  return false;
+};
+const outboundSaveControlDiagnostics = async (currentPage, preferredFrame) => {
+  const frames = [];
+  for (const frame of [preferredFrame, currentPage.mainFrame(), ...currentPage.frames().reverse()]) {
+    if (frame && !frames.includes(frame)) frames.push(frame);
+  }
+  const details = [];
+  for (const frame of frames) {
+    for (const candidate of visibleOutboundSaveControls(frame)) {
+      const count = await candidate.locator.count().catch(() => 0);
+      if (!count) continue;
+      for (let index = 0; index < count; index += 1) {
+        const control = candidate.locator.nth(index);
+        details.push({
+          selector: candidate.selector,
+          frame: frame.url(),
+          text: normalizeGridText(await control.innerText().catch(() => "")),
+          disabled: await isOutboundSaveControlDisabled(control),
+          className: await control.getAttribute("class").catch(() => "") || "",
+        });
+      }
+    }
+  }
+  return details;
+};
+const waitForOutboundSaveControl = async (currentPage, preferredFrame, documentNumber) => {
+  const frames = [];
+  for (const frame of [preferredFrame, currentPage.mainFrame(), ...currentPage.frames().reverse()]) {
+    if (frame && !frames.includes(frame)) frames.push(frame);
+  }
+  for (let waitAttempt = 0; waitAttempt < 40; waitAttempt += 1) {
+    for (const frame of frames) {
+      for (const candidate of visibleOutboundSaveControls(frame)) {
+        const count = await candidate.locator.count().catch(() => 0);
+        for (let index = 0; index < count; index += 1) {
+          const control = candidate.locator.nth(index);
+          if (await control.isVisible().catch(() => false) &&
+              !(await isOutboundSaveControlDisabled(control))) {
+            return { control, frame, selector: candidate.selector };
+          }
+        }
+      }
+    }
+    await currentPage.waitForTimeout(250);
+  }
+  const details = await outboundSaveControlDiagnostics(currentPage, preferredFrame);
+  throw new Error(
+    `旧出库单 ${documentNumber} 已填写，但未找到可点击的保存控件；` +
+    `已检查 ${details.length ? JSON.stringify(details) : "当前表单和主页面均无可见“保存”控件"}`,
+  );
+};
 const decodedURL = rawURL => {
   try {
     return decodeURIComponent(rawURL || "");
@@ -159,6 +237,10 @@ const decodedURL = rawURL => {
 const isOtherOutboundListURL = rawURL => {
   const url = decodedURL(rawURL);
   return /(?:[?&#]|&)action=initOiList(?:[&#]|$)/i.test(url);
+};
+const isOtherOutboundFormURL = rawURL => {
+  const url = decodedURL(rawURL);
+  return /(?:invOi|storage\/other-outbound\.jsp|otherOutbound)/i.test(url);
 };
 const hasOtherOutboundListControls = async frame => {
   const requiredSelectors = [
@@ -180,11 +262,16 @@ const isOtherOutboundListFrame = async frame => {
   return hasOtherOutboundListControls(frame);
 };
 const isOtherOutboundFormFrame = async frame => {
-  if (frame === page?.mainFrame()) return false;
-  if (!frame.url().includes("invOi") || isOtherOutboundListURL(frame.url())) return false;
-  const hasSave = await frame.locator("#save:visible").count() > 0;
+  if (isOtherOutboundListURL(frame.url())) return false;
+  const hasSave = await hasVisibleOutboundSaveControl(frame);
   const hasTable = await frame.locator("thead:visible th").count() > 0;
-  return hasSave && hasTable;
+  // Tenant versions use both the legacy invOi route and the newer
+  // storage/other-outbound.jsp route. The form controls are the stable
+  // readiness contract; the URL is only a hint and must not be the sole
+  // gate for recognizing an already-open edit form.
+  return hasSave && hasTable && (
+    isOtherOutboundFormURL(frame.url()) || frame === page?.mainFrame()
+  );
 };
 const normalizeGridText = value => String(value || "")
   .replace(/\u00a0/g, " ")
@@ -373,19 +460,49 @@ const openOtherOutboundList = async currentPage => {
   return listFrame;
 };
 
+const applyOutboundDate = async (input, value) => {
+  await input.evaluate((element, nextValue) => {
+    element.value = nextValue;
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+    element.dispatchEvent(new Event("blur", { bubbles: true }));
+  }, value);
+};
+
+const findExactOutboundRows = async (listFrame, remark) => {
+  await applyOutboundDate(listFrame.locator(".quick-datepicker-start"), request.queryDateFrom);
+  await applyOutboundDate(listFrame.locator(".quick-datepicker-end"), request.queryDateTo);
+  await listFrame.locator("#matchCon").fill(remark);
+  const searchResponse = page.waitForResponse(
+    response => response.url().includes("invOi.do") &&
+      response.request().method() === "POST",
+    { timeout: UI_STEP_TIMEOUT },
+  ).catch(() => null);
+  await listFrame.locator("#search").click();
+  await searchResponse;
+  await page.waitForTimeout(1200);
+  const normalizedRemark = remark.replace(/\s+/g, "").toUpperCase();
+  const exactRows = [];
+  const visibleRows = listFrame.locator("tr:visible");
+  for (let index = 0; index < await visibleRows.count(); index += 1) {
+    const row = visibleRows.nth(index);
+    const cells = (await row.locator("td").allTextContents())
+      .map(text => text.replace(/\s+/g, "").toUpperCase());
+    if (cells.includes(normalizedRemark)) exactRows.push(row);
+  }
+  return exactRows;
+};
+
 let context;
 let page;
 let remoteBrowser;
 let temporaryProfile = "";
 let cdpEndpointAvailable = false;
 let keepBrowserOpenOnExit = request.keepBrowserOpen === true;
-let securityChallengeDetected = false;
-let loginResponseObservedAt = null;
 let loginSubmittedAt = null;
-let securityChallengeResolve;
-const securityChallenge = new Promise(resolve => {
-  securityChallengeResolve = resolve;
-});
+let securityChallengeDetected = false;
+let traceStarted = false;
+let diagnosticsRunDir = "";
 const isInventoryDomainURL = rawURL => {
   try {
     const parsed = new URL(rawURL);
@@ -563,20 +680,6 @@ try {
     }
     page = context.pages()[0] || await context.newPage();
   }
-  page.on("response", async response => {
-    if (!response.url().includes("/commonservice/ajaxChecking.do")) return;
-    loginResponseObservedAt = performance.now();
-    const body = await response.text().catch(() => "");
-    try {
-      const payload = JSON.parse(body);
-      if (payload && payload.challenge && payload.gt) {
-        securityChallengeDetected = true;
-        securityChallengeResolve(true);
-      }
-    } catch {
-      // A non-JSON response is handled by the normal login timeout below.
-    }
-  });
   if (!attached) {
   await timed("打开库存系统入口页面", () => page.goto("https://www.jdy.com/login/", {
     waitUntil: "domcontentloaded",
@@ -683,6 +786,27 @@ try {
     }
     const login = loginScope.locator('button:visible').filter({ hasText: /^登录$/ }).first()
       .or(loginScope.locator('input[type="button"][value="登录"]:visible').first());
+    // Scope the challenge listener to this exact submit. A permanent page
+    // response listener can consume an older ajaxChecking response and report
+    // a negative response time or a challenge that belongs to a prior login.
+    const loginCheckPromise = page.waitForResponse(
+      response => response.url().includes("/commonservice/ajaxChecking.do") &&
+        response.request().method() === "POST",
+      { timeout: 8000 },
+    ).then(async response => {
+      const observedAt = performance.now();
+      const body = await response.text().catch(() => "");
+      try {
+        const payload = JSON.parse(body);
+        if (payload && payload.challenge && payload.gt) securityChallengeDetected = true;
+        return {
+          observedAt,
+          challenged: securityChallengeDetected,
+        };
+      } catch {
+        return { observedAt, challenged: false };
+      }
+    }).catch(() => null);
     loginSubmittedAt = performance.now();
     if (await login.count()) {
       await timed("点击登录提交账号密码", () => login.click());
@@ -692,17 +816,18 @@ try {
       log("已通过回车提交登录信息");
     }
     const securityWaitStartedAt = performance.now();
-    const challenged = await Promise.race([
-      securityChallenge,
-      page.waitForTimeout(1500).then(() => false),
+    const loginCheck = await Promise.race([
+      loginCheckPromise,
+      page.waitForTimeout(1500).then(() => null),
     ]);
+    securityChallengeDetected = Boolean(loginCheck?.challenged);
     log(`等待登录安全验证响应：实际耗时 ${elapsedSeconds(securityWaitStartedAt)} 秒`);
-    if (loginResponseObservedAt !== null) {
-      log(`登录提交到网页响应：实际耗时 ${((loginResponseObservedAt - loginSubmittedAt) / 1000).toFixed(2)} 秒`);
+    if (loginCheck?.observedAt) {
+      log(`登录提交到网页响应：实际耗时 ${((loginCheck.observedAt - loginSubmittedAt) / 1000).toFixed(2)} 秒`);
     } else {
       log("登录提交后暂未捕获网页响应，继续等待页面结果");
     }
-    if (challenged || securityChallengeDetected) {
+    if (securityChallengeDetected) {
       if (headless) {
         log("库存系统要求完成安全验证，后台浏览器无法继续");
         throw new Error("库存系统要求完成验证码或安全验证；请先使用可见浏览器完成登录验证，再重试");
@@ -826,6 +951,18 @@ try {
   if (attached) page = await ensureInventoryBusinessWorkbench(page);
   await waitForInventoryActionShell(page);
   log(attached ? "已复用库存系统工作台页面" : "已进入库存系统工作台");
+  if (request.action === "outbound" && request.confirmSave && request.diagnosticsDir) {
+    const safeRemark = String(request.orderName || "outbound").replace(/[^A-Za-z0-9_-]+/g, "-");
+    diagnosticsRunDir = path.join(
+      request.diagnosticsDir,
+      `${new Date().toISOString().replace(/[:.]/g, "-")}-${safeRemark}`,
+    );
+    fs.mkdirSync(diagnosticsRunDir, { recursive: true });
+    traceStarted = await context.tracing.start({ screenshots: true, snapshots: true })
+      .then(() => true)
+      .catch(() => false);
+    if (traceStarted) log("已开始记录本次库存写入诊断轨迹（仅保存在本机）");
+  }
 
   if (request.action === "preflight") {
     log("库存系统连接与登录状态正常");
@@ -1077,27 +1214,7 @@ try {
     let isUpdate = false;
     log(`正在按备注精确查询历史出库单：${request.orderName}`);
     const listFrame = await openOtherOutboundList(page);
-    const applyDate = async (input, value) => {
-      await input.evaluate((element, nextValue) => {
-        element.value = nextValue;
-        element.dispatchEvent(new Event("input", { bubbles: true }));
-        element.dispatchEvent(new Event("change", { bubbles: true }));
-        element.dispatchEvent(new Event("blur", { bubbles: true }));
-      }, value);
-    };
-    await applyDate(listFrame.locator(".quick-datepicker-start"), request.queryDateFrom);
-    await applyDate(listFrame.locator(".quick-datepicker-end"), request.queryDateTo);
-    await listFrame.locator("#matchCon").fill(request.orderName);
-    await listFrame.locator("#search").click();
-    await page.waitForTimeout(1200);
-    const normalizedRemark = request.orderName.replace(/\s+/g, "").toUpperCase();
-    const visibleRows = listFrame.locator("tr:visible");
-    for (let index = 0; index < await visibleRows.count(); index += 1) {
-      const row = visibleRows.nth(index);
-      const cells = (await row.locator("td").allTextContents())
-        .map(text => text.replace(/\s+/g, "").toUpperCase());
-      if (cells.includes(normalizedRemark)) exactRows.push(row);
-    }
+    exactRows = await findExactOutboundRows(listFrame, request.orderName);
     if (exactRows.length > 1) {
       throw new Error(`备注“${request.orderName}”找到 ${exactRows.length} 张出库单，请人工检查，已停止`);
     }
@@ -1117,20 +1234,24 @@ try {
         if (await documentLink.count()) await documentLink.dblclick();
         else await exactRows[0].dblclick();
         await page.waitForTimeout(1000);
-        formFrame = await waitForVisibleFrame(page, frame =>
-          frame !== page.mainFrame() && frame.url().includes("invOi") &&
-          !isOtherOutboundListURL(frame.url())
-        );
+        formFrame = await waitForVisibleFrame(page, frame => isOtherOutboundFormFrame(frame));
         if (!formFrame) throw new Error(`无法打开旧出库单 ${existingDocumentNumber}`);
         const edit = formFrame.locator(
           '#edit:visible, #editBills:visible, button:visible, a:visible',
         ).filter({ hasText: /编辑|修改/ }).first();
-        if (!(await edit.count()) || await edit.isDisabled().catch(() => false)) {
-          throw new Error(`旧出库单 ${existingDocumentNumber} 不可编辑，请人工处理；不会新建重复单`);
+        if (await edit.count() && !(await edit.isDisabled().catch(() => true))) {
+          await edit.click();
+          formFrame = await waitForOtherOutboundFormFrame(page);
+          if (!formFrame) throw new Error(`旧出库单 ${existingDocumentNumber} 编辑表单未加载完成`);
+          log(`旧出库单 ${existingDocumentNumber} 已通过编辑按钮进入修改状态`);
+        } else {
+          // The current tenant opens historical documents directly in an edit
+          // form. Save remains disabled until a cell actually changes, so its
+          // initial disabled state is not evidence that the document is
+          // read-only. Continue and let the real cell editors prove whether
+          // the form can be modified.
+          log(`旧出库单 ${existingDocumentNumber} 未显示独立编辑按钮，按直接编辑表单处理`);
         }
-        await edit.click();
-        formFrame = await waitForOtherOutboundFormFrame(page);
-        if (!formFrame) throw new Error(`旧出库单 ${existingDocumentNumber} 编辑表单未加载完成`);
         isUpdate = true;
       }
     }
@@ -1199,8 +1320,17 @@ try {
     log("业务类型已设置为生产领料");
 
     const remark = formFrame.getByPlaceholder(/备注/);
-    if (await remark.count()) await remark.fill(request.orderName);
-    else await formFrame.locator("textarea").first().fill(request.orderName);
+    const remarkEditor = await remark.count() ? remark.first() : formFrame.locator("textarea").first();
+    if (await remarkEditor.isDisabled().catch(() => false) ||
+        await remarkEditor.getAttribute("readonly").catch(() => null) !== null) {
+      const currentRemark = (await remarkEditor.inputValue().catch(() => "")).trim();
+      if (currentRemark.replace(/\s+/g, "").toUpperCase() !==
+          request.orderName.replace(/\s+/g, "").toUpperCase()) {
+        throw new Error(`旧出库单备注不可编辑且与订单不一致：${currentRemark || "空"}`);
+      }
+    } else {
+      await remarkEditor.fill(request.orderName);
+    }
     log(`备注已填写：${request.orderName}`);
     const headers = formFrame.locator("thead:visible th");
     const headerTexts = (await headers.allTextContents()).map(text => text.replace(/\s+/g, ""));
@@ -1274,9 +1404,10 @@ try {
       await quantityCell.click();
       const quantityEditor = formFrame.locator('input[name="qty"]:visible');
       await quantityEditor.waitFor({ state: "visible", timeout: 5000 });
-      await quantityEditor.evaluate((input, value) => {
-        input.value = value;
-      }, String(item.quantity));
+      // Use the normal input path so the inventory page receives the
+      // input/change events that mark the document dirty. Directly assigning
+      // input.value can leave Save unaware of the changed quantity.
+      await quantityEditor.fill(String(item.quantity));
       await quantityEditor.press("Enter");
       await page.waitForTimeout(300);
       const rowText = (await row.innerText()).replace(/\s+/g, " ").trim();
@@ -1340,6 +1471,12 @@ try {
       const initialSuffix = Number(suffixMatch[2]);
       let saved = false;
       for (let attempt = 0; attempt <= 10; attempt += 1) {
+        const saveTarget = await waitForOutboundSaveControl(
+          page,
+          formFrame,
+          existingDocumentNumber || documentNumber,
+        );
+        log(`已定位可点击保存控件：${saveTarget.selector}（${saveTarget.frame.url()}）`);
         const responsePromise = page.waitForResponse(
           response => response.url().includes("invOi.do?action=") &&
             response.request().method() === "POST",
@@ -1349,7 +1486,7 @@ try {
         const dialogPromise = page.waitForEvent("dialog", { timeout: 20000 })
           .then(dialog => ({ kind: "dialog", dialog }))
           .catch(error => ({ kind: "timeout", error }));
-        await formFrame.locator("#save:visible").click();
+        await saveTarget.control.click();
         let outcome = await Promise.race([responsePromise, dialogPromise]);
         if (outcome.kind === "dialog") {
           const warning = outcome.dialog.message();
@@ -1384,8 +1521,6 @@ try {
             throw new Error(`单据编号修改未生效：要求 ${documentNumber}，页面显示 ${committedNumber || "空"}`);
           }
           await page.waitForTimeout(1500);
-          const saveDisabled = await formFrame.locator("#save").isDisabled().catch(() => false);
-          if (saveDisabled) throw new Error("修改重复单据编号后，库存系统的保存按钮仍处于禁用状态");
           log(`单据编号重复，已改为 ${documentNumber}、回读确认并准备重试`);
           continue;
         }
@@ -1396,6 +1531,22 @@ try {
         break;
       }
       if (!saved) throw new Error("库存系统未返回明确保存成功");
+      log(`库存系统已返回保存成功，正在从历史单据回读 ${documentNumber}`);
+      const verificationList = await openOtherOutboundList(page);
+      const verificationRows = await findExactOutboundRows(verificationList, request.orderName);
+      if (verificationRows.length !== 1) {
+        throw new Error(
+          `库存系统保存响应成功，但历史单据按备注“${request.orderName}”回读到 ${verificationRows.length} 张；请人工核实后再处理`,
+        );
+      }
+      const verificationText = await verificationRows[0].innerText();
+      const verifiedDocumentNumber = verificationText.match(/QTCK\d+/i)?.[0]?.toUpperCase() || "";
+      if (verifiedDocumentNumber !== documentNumber.toUpperCase()) {
+        throw new Error(
+          `库存系统保存响应成功，但历史单据回读编号为 ${verifiedDocumentNumber || "空"}，预期 ${documentNumber}；请人工核实后再处理`,
+        );
+      }
+      log(`历史单据回读确认成功：${documentNumber}`);
       log(`${isUpdate ? "出库单更新" : "出库单新增"}成功：${documentNumber}`);
       process.stdout.write(JSON.stringify({
         ok: true, saved: true, unchanged: false, updated: isUpdate,
@@ -1411,9 +1562,28 @@ try {
     const body = (await page.locator("body").innerText()).replace(/\s+/g, " ").slice(0, 300);
     pageInfo = `；当前页面：${page.url()}；页面提示：${body}`;
   } catch {}
+  if (diagnosticsRunDir) {
+    await page?.screenshot({
+      path: path.join(diagnosticsRunDir, "failure.png"),
+      fullPage: false,
+    }).catch(() => {});
+    fs.writeFileSync(path.join(diagnosticsRunDir, "failure.json"), JSON.stringify({
+      time: new Date().toISOString(),
+      action: request.action,
+      remark: request.orderName || "",
+      pageURL: safePageURL(),
+      error: error?.message || String(error),
+    }, null, 2));
+    if (traceStarted) {
+      await context.tracing.stop({ path: path.join(diagnosticsRunDir, "trace.zip") }).catch(() => {});
+      traceStarted = false;
+    }
+    process.stderr.write(`库存诊断文件已保存：${diagnosticsRunDir}\n`);
+  }
   process.stderr.write(`库存系统自动操作失败：${error?.message || String(error)}${pageInfo}\n`);
   process.exitCode = 1;
 } finally {
+  if (traceStarted) await context.tracing.stop().catch(() => {});
   // This Browser came from connectOverCDP. Playwright's close() disconnects
   // its client connection for this case; it does not quit the user's Chrome.
   if (remoteBrowser) await remoteBrowser.close();

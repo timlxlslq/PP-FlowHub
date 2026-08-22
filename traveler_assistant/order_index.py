@@ -2408,7 +2408,16 @@ def _load_outbound_records(config: Config) -> list[dict]:
                 return [
                     {
                         "document_number": row[0],
-                        "kind": row[1],
+                        # Older/local SQLite rows may have an empty
+                        # document_type because the browser result did not
+                        # carry the document kind through to the DB write.
+                        # The local sync journal still has the authoritative
+                        # materials/hardware classification for the
+                        # confirmed document.  Preserve it here so a newer
+                        # factory-scoped hardware document can take
+                        # precedence over an older order-level materials
+                        # document during status reconciliation.
+                        "kind": audit_by_document.get(row[0], {}).get("kind", row[1]),
                         "order_id": row[2],
                         "factory_order": row[3],
                         "remark": row[3],
@@ -2470,6 +2479,19 @@ def _outbound_record_matches_factory(record: dict, factory: dict, *, allow_order
     return False
 
 
+def _has_factory_hardware_outbound_record(
+    factory: dict,
+    records: Iterable[dict],
+) -> bool:
+    """Return whether a shipped hardware document is scoped to this factory."""
+    return any(
+        str(record.get("kind", "")).strip().casefold() == "hardware"
+        and str(record.get("status", "")).strip() == "已出库"
+        and _outbound_record_matches_factory(record, factory, allow_order_alias=False)
+        for record in records
+    )
+
+
 def _factory_outbound_metadata(config: Config, factory: dict) -> tuple[str, str]:
     mode = str(factory.get("outbound_mode", "")).strip()
     fingerprint = str(factory.get("outbound_fingerprint", "")).strip()
@@ -2522,6 +2544,17 @@ def _refresh_outbound_status(
     # materials document when both exist.  Otherwise the earlier materials
     # number can mask the actual factory outbound document in the dashboard.
     matching_records = exact_records + order_alias_records
+    # A split factory can have both the historical order-level materials
+    # document and a newer factory-scoped hardware document.  The material
+    # document must not make the factory look stale after the hardware was
+    # successfully shipped; once a hardware record exists, reconcile only
+    # factory-scoped hardware records for this factory.
+    hardware_records = [
+        record for record in matching_records
+        if str(record.get("kind", "")).strip().casefold() == "hardware"
+    ]
+    if hardware_records:
+        matching_records = hardware_records
     has_inventory_record = bool(matching_records)
     if outbound_mode == "customer_supplied" and not has_inventory_record:
         try:
@@ -5404,7 +5437,7 @@ def sync_order_index(
                             )
                         ]
                         if config.storage_prepared:
-                            from .inventory import ignored_hardware_reason, resolve_inventory_items, TravelerItem
+                            from .inventory import ignored_hardware_reason, resolve_inventory_items, resolved_product_code, TravelerItem
 
                             mappings = inventory_mappings
                             if mappings is None:
@@ -5470,6 +5503,7 @@ def sync_order_index(
                                         observed_at=server_seen,
                                     )
                                     continue
+                                accepted_index = 0
                                 for factory_order, items in selected_groups:
                                     current_aimes_owner = next(
                                         (
@@ -5486,14 +5520,17 @@ def sync_order_index(
                                     ).fetchone()
                                     hardware_order_id = current_aimes_owner or (str(owner_row[0]).upper() if owner_row else order_hint.upper())
                                     for item in items:
+                                        accepted = resolution.get("accepted", [])[accepted_index] if accepted_index < len(resolution.get("accepted", [])) else {}
+                                        accepted_index += 1
                                         if ignored_hardware_reason(mappings, item.name, item.code) is not None:
                                             continue
+                                        product_code = resolved_product_code(resolution, accepted_index - 1, item.code)
                                         store.connection.execute(
                                             """insert into hardware_items(
-                                                order_id,factory_order,scope,product_code,name,spec,quantity,unit,
+                                                order_id,factory_order,scope,product_code,source_code,name,spec,quantity,unit,
                                                 source_type,source_path,remarks,updated_at
-                                            ) values(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                                            (hardware_order_id, factory_order.upper(), "factory_order", item.code, item.name,
+                                            ) values(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                            (hardware_order_id, factory_order.upper(), "factory_order", product_code, item.code, item.name,
                                              item.size, float(item.quantity), item.unit, "aicnc", str(path), "", server_seen),
                                         )
                                 resolved_mapping_order_ids.add(order_hint.upper())
@@ -5630,6 +5667,11 @@ def sync_order_index(
                     factory_order.upper() in changed_factory_orders
                     or item["order_id"].upper() in changed_order_level_ids
                 )
+                # An order-level material source can change independently of
+                # a factory-scoped hardware shipment.  Do not reopen that
+                # factory's shipped status when its hardware document is
+                # still confirmed locally.
+                and not _has_factory_hardware_outbound_record(item, outbound_records)
             ):
                 outbound_status = "需要更新"
         else:
@@ -6260,7 +6302,7 @@ def _refresh_server_preview_hardware(
     and again immediately before the final write.  Production facts remain
     untouched until the user confirms the combined write.
     """
-    from .inventory import TravelerItem, resolve_inventory_items
+    from .inventory import TravelerItem, resolve_inventory_items, resolved_product_code
     from .order_workflow import parse_fittings_groups
 
     owns_preview = preview_store is None
@@ -6361,22 +6403,24 @@ def _refresh_server_preview_hardware(
                     )
                     for item in resolution.get("ignored", [])
                 }
-                for item in items:
+                for index, item in enumerate(items):
                     identity = (
                         str(item.name or "").strip().casefold(),
                         str(item.code or "").strip().casefold(),
                     )
                     if identity in ignored:
                         continue
+                    product_code = resolved_product_code(resolution, index, str(item.code or ""))
                     preview.connection.execute(
                         """insert into hardware_items(
-                            order_id, factory_order, scope, product_code, name, spec,
+                            order_id, factory_order, scope, product_code, source_code, name, spec,
                             quantity, unit, source_type, source_path, active, updated_at
-                        ) values(?,?,?,?,?,?,?,?,?,?,1,?)""",
+                        ) values(?,?,?,?,?,?,?,?,?,?,?,1,?)""",
                         (
                             order_id,
                             factory_order,
                             "factory_order",
+                            product_code,
                             str(item.code or ""),
                             str(item.name or ""),
                             str(item.size or ""),
@@ -6973,7 +7017,7 @@ def _materialize_memory_hardware(
     skipped_orders: set[str],
 ) -> None:
     """Resolve mappings from captured fittings facts without reopening Server."""
-    from .inventory import TravelerItem, resolve_inventory_items
+    from .inventory import TravelerItem, resolve_inventory_items, resolved_product_code
 
     existing = [
         row for row in records.get("hardware_items", [])
@@ -7020,7 +7064,7 @@ def _materialize_memory_hardware(
             )
             for item in resolution.get("ignored", [])
         }
-        for item in items:
+        for index, item in enumerate(items):
             if not isinstance(item, dict):
                 continue
             identity = (
@@ -7033,7 +7077,8 @@ def _materialize_memory_hardware(
                 "order_id": order_id,
                 "factory_order": factory_order,
                 "scope": "factory_order",
-                "product_code": str(item.get("code", "")),
+                "product_code": resolved_product_code(resolution, index, str(item.get("code", ""))),
+                "source_code": str(item.get("code", "")),
                 "name": str(item.get("name", "")),
                 "spec": str(item.get("spec", "")),
                 "quantity": float(item.get("quantity", 0) or 0),

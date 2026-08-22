@@ -5,7 +5,9 @@ import tempfile
 import time
 import unittest
 import zipfile
+from contextlib import redirect_stdout
 from datetime import date
+from io import StringIO
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -27,6 +29,7 @@ from traveler_assistant.order_workflow import (
     parse_order_materials,
     parse_material_room_rows,
     _select_room_materials,
+    main as order_workflow_main,
     preview_payload,
     preview_order,
     preview_manual_hardware,
@@ -116,6 +119,23 @@ def make_fittings(path: Path, groups: list[tuple[str, float]]):
     wb.save(path)
 
 
+def make_rail_fittings(path: Path, left_quantity: float, right_quantity: float):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Page1"
+    ws.cell(1, 1).value = "Order No."
+    ws.cell(1, 3).value = "F100"
+    header = 6
+    for column, value in ((3, "Name"), (5, "Code"), (6, "Size"), (11, "Quantity")):
+        ws.cell(header, column).value = value
+    for row, name, quantity in ((7, "Left Rail", left_quantity), (8, "Right Rail", right_quantity)):
+        ws.cell(row, 3).value = name
+        ws.cell(row, 5).value = "H-Rail"
+        ws.cell(row, 9).value = "Piece"
+        ws.cell(row, 11).value = quantity
+    wb.save(path)
+
+
 def make_template(path: Path):
     project_template = Path(__file__).resolve().parents[1] / "resources/templates/Work Order Traveler.xlsx"
     shutil.copy2(project_template, path)
@@ -169,6 +189,28 @@ def picking_layout_snapshot(sheet):
 
 
 class OrderWorkflowTests(unittest.TestCase):
+    def test_memory_server_confirmation_command_reads_json_from_stdin(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp) / "state"
+            with patch(
+                "traveler_assistant.order_index.confirm_server_material_preview_memory",
+                return_value={"server_write_confirmed": True},
+            ), patch(
+                "traveler_assistant.order_workflow.sys.stdin",
+                StringIO('{"orders": []}'),
+            ), redirect_stdout(StringIO()):
+                self.assertEqual(
+                    order_workflow_main(
+                        [
+                            "confirm-server-material-preview-memory",
+                            "--confirm-write",
+                            "--state-dir",
+                            str(state),
+                        ]
+                    ),
+                    0,
+                )
+
     def test_database_order_traveler_uses_sqlite_facts_without_source_material(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -657,6 +699,18 @@ class OrderWorkflowTests(unittest.TestCase):
             with self.assertRaises(RuleError) as raised:
                 parse_fittings_groups(broken)
             self.assertEqual(raised.exception.code, "fittings_schema")
+
+    def test_equal_rail_pair_is_collapsed_but_mismatch_stops_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "Fittingslist.xlsx"
+            make_rail_fittings(path, 6, 6)
+            groups = parse_fittings_groups(path)
+            self.assertEqual([(item.name, item.quantity) for item in groups[0][1]], [("Left Rail", 6.0)])
+
+            make_rail_fittings(path, 6, 5)
+            with self.assertRaises(RuleError) as raised:
+                parse_fittings_groups(path)
+            self.assertEqual(raised.exception.code, "paired_rail_quantity_mismatch")
 
     def test_single_color_materials_and_integer_validation(self):
         with tempfile.TemporaryDirectory() as temp:

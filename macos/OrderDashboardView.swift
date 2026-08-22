@@ -27,6 +27,7 @@ let dashboardMessageRowHeight: CGFloat = 74
 let dashboardMessageViewportHeight = CGFloat(dashboardMessageVisibleRowCount) * dashboardMessageRowHeight
 let dashboardMessageHoverDelay: TimeInterval = 1.0
 let dashboardMessageHoverCloseGrace: TimeInterval = 0.8
+let panelMaterialHoverDelay: TimeInterval = 1.0
 
 func dashboardMessageHoverCanPresent(appIsActive: Bool, mainWindowIsFrontmost: Bool) -> Bool {
     appIsActive && mainWindowIsFrontmost
@@ -135,6 +136,7 @@ struct PanelMaterialHoverPreview<Content: View>: View {
     let material: OrderMaterialPreview
     let content: Content
     @State private var isPresented = false
+    @State private var hoverGeneration = 0
 
     init(material: OrderMaterialPreview, @ViewBuilder content: () -> Content) {
         self.material = material
@@ -167,9 +169,15 @@ struct PanelMaterialHoverPreview<Content: View>: View {
             .background(
                 PanelMaterialHoverTracking(
                     onMouseEntered: {
-                        isPresented = previewImage != nil
+                        hoverGeneration += 1
+                        let generation = hoverGeneration
+                        DispatchQueue.main.asyncAfter(deadline: .now() + panelMaterialHoverDelay) {
+                            guard generation == hoverGeneration else { return }
+                            isPresented = previewImage != nil
+                        }
                     },
                     onMouseExited: {
+                        hoverGeneration += 1
                         isPresented = false
                     }
                 )
@@ -435,6 +443,13 @@ func orderInstallationQuickSummary(_ item: OrderDashboardItem) -> String {
 private struct OrderDashboardProgressBar: View {
     let completed: Int
     let total: Int
+    let accessibilityTitle: String
+
+    init(completed: Int, total: Int, accessibilityTitle: String = "优化进度") {
+        self.completed = completed
+        self.total = total
+        self.accessibilityTitle = accessibilityTitle
+    }
 
     private var fraction: Double {
         orderDashboardProgressFraction(completed: completed, total: total)
@@ -456,7 +471,7 @@ private struct OrderDashboardProgressBar: View {
         }
         .frame(width: 76, height: 7)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("优化进度")
+        .accessibilityLabel(accessibilityTitle)
         .accessibilityValue("\(completed) / \(total)")
     }
 }
@@ -589,7 +604,15 @@ func dashboardMessages(
             operationDurations: []
         )
     }
-    return history + currentStatuses
+    let combined = history + currentStatuses
+    return combined.enumerated()
+        .sorted { left, right in
+            if left.element.time != right.element.time {
+                return left.element.time < right.element.time
+            }
+            return left.offset < right.offset
+        }
+        .map(\.element)
 }
 
 func dashboardVisibleMessages(_ messages: [DashboardMessage], isRunning: Bool) -> [DashboardMessage] {
@@ -643,9 +666,9 @@ func dashboardMessageDetailText(_ message: DashboardMessage) -> String {
     return detail
 }
 
-func dashboardMessageSummaryText(_ message: DashboardMessage) -> String {
+func dashboardMessageSummaryText(_ message: DashboardMessage, showsDuration: Bool = true) -> String {
     var summary = message.detail
-    if let duration = message.duration {
+    if showsDuration, let duration = message.duration {
         summary += "（总计用时 \(operationDurationText(duration))）"
     }
     return summary
@@ -1059,8 +1082,8 @@ struct OrderDashboardView: View {
     @State private var searchText = ""
     @State private var statusFilter = "未完成订单"
     @State private var showFactoryStock = false
-    @State private var showInventoryWorkspace = false
     @State private var showProductionSheet = false
+    @State private var pendingShipment: OrderShipmentRequest?
     @State private var showOutboundScope = false
     @State private var showServerFolderImporter = false
     @State private var activeMessageID: String?
@@ -1077,10 +1100,6 @@ struct OrderDashboardView: View {
 
     private var selectedFactory: OrderFactoryPreview? {
         model.orderFactories.first { $0.factoryOrder == selectedFactoryID }
-    }
-
-    private var selectedOutboundFactories: [OrderFactoryPreview] {
-        model.orderFactories.filter { selectedFactoryIDs.contains($0.factoryOrder) }
     }
 
     private var availableHardwareFactoryOrders: Set<String> {
@@ -1130,37 +1149,30 @@ struct OrderDashboardView: View {
             )
             .frame(minWidth: 760, idealWidth: 900, minHeight: 520, idealHeight: 640)
         }
-        .sheet(isPresented: $showInventoryWorkspace) {
-            InventoryView(
-                model: model,
-                onClose: {
-                    showInventoryWorkspace = false
-                    model.refreshDashboardOrdersAfterOutbound()
-                },
-                orderContextID: model.selectedOrderId,
-                orderContextFactoryNames: selectedOutboundFactories.map(\.orderName),
-                orderContextFactoryOrders: selectedFactoryIDs.sorted()
-            )
-                .frame(width: AppLayout.inventoryOrderContextWidth, height: 720)
-        }
         .sheet(isPresented: $showProductionSheet) {
             ProductionSheet(
                 model: model,
                 orderID: model.selectedOrderId,
                 factoryOrders: selectedFactoryIDs.sorted(),
-                onPrepared: { batchNumber in
-                    showProductionSheet = false
-                    guard !batchNumber.isEmpty else { return }
-                    model.previewOrderInventory(
-                        orderID: model.selectedOrderId,
-                        factoryOrderNames: selectedOutboundFactories.map(\.orderName),
-                        factoryOrders: selectedFactoryIDs.sorted(),
-                        productionBatchNumber: batchNumber
+                onClose: { showProductionSheet = false }
+            )
+            .frame(width: 620, height: 560)
+        }
+        .sheet(item: $pendingShipment) { request in
+            OrderShipmentConfirmationSheet(
+                model: model,
+                orderID: request.orderID,
+                factoryOrders: request.factoryOrders,
+                onCancel: { pendingShipment = nil },
+                onConfirm: {
+                    pendingShipment = nil
+                    model.startDirectOrderShipment(
+                        orderID: request.orderID,
+                        factoryOrders: request.factoryOrders
                     )
-                    showInventoryWorkspace = true
                 }
             )
-            .frame(width: 720, height: 560)
+            .frame(width: 620, height: 560)
         }
         .sheet(isPresented: $showOutboundScope) {
             OutboundScopeSheet(
@@ -1318,8 +1330,11 @@ struct OrderDashboardView: View {
             durationsBySource: model.dashboardOperationDurations,
             operationDurationsBySource: model.dashboardOperationStageDurations
         )
-        let visibleMessages = dashboardVisibleMessages(messages, isRunning: model.orderRunning)
-        let currentOperation = dashboardCurrentOperation(messages: messages, isRunning: model.orderRunning)
+        let operationRunning = model.orderRunning
+            || model.inventoryRunning
+            || dashboardStatusIsInProgress(model.dashboardSyncStatus)
+        let visibleMessages = dashboardVisibleMessages(messages, isRunning: operationRunning)
+        let currentOperation = dashboardCurrentOperation(messages: messages, isRunning: operationRunning)
         let scrollKey = dashboardMessageScrollKey(visibleMessages)
         return AppSurfaceCard(padding: 0) {
             VStack(spacing: 0) {
@@ -1382,7 +1397,7 @@ struct OrderDashboardView: View {
                 currentOperationIcon(display)
                 Text(display.isRunning ? "当前操作" : "最近结果")
                     .font(.callout.weight(.semibold))
-                Text(dashboardMessageSummaryText(display.message))
+                Text(dashboardMessageSummaryText(display.message, showsDuration: !display.isRunning))
                     .font(.callout)
                     .lineLimit(1)
                 Spacer(minLength: 0)
@@ -1485,8 +1500,9 @@ struct OrderDashboardView: View {
             tableHeader("订单")
             tableHeader("状态")
             tableHeader("工厂单")
-            tableHeader("优化进度")
             tableHeader("材料")
+            tableHeader("优化进度")
+            tableHeader("生产进度")
             tableHeader("出货进度")
             tableHeader("更新时间")
             tableHeader("操作")
@@ -1546,6 +1562,12 @@ struct OrderDashboardView: View {
                     }
                     tableCell {
                         VStack(spacing: 4) {
+                            Text(item.materialStatus)
+                            if !item.validationStatus.isEmpty { Text(item.validationStatus).font(.caption2).foregroundColor(.secondary) }
+                        }
+                    }
+                    tableCell {
+                        VStack(spacing: 4) {
                             Text(item.optimizationProgress)
                                 .fontWeight(.semibold)
                             if item.factoryCount > 0 {
@@ -1557,17 +1579,27 @@ struct OrderDashboardView: View {
                         }
                     }
                     tableCell {
-                        VStack(spacing: 3) {
-                            Text(item.materialStatus)
-                            if !item.validationStatus.isEmpty { Text(item.validationStatus).font(.caption2).foregroundColor(.secondary) }
+                        VStack(spacing: 4) {
+                            Text(item.productionProgress)
+                                .fontWeight(.semibold)
+                            if item.factoryCount > 0 {
+                                OrderDashboardProgressBar(
+                                    completed: item.producedCount,
+                                    total: item.factoryCount,
+                                    accessibilityTitle: "生产进度"
+                                )
+                            }
                         }
                     }
                     tableCell {
                         VStack(spacing: 3) {
                             Text(item.outboundProgress)
                             if item.factoryCount > 0 {
-                                Text(item.shippedCount == item.factoryCount ? "已出库" : item.shippedCount > 0 ? "部分出库" : "未出库")
-                                    .font(.caption2).foregroundColor(.secondary)
+                                OrderDashboardProgressBar(
+                                    completed: item.shippedCount,
+                                    total: item.factoryCount,
+                                    accessibilityTitle: "出货进度"
+                                )
                             }
                         }
                     }
@@ -1596,13 +1628,10 @@ struct OrderDashboardView: View {
                         showProductionSheet = true
                     },
                     onOpenOutbound: {
-                        model.previewOrderInventory(
+                        pendingShipment = OrderShipmentRequest(
                             orderID: item.orderId,
-                            factoryOrderNames: item.factories.filter { selectedFactoryIDs.contains($0.factoryOrder) }.map(\.orderName),
-                            factoryOrders: selectedFactoryIDs.sorted(),
-                            shipmentOnly: true
+                            factoryOrders: selectedFactoryIDs.sorted()
                         )
-                        showInventoryWorkspace = true
                     },
                     onOpenScope: { showOutboundScope = true },
                     orderType: item.orderType,
@@ -1652,6 +1681,12 @@ struct OrderDashboardView: View {
         default: return .neutral
         }
     }
+}
+
+private struct OrderShipmentRequest: Identifiable {
+    let id = UUID()
+    let orderID: String
+    let factoryOrders: [String]
 }
 
 struct OrderDashboardMetricsView: View {
@@ -2107,7 +2142,7 @@ struct OrderDashboardDetailCard: View {
                     .buttonStyle(.borderedProminent)
                     .appActionButton(minWidth: 96)
                     .disabled(
-                        isCompletedOrder || selectedFactoryIDs.isEmpty ||
+                        isCompletedOrder || model.orderRunning || model.inventoryRunning || selectedFactoryIDs.isEmpty ||
                         orderDashboardHasProducedSelection(selectedFactoryIDs, produced: produced) ||
                         selectedFactoryIDs.contains { factoryID in
                             dashboardFactories.first(where: { $0.factoryOrder == factoryID })?.optimized != true
@@ -2119,7 +2154,12 @@ struct OrderDashboardDetailCard: View {
                     .appActionButton(minWidth: 96)
                     .disabled(
                         isCompletedOrder
+                        || model.orderRunning
+                        || model.inventoryRunning
                         || selectedFactoryIDs.isEmpty
+                        || selectedFactoryIDs.contains { factoryID in
+                            dashboardFactories.first(where: { $0.factoryOrder == factoryID })?.produced != true
+                        }
                         || orderDashboardHasShippedSelection(
                             selectedFactoryIDs,
                             statuses: Dictionary(uniqueKeysWithValues: dashboardFactories.map {
@@ -2130,7 +2170,7 @@ struct OrderDashboardDetailCard: View {
                     .help(
                         isCompletedOrder
                             ? "订单已出货，不能再处理出库"
-                            : "将所选工厂单的五金出货；板材和封边只在生产时处理"
+                            : "只有已生产且未出库的工厂单可以出货；有五金则出库五金，没有五金则只更新出货状态"
                     )
             }
             .fixedSize(horizontal: true, vertical: false)
@@ -2141,11 +2181,12 @@ struct OrderDashboardDetailCard: View {
 
     private var panelColorsSummary: some View {
         let materials = orderDashboardPanelMaterials(model.orderMaterials)
-        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+        return HStack(alignment: .center, spacing: 8) {
             Text("Panel颜色")
                 .font(.subheadline.weight(.semibold))
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: true, vertical: false)
+            Spacer(minLength: 12)
             if materials.isEmpty {
                 Text("—")
                     .font(.title3.weight(.medium))
@@ -2165,9 +2206,11 @@ struct OrderDashboardDetailCard: View {
                         }
                     }
                 }
+                .frame(maxWidth: 440, alignment: .trailing)
                 .layoutPriority(1)
             }
         }
+        .frame(minHeight: AppLayout.controlHeight, alignment: .center)
         .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
@@ -2265,9 +2308,24 @@ struct ProductionSheet: View {
     @ObservedObject var model: AppModel
     let orderID: String
     let factoryOrders: [String]
-    let onPrepared: (String) -> Void
+    let onClose: () -> Void
     @State private var didLoad = false
-    @State private var preparing = false
+    @State private var operationState: SheetOperationState = .idle
+    @State private var operationMessage = ""
+    @State private var retryAllowed = false
+
+    private enum SheetOperationState {
+        case idle
+        case preparing
+        case running
+        case success
+        case failure
+        case uncertain
+    }
+
+    private var isProcessing: Bool {
+        operationState == .preparing || operationState == .running
+    }
 
     private var selectedQuantityCount: Int {
         model.productionMaterials.filter { (Double($0.quantity) ?? 0) > 0 }.count
@@ -2282,11 +2340,14 @@ struct ProductionSheet: View {
                         .font(.caption).foregroundColor(.secondary)
                 }
                 Spacer()
-                if preparing { ProgressView().controlSize(.small) }
+                if isProcessing { ProgressView().controlSize(.small) }
             }
             Divider()
             if !model.productionPreviewStatus.isEmpty {
                 Text(model.productionPreviewStatus).font(.caption).foregroundColor(.secondary)
+            }
+            if !operationMessage.isEmpty {
+                productionOperationBanner
             }
             if model.productionMaterials.isEmpty {
                 ContentUnavailableView("没有可生产的订单材料", systemImage: "shippingbox", description: Text("请确认工厂单已优化，且订单材料已经写入数据库。"))
@@ -2296,21 +2357,50 @@ struct ProductionSheet: View {
                     .font(.subheadline.weight(.semibold))
                 ScrollView {
                     VStack(spacing: 0) {
-                        ForEach(Array(model.productionMaterials.indices), id: \.self) { index in
+                        HStack(spacing: 10) {
+                            Text("类型")
+                                .frame(width: 76, alignment: .leading)
+                            Text("材料名")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Text("单位")
+                                .frame(width: 52, alignment: .center)
+                            Text("剩余")
+                                .frame(width: 76, alignment: .trailing)
+                            Text("数量")
+                                .frame(width: 88, alignment: .center)
+                        }
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                        .padding(.vertical, 7)
+                        Divider()
+                        ForEach(sortedProductionMaterialDrafts(model.productionMaterials)) { material in
+                            if let index = model.productionMaterials.firstIndex(where: { $0.id == material.id }) {
                             HStack(spacing: 10) {
-                                Text(model.productionMaterials[index].label)
+                                Text(productionMaterialTypeDisplayName(material))
+                                    .frame(width: 76, alignment: .leading)
+                                Text(productionMaterialName(material))
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                Text("剩余 \(model.productionMaterials[index].remainingQuantity, specifier: "%g")")
+                                    .lineLimit(2)
+                                Text(material.unit.isEmpty ? "—" : material.unit)
+                                    .frame(width: 52, alignment: .center)
+                                Text("\(material.remainingQuantity, specifier: "%g")")
                                     .font(.caption).foregroundColor(.secondary)
+                                    .frame(width: 76, alignment: .trailing)
                                 TextField("数量", text: Binding(
                                     get: { model.productionMaterials[index].quantity },
                                     set: { model.productionMaterials[index].quantity = $0 }
                                 ))
                                 .textFieldStyle(.roundedBorder)
-                                .frame(width: 100)
+                                .frame(width: 88)
+                                .disabled(
+                                    material.remainingQuantity <= 0
+                                    || isProcessing
+                                )
                             }
+                            .opacity(material.remainingQuantity <= 0 ? 0.55 : 1)
                             .padding(.vertical, 8)
                             Divider()
+                            }
                         }
                     }
                 }
@@ -2318,18 +2408,18 @@ struct ProductionSheet: View {
             }
             HStack {
                 Spacer()
-                Button("关闭") { onPrepared("") }
+                Button(operationState == .success ? "完成" : "关闭") { onClose() }
                     .buttonStyle(.bordered)
-                    .disabled(preparing)
-                Button("继续到库存预检") {
-                    preparing = true
-                    model.prepareProduction(orderID: orderID, factoryOrders: factoryOrders, materials: model.productionMaterials) { batch in
-                        preparing = false
-                        if let batch, !batch.isEmpty { onPrepared(batch) }
-                    }
+                    .disabled(isProcessing)
+                if operationState == .failure && retryAllowed {
+                    Button("重试") { submitProduction() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isProcessing)
+                } else if operationState == .idle {
+                    Button("确认生产并扣减材料") { submitProduction() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(selectedQuantityCount == 0 || model.productionMaterials.isEmpty)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(preparing || selectedQuantityCount == 0 || model.productionMaterials.isEmpty)
             }
         }
         .padding(22)
@@ -2338,6 +2428,166 @@ struct ProductionSheet: View {
             didLoad = true
             model.loadProductionPreview(orderID: orderID, factoryOrders: factoryOrders)
         }
+    }
+
+    private var productionOperationBanner: some View {
+        let color: Color
+        let icon: String
+        let title: String
+        switch operationState {
+        case .preparing:
+            color = AppPalette.accent
+            icon = "clock.arrow.circlepath"
+            title = "正在准备生产"
+        case .running:
+            color = AppPalette.accent
+            icon = "shippingbox"
+            title = "正在执行生产出库"
+        case .success:
+            color = AppPalette.success
+            icon = "checkmark.circle.fill"
+            title = "生产出库成功"
+        case .failure:
+            color = AppPalette.danger
+            icon = "xmark.octagon.fill"
+            title = "生产出库失败"
+        case .uncertain:
+            color = AppPalette.warning
+            icon = "questionmark.circle.fill"
+            title = "库存结果待核对"
+        case .idle:
+            color = .secondary
+            icon = "info.circle"
+            title = ""
+        }
+        return HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .foregroundColor(color)
+            VStack(alignment: .leading, spacing: 3) {
+                if !title.isEmpty {
+                    Text(title).font(.subheadline.weight(.semibold)).foregroundColor(color)
+                }
+                Text(operationMessage)
+                    .font(.caption)
+                    .foregroundColor(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(color.opacity(0.10))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func submitProduction() {
+        guard !isProcessing else { return }
+        operationState = .preparing
+        operationMessage = "正在校验本次材料数量，尚未操作库存系统……"
+        retryAllowed = false
+        model.prepareProduction(
+            orderID: orderID,
+            factoryOrders: factoryOrders,
+            materials: model.productionMaterials,
+            onResult: { batchNumber, preparationError in
+                guard let batchNumber, !batchNumber.isEmpty else {
+                    operationState = .failure
+                    operationMessage = preparationError ?? "生产准备失败；本次未操作库存系统，也未写入本地生产完成记录"
+                    return
+                }
+                operationState = .running
+                operationMessage = "材料数量校验通过，正在连接库存系统执行出库……"
+                model.startDirectProduction(
+                    orderID: orderID,
+                    factoryOrders: factoryOrders,
+                    materials: model.productionMaterials,
+                    batchNumber: batchNumber
+                ) { result in
+                    switch result.state {
+                    case .success:
+                        operationState = .success
+                    case .failure:
+                        operationState = .failure
+                    case .uncertain:
+                        operationState = .uncertain
+                    }
+                    operationMessage = result.message
+                    retryAllowed = result.retryAllowed
+                }
+            }
+        )
+    }
+}
+
+struct OrderShipmentConfirmationSheet: View {
+    @ObservedObject var model: AppModel
+    let orderID: String
+    let factoryOrders: [String]
+    let onCancel: () -> Void
+    let onConfirm: () -> Void
+
+    private var fittings: [OrderFittingPreview] {
+        model.orderFittings.filter { factoryOrders.contains($0.factoryOrder) && !$0.ignored && $0.quantity > 0 }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("确认出货").font(.title2.weight(.semibold))
+                    Text("订单 \(orderID) · 已选择 \(factoryOrders.count) 个已生产工厂单")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                Spacer()
+                AppStatusBadge(text: "库存余额不作门禁", kind: .warning)
+            }
+            Divider()
+            Text("本次只把数据库中已确认的五金内容直接提交库存系统；不重复做 SKU 映射，也不查询库存余额。")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            AppSurfaceCard {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("本次操作内容").font(.headline)
+                    Text("工厂单：\(factoryOrders.sorted().joined(separator: "、"))")
+                        .font(.subheadline)
+                    Divider()
+                    if fittings.isEmpty {
+                        Text("没有可出库五金；确认后只更新所选工厂单的出货状态，不创建库存出库单")
+                            .foregroundColor(AppPalette.warning)
+                    } else {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 6) {
+                                ForEach(fittings) { fitting in
+                                    HStack(spacing: 8) {
+                                        Text(fitting.orderName.isEmpty ? fitting.factoryOrder : fitting.orderName)
+                                            .frame(width: 150, alignment: .leading)
+                                        Text(fitting.name.isEmpty ? fitting.code : fitting.name)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                        Text(fitting.quantity.formatted())
+                                            .frame(width: 70, alignment: .trailing)
+                                    }
+                                    .font(.subheadline)
+                                }
+                            }
+                        }
+                        .frame(maxHeight: 260)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+            HStack {
+                Spacer()
+                Button("取消") { onCancel() }
+                    .buttonStyle(.bordered)
+                    .appActionButton(minWidth: 90)
+                Button("确认并直接出货") { onConfirm() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(AppPalette.danger)
+                    .appActionButton(minWidth: 150)
+                    .disabled(model.inventoryRunning)
+            }
+        }
+        .padding(22)
     }
 }
 
@@ -3766,16 +4016,29 @@ struct ServerWriteConfirmationSheet: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
             HStack(spacing: 8) {
-                Button("本次写入五金") {
-                    skippedHardwareOrderIDs.remove(orderID)
+                if skipped {
+                    Button("本次写入五金") {
+                        skippedHardwareOrderIDs.remove(orderID)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.secondary)
+                    Button("本次不写入五金") {
+                        skippedHardwareOrderIDs.insert(orderID)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(AppPalette.warning)
+                } else {
+                    Button("本次写入五金") {
+                        skippedHardwareOrderIDs.remove(orderID)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(AppPalette.success)
+                    Button("本次不写入五金") {
+                        skippedHardwareOrderIDs.insert(orderID)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.secondary)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(skipped ? AppPalette.accent : AppPalette.success)
-                Button("本次不写入五金") {
-                    skippedHardwareOrderIDs.insert(orderID)
-                }
-                .buttonStyle(.bordered)
-                .tint(skipped ? AppPalette.warning : .secondary)
             }
             if skipped {
                 let requirements = model.serverHardwareMappingRequirements.filter {
@@ -3798,13 +4061,16 @@ struct ServerWriteConfirmationSheet: View {
     }
 
     private func materialChangeRow(_ material: ServerWriteMaterialChange) -> some View {
-        let label = [material.materialType, material.color, material.thickness]
+        let label = [material.materialType, material.color, material.thickness, material.edge]
             .filter { !$0.isEmpty }.joined(separator: " · ")
         return HStack(spacing: 10) {
             Image(systemName: material.materialType.caseInsensitiveCompare("edge") == .orderedSame ? "line.3.horizontal" : "square.3.layers.3d")
                 .foregroundColor(AppPalette.accent)
                 .frame(width: 24)
-            Text(label).font(.body.weight(.medium)).frame(maxWidth: .infinity, alignment: .leading)
+            Text(label)
+                .font(.body.weight(.medium))
+                .frame(width: 260, alignment: .leading)
+                .lineLimit(2)
             Text(material.changeType).font(.caption).foregroundColor(material.changeType == "删除" ? AppPalette.danger : AppPalette.warning)
             Text("\(formatQuantity(material.oldQuantity)) → \(formatQuantity(material.newQuantity)) \(material.unit)")
                 .font(.body.monospacedDigit())

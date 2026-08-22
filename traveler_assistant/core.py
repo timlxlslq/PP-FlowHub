@@ -614,5 +614,26 @@ def parse_fittings_groups(
                 unit=_text(sheet.cell(row, 9).value),
                 quantity=_number(sheet.cell(row, 11).value),
             ))
+        # A Left Rail and a Right Rail with the same quantity are the two
+        # sides of one physical rail pair.  Keep one source row so downstream
+        # inventory quantities represent pairs rather than individual sides.
+        left = [item for item in items if _normalize_name(item.name) == "LEFTRAIL"]
+        right = [item for item in items if _normalize_name(item.name) == "RIGHTRAIL"]
+        if left and right and (
+            len(left) != 1
+            or len(right) != 1
+            or left[0].quantity != right[0].quantity
+        ):
+            raise RuleError(
+                "paired_rail_quantity_mismatch",
+                f"工厂单 {factory} 的 Left Rail / Right Rail 数量不一致，"
+                f"Left Rail={left[0].quantity:g}、Right Rail={right[0].quantity:g}；"
+                "请人工核对后再写入。",
+                factory_order=factory,
+                left_quantity=left[0].quantity,
+                right_quantity=right[0].quantity,
+            )
+        if len(left) == 1 and len(right) == 1 and left[0].quantity == right[0].quantity:
+            items = [item for item in items if item is not right[0]]
         groups.append((factory, items))
     return groups

@@ -227,6 +227,7 @@ def ensure_schema(path: Path) -> None:
                 factory_order text not null default '',
                 scope text not null default 'factory_order',
                 product_code text not null default '',
+                source_code text not null default '',
                 name text not null default '',
                 spec text not null default '',
                 quantity real not null default 0,
@@ -263,6 +264,22 @@ def ensure_schema(path: Path) -> None:
             );
             create index if not exists idx_outbound_document_factories_factory
                 on outbound_document_factories(order_id, factory_order);
+            create table if not exists inventory_operations(
+                operation_id text primary key,
+                operation_kind text not null,
+                order_id text not null default '',
+                factory_orders_json text not null default '[]',
+                payload_json text not null default '{}',
+                payload_fingerprint text not null,
+                status text not null default 'prepared',
+                document_results_json text not null default '[]',
+                attempt_count integer not null default 0,
+                last_error text not null default '',
+                created_at text not null,
+                updated_at text not null
+            );
+            create index if not exists idx_inventory_operations_lookup
+                on inventory_operations(operation_kind, order_id, payload_fingerprint, updated_at desc);
             create table if not exists backup_records(
                 id integer primary key,
                 backup_path text not null,
@@ -310,6 +327,13 @@ def ensure_schema(path: Path) -> None:
         material_columns = {
             row[1] for row in connection.execute("pragma table_info(material_items)").fetchall()
         }
+        hardware_columns = {
+            row[1] for row in connection.execute("pragma table_info(hardware_items)").fetchall()
+        }
+        if "source_code" not in hardware_columns:
+            connection.execute(
+                "alter table hardware_items add column source_code text not null default ''"
+            )
         if {"factory_order", "scope"}.intersection(material_columns):
             connection.execute("drop index if exists idx_material_items_order")
             connection.execute("alter table material_items rename to material_items_legacy")

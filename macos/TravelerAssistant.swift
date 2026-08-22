@@ -2,6 +2,8 @@ import SwiftUI
 import AppKit
 import Security
 
+private let inventoryInactivityTimeoutSeconds: TimeInterval = 150
+
 func businessFriendlyMessage(_ raw: String, operation: String) -> String {
     let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     let fallback = "\(operation)未完成。请重试；如果仍然失败，请检查相关文件、网络和登录状态后再操作。"
@@ -94,8 +96,107 @@ struct ProductionMaterialDraft: Identifiable {
     let id: String
     let key: String
     let label: String
+    let materialType: String
+    let color: String
+    let thickness: String
+    let edge: String
+    let unit: String
     let remainingQuantity: Double
     var quantity: String
+}
+
+func productionMaterialTypeDisplayName(_ material: ProductionMaterialDraft) -> String {
+    switch material.materialType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "plywood": return "Plywood"
+    case "panel", "back": return "Panel"
+    case "edge": return "封边"
+    default: return material.materialType.isEmpty ? "材料" : material.materialType
+    }
+}
+
+func productionMaterialName(_ material: ProductionMaterialDraft) -> String {
+    let type = material.materialType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if type == "plywood" {
+        let thickness = Double(material.thickness) ?? 0
+        return orderMaterialDisplayName(OrderMaterialPreview(
+            kind: "plywood",
+            thickness: thickness,
+            color: "",
+            quantity: 0
+        ))
+    }
+    if type == "panel" || type == "back" {
+        let color = material.color.trimmingCharacters(in: .whitespacesAndNewlines)
+        let thickness = material.thickness.trimmingCharacters(in: .whitespacesAndNewlines)
+        let thicknessText = thickness.isEmpty ? "" : "\(thickness)mm"
+        return [color, thicknessText].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+    if type == "edge" {
+        return material.color.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    return material.label
+}
+
+private func productionMaterialTypeRank(_ material: ProductionMaterialDraft) -> Int {
+    switch material.materialType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "plywood": return 0
+    case "panel", "back": return 1
+    case "edge": return 2
+    default: return 3
+    }
+}
+
+private func productionMaterialPlywoodRank(_ material: ProductionMaterialDraft) -> Int {
+    let thickness = Double(material.thickness) ?? .greatestFiniteMagnitude
+    if abs(thickness - 18) < 0.01 { return 0 }
+    if abs(thickness - 14.5) < 0.01 { return 1 }
+    if abs(thickness - 5.4) < 0.01 { return 2 }
+    return 3
+}
+
+func sortedProductionMaterialDrafts(_ materials: [ProductionMaterialDraft]) -> [ProductionMaterialDraft] {
+    materials.sorted { left, right in
+        let leftType = productionMaterialTypeRank(left)
+        let rightType = productionMaterialTypeRank(right)
+        if leftType != rightType { return leftType < rightType }
+        if leftType == 0 {
+            let leftPlywood = productionMaterialPlywoodRank(left)
+            let rightPlywood = productionMaterialPlywoodRank(right)
+            if leftPlywood != rightPlywood { return leftPlywood < rightPlywood }
+        }
+        if leftType == 1 {
+            let leftColor = left.color.trimmingCharacters(in: .whitespacesAndNewlines)
+                .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            let rightColor = right.color.trimmingCharacters(in: .whitespacesAndNewlines)
+                .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            let colorOrder = leftColor.localizedStandardCompare(rightColor)
+            if colorOrder != .orderedSame { return colorOrder == .orderedAscending }
+            let leftThickness = Double(left.thickness) ?? .greatestFiniteMagnitude
+            let rightThickness = Double(right.thickness) ?? .greatestFiniteMagnitude
+            let leftThicknessRank = abs(leftThickness - 19.1) < 0.01 ? 0 : (abs(leftThickness - 8) < 0.01 || abs(leftThickness - 9) < 0.01 ? 1 : 2)
+            let rightThicknessRank = abs(rightThickness - 19.1) < 0.01 ? 0 : (abs(rightThickness - 8) < 0.01 || abs(rightThickness - 9) < 0.01 ? 1 : 2)
+            if leftThicknessRank != rightThicknessRank { return leftThicknessRank < rightThicknessRank }
+            if abs(leftThickness - rightThickness) > 0.01 { return leftThickness < rightThickness }
+        }
+        let leftName = productionMaterialName(left)
+        let rightName = productionMaterialName(right)
+        let nameOrder = leftName.localizedStandardCompare(rightName)
+        if nameOrder != .orderedSame { return nameOrder == .orderedAscending }
+        return left.id.localizedStandardCompare(right.id) == .orderedAscending
+    }
+}
+
+enum ProductionOperationState {
+    case success
+    case failure
+    case uncertain
+}
+
+struct ProductionOperationResult {
+    let state: ProductionOperationState
+    let message: String
+    let documentNumbers: [String]
+    let retryAllowed: Bool
 }
 
 struct OrderInstallationDay: Identifiable, Equatable {
@@ -228,10 +329,35 @@ struct ServerWriteMaterialChange: Identifiable {
     let materialType: String
     let color: String
     let thickness: String
+    let edge: String
     let unit: String
     let oldQuantity: Double
     let newQuantity: Double
     let delta: Double
+
+    init(
+        id: String,
+        changeType: String,
+        materialType: String,
+        color: String,
+        thickness: String,
+        edge: String,
+        unit: String,
+        oldQuantity: Double,
+        newQuantity: Double,
+        delta: Double
+    ) {
+        self.id = id
+        self.changeType = changeType
+        self.materialType = materialType
+        self.color = color
+        self.thickness = thickness
+        self.edge = edge
+        self.unit = unit
+        self.oldQuantity = oldQuantity
+        self.newQuantity = newQuantity
+        self.delta = delta
+    }
 
     init?(row: [String: Any], index: Int) {
         let type = row["material_type"] as? String ?? ""
@@ -241,10 +367,39 @@ struct ServerWriteMaterialChange: Identifiable {
         self.materialType = type
         self.color = row["color"] as? String ?? ""
         self.thickness = row["thickness"] as? String ?? ""
+        self.edge = row["edge"] as? String ?? ""
         self.unit = row["unit"] as? String ?? ""
         self.oldQuantity = (row["old_quantity"] as? NSNumber)?.doubleValue ?? 0
         self.newQuantity = (row["new_quantity"] as? NSNumber)?.doubleValue ?? 0
         self.delta = (row["delta"] as? NSNumber)?.doubleValue ?? 0
+    }
+
+    static func aggregated(_ changes: [ServerWriteMaterialChange]) -> [ServerWriteMaterialChange] {
+        var indexByKey: [String: Int] = [:]
+        var result: [ServerWriteMaterialChange] = []
+        for change in changes {
+            let key = [change.materialType, change.color, change.thickness, change.edge, change.unit]
+                .joined(separator: "|")
+            if let index = indexByKey[key] {
+                let current = result[index]
+                result[index] = ServerWriteMaterialChange(
+                    id: current.id,
+                    changeType: current.changeType == change.changeType ? current.changeType : "数量变化",
+                    materialType: current.materialType,
+                    color: current.color,
+                    thickness: current.thickness,
+                    edge: current.edge,
+                    unit: current.unit,
+                    oldQuantity: current.oldQuantity + change.oldQuantity,
+                    newQuantity: current.newQuantity + change.newQuantity,
+                    delta: current.delta + change.delta
+                )
+            } else {
+                indexByKey[key] = result.count
+                result.append(change)
+            }
+        }
+        return result
     }
 }
 
@@ -388,9 +543,11 @@ struct ServerWriteOrderPreview: Identifiable {
         self.materials = (row["materials"] as? [[String: Any]] ?? []).enumerated().compactMap {
             ServerWriteMaterialPreview(row: $0.element, index: $0.offset)
         }
-        self.materialChanges = (row["material_changes"] as? [[String: Any]] ?? []).enumerated().compactMap {
-            ServerWriteMaterialChange(row: $0.element, index: $0.offset)
-        }
+        self.materialChanges = ServerWriteMaterialChange.aggregated(
+            (row["material_changes"] as? [[String: Any]] ?? []).enumerated().compactMap {
+                ServerWriteMaterialChange(row: $0.element, index: $0.offset)
+            }
+        )
         self.factories = (row["factories"] as? [[String: Any]] ?? []).compactMap(ServerWriteFactoryPreview.init)
         self.excludedFactories = (row["excluded_factories"] as? [[String: Any]] ?? []).compactMap(ServerWriteFactoryPreview.init)
         self.hardwareChanges = (row["hardware_changes"] as? [[String: Any]] ?? []).enumerated().compactMap {
@@ -993,6 +1150,21 @@ func operationDurationText(_ duration: TimeInterval) -> String {
     return String(format: "%.2f 秒", rounded)
 }
 
+func inventoryFailureNeedsVerification(_ message: String) -> Bool {
+    let markers = [
+        "请先按单号核对",
+        "请先按单据号核对",
+        "可能已经保存",
+        "保存响应成功",
+        "请人工核实",
+        "为避免重复出库",
+        "后续单据结果需要先查询",
+        "没有进展",
+        "浏览器操作超过",
+    ]
+    return markers.contains(where: { message.contains($0) })
+}
+
 struct DashboardOperationDuration: Equatable, Identifiable {
     let id: String
     let label: String
@@ -1017,7 +1189,7 @@ func dashboardFlatOperationDurations(_ stages: [[String: Any]]) -> [DashboardOpe
 
 private struct DashboardOperationStart {
     let label: String
-    let startedAt: Date
+    let startedAtUptime: TimeInterval
 }
 
 private extension Double {
@@ -1029,6 +1201,27 @@ private extension Double {
 
 func dashboardClockTime(_ date: Date = Date()) -> String {
     date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).second(.twoDigits))
+}
+
+func dashboardInventoryProgressText(_ message: String) -> String {
+    var text = message.trimmingCharacters(in: .whitespacesAndNewlines)
+    // Backend progress events include an elapsed-time prefix. It is useful
+    // in the operation log but too noisy for the one-line dashboard banner.
+    if text.hasPrefix("[+"), let closing = text.firstIndex(of: "]") {
+        let afterClosing = text.index(after: closing)
+        text = String(text[afterClosing...]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    if text.hasPrefix("库存系统：") {
+        text = String(text.dropFirst("库存系统：".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    guard !text.isEmpty else { return "正在处理库存系统操作…" }
+    if text.hasPrefix("正在") {
+        return text
+    }
+    if text.hasPrefix("已") {
+        return "正在处理：\(text)"
+    }
+    return "正在\(text)"
 }
 
 /// Format persisted ISO timestamps only at the presentation boundary.
@@ -1792,12 +1985,15 @@ final class AppModel: ObservableObject {
             dashboardOperationDurations[source] = 0
             dashboardOperationDetails[source] = []
         }
-        dashboardOperationStartedAt[source] = DashboardOperationStart(label: label, startedAt: Date())
+        dashboardOperationStartedAt[source] = DashboardOperationStart(
+            label: label,
+            startedAtUptime: ProcessInfo.processInfo.systemUptime
+        )
     }
 
     private func finishDashboardOperation(_ source: String) {
         guard let start = dashboardOperationStartedAt.removeValue(forKey: source) else { return }
-        let duration = max(0, Date().timeIntervalSince(start.startedAt))
+        let duration = max(0, ProcessInfo.processInfo.systemUptime - start.startedAtUptime)
         var stages = dashboardOperationStageDurations[source] ?? []
         stages.append(DashboardOperationDuration(label: start.label, duration: duration))
         dashboardOperationStageDurations[source] = stages
@@ -2313,7 +2509,22 @@ final class AppModel: ObservableObject {
             self.serverWriteConfirmationFinished = true
             self.dashboardServerStatus = "✅ 已确认写入 \(orderText) 的材料和五金\(skippedText)"
             self.dashboardSyncStatus = self.dashboardServerStatus
-            self.showServerWriteConfirmation = false
+            let duration = self.dashboardOperationDurations["server"] ?? 0
+            self.dashboardActivity.insert(
+                InventoryStep(
+                    time: dashboardClockTime(),
+                    title: "Server 材料写入完成",
+                    detail: "订单 \(orderText) 的订单级材料和工厂单五金已写入本地数据库\(skippedText)",
+                    state: "success",
+                    paths: preview.sourceFolders,
+                    operationDetails: [
+                        "写入范围：订单级板材/封边和对应工厂单五金",
+                        "确认结果：\(orderText)",
+                    ],
+                    duration: duration
+                ),
+                at: 0
+            )
             self.refreshDashboardAfterServerWrite()
         }
     }
@@ -2785,26 +2996,236 @@ final class AppModel: ObservableObject {
                 let kind = item["material_type"] as? String ?? ""
                 let color = item["color"] as? String ?? ""
                 let thickness = item["thickness"] as? String ?? ""
+                let edge = item["edge"] as? String ?? ""
                 let unit = item["unit"] as? String ?? ""
                 let remaining = (item["remaining_quantity"] as? NSNumber)?.doubleValue ?? 0
                 let label = [kind, color, thickness, unit].filter { !$0.isEmpty }.joined(separator: " · ")
-                return ProductionMaterialDraft(id: key, key: key, label: label, remainingQuantity: remaining, quantity: remaining > 0 ? String(format: "%g", remaining) : "0")
+                return ProductionMaterialDraft(
+                    id: key,
+                    key: key,
+                    label: label,
+                    materialType: kind,
+                    color: color,
+                    thickness: thickness,
+                    edge: edge,
+                    unit: unit,
+                    remainingQuantity: remaining,
+                    quantity: remaining > 0 ? String(format: "%g", remaining) : "0"
+                )
             }
             self.productionMaterials = materials
-            self.productionPreviewStatus = "已读取 (materials.count) 项订单材料；可按本次实际消耗修改数量"
+            let availableCount = materials.filter { $0.remainingQuantity > 0 }.count
+            self.productionPreviewStatus = "已读取 \(materials.count) 项订单材料；其中 \(availableCount) 项有待分配数量，可按本次实际消耗修改"
             completion(true)
         }
     }
 
-    func prepareProduction(orderID: String, factoryOrders: [String], materials: [ProductionMaterialDraft], completion: @escaping (String?) -> Void) {
+    func prepareProduction(
+        orderID: String,
+        factoryOrders: [String],
+        materials: [ProductionMaterialDraft],
+        onResult completion: @escaping (String?, String?) -> Void
+    ) {
         let materialObjects: [[String: Any]] = materials.map { ["key": $0.key, "quantity": Double($0.quantity) ?? 0] }
         let factoryData = (try? JSONSerialization.data(withJSONObject: factoryOrders)) ?? Data("[]".utf8)
         let materialData = (try? JSONSerialization.data(withJSONObject: materialObjects)) ?? Data("[]".utf8)
         let arguments = ["prepare-production", "--order-id", orderID, "--factory-orders-json", String(data: factoryData, encoding: .utf8) ?? "[]", "--materials-json", String(data: materialData, encoding: .utf8) ?? "[]"]
         runOrder(arguments, onFailure: {
-            completion(nil)
+            completion(nil, self.orderError.isEmpty ? "生产准备校验未通过，请检查材料数量后重试" : self.orderError)
         }) { object in
-            completion(object["batch_number"] as? String)
+            completion(object["batch_number"] as? String, nil)
+        }
+    }
+
+    func startDirectProduction(
+        orderID: String,
+        factoryOrders: [String],
+        materials: [ProductionMaterialDraft],
+        batchNumber: String,
+        completion: @escaping (ProductionOperationResult) -> Void = { _ in }
+    ) {
+        let materialObjects: [[String: Any]] = materials.compactMap { material in
+            guard let quantity = Double(material.quantity), quantity > 0 else { return nil }
+            return [
+                "key": material.key,
+                "material_type": material.materialType,
+                "color": material.color,
+                "thickness": material.thickness,
+                "edge": material.edge,
+                "unit": material.unit,
+                "quantity": quantity,
+            ]
+        }
+        guard let encodedMaterials = try? JSONSerialization.data(withJSONObject: materialObjects),
+              let materialsJSON = String(data: encodedMaterials, encoding: .utf8),
+              !batchNumber.isEmpty else {
+            let message = "生产操作数据无效，未操作库存系统；本次未写入本地生产完成记录"
+            dashboardSyncStatus = "❌ \(message)"
+            completion(ProductionOperationResult(
+                state: .failure,
+                message: message,
+                documentNumbers: [],
+                retryAllowed: true
+            ))
+            return
+        }
+
+        logUserAction(
+            "点击确认生产并扣减材料",
+            details: [
+                "order_id": orderID,
+                "factory_orders": factoryOrders,
+                "material_count": materialObjects.count,
+            ]
+        )
+        beginDashboardOperation("sync", label: "库存系统扣减生产材料")
+        let operationDetail = "订单 \(orderID) · 工厂单 \(factoryOrders.sorted().joined(separator: "、")) · 材料 \(materialObjects.count) 项"
+        let operationStartedAt = Date()
+        dashboardActivity.insert(
+            InventoryStep(
+                time: dashboardClockTime(),
+                title: "生产操作已准备",
+                detail: operationDetail + "；等待库存系统确认",
+                state: "running",
+                startedAt: operationStartedAt
+            ),
+            at: 0
+        )
+        dashboardSyncStatus = "正在库存系统执行生产出库：\(orderID)…"
+        var arguments = [
+            "outbound", "--order-id", orderID,
+            "--production-batch", batchNumber,
+            "--production-materials-json", materialsJSON,
+            "--confirm-save",
+        ]
+        for factoryOrder in factoryOrders.sorted() {
+            arguments += ["--factory-order", factoryOrder]
+        }
+        runInventory(arguments, onFailure: { reason in
+            self.finishDashboardOperation("sync")
+            let uncertain = inventoryFailureNeedsVerification(reason)
+            let resultMessage = uncertain || reason.contains("本地生产完成记录")
+                ? reason
+                : "\(reason)；本次未写入本地生产完成记录"
+            self.dashboardActivity.insert(
+                InventoryStep(
+                    time: dashboardClockTime(),
+                    title: "生产出库失败",
+                    detail: "\(operationDetail)；\(reason)；请按提示核对后再决定是否重试",
+                    state: uncertain ? "warning" : "failure",
+                    duration: Date().timeIntervalSince(operationStartedAt)
+                ),
+                at: 0
+            )
+            self.dashboardSyncStatus = "❌ \(reason)"
+            completion(ProductionOperationResult(
+                state: uncertain ? .uncertain : .failure,
+                message: resultMessage,
+                documentNumbers: [],
+                retryAllowed: !uncertain
+            ))
+        }) { object in
+            self.finishDashboardOperation("sync")
+            let documentNumbers = (object["results"] as? [[String: Any]] ?? [])
+                .compactMap { $0["documentNumber"] as? String }
+                .filter { !$0.isEmpty }
+            let documentSummary = documentNumbers.isEmpty
+                ? "库存系统已返回成功"
+                : "库存单号：\(documentNumbers.joined(separator: "、"))"
+            self.dashboardActivity.insert(
+                InventoryStep(
+                    time: dashboardClockTime(),
+                    title: "生产出库完成",
+                    detail: "\(operationDetail)；\(documentSummary)；数据库已记录生产完成",
+                    state: "success",
+                    duration: Date().timeIntervalSince(operationStartedAt)
+                ),
+                at: 0
+            )
+            self.dashboardSyncStatus = "✅ \(orderID) 生产完成，材料出库已记录；工厂单仍待出货"
+            self.refreshDashboardOrdersAfterOutbound()
+            completion(ProductionOperationResult(
+                state: .success,
+                message: "生产出库成功；\(documentSummary)；本地生产记录已保存",
+                documentNumbers: documentNumbers,
+                retryAllowed: false
+            ))
+        }
+    }
+
+    func startDirectOrderShipment(orderID: String, factoryOrders: [String]) {
+        let normalizedOrderID = orderID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedOrderID.isEmpty, !factoryOrders.isEmpty else { return }
+        logUserAction(
+            "点击直接出货",
+            details: ["order_id": normalizedOrderID, "factory_orders": factoryOrders]
+        )
+        beginDashboardOperation("sync", label: "库存系统出货")
+        let operationDetail = "订单 \(normalizedOrderID) · 工厂单 \(factoryOrders.sorted().joined(separator: "、")) · 有五金则出库五金，无五金则只更新状态"
+        let operationStartedAt = Date()
+        dashboardActivity.insert(
+            InventoryStep(
+                time: dashboardClockTime(),
+                title: "出货操作已准备",
+                detail: operationDetail + "；等待库存系统确认",
+                state: "running",
+                startedAt: operationStartedAt
+            ),
+            at: 0
+        )
+        dashboardSyncStatus = "正在库存系统执行出货：\(normalizedOrderID)…"
+        var arguments = ["outbound", "--order-id", normalizedOrderID, "--shipment-only", "--confirm-save"]
+        for factoryOrder in factoryOrders.sorted() {
+            arguments += ["--factory-order", factoryOrder]
+        }
+        runInventory(arguments, onFailure: { reason in
+            self.finishDashboardOperation("sync")
+            let partial = reason.contains("已完成单据已同步")
+            self.dashboardActivity.insert(
+                InventoryStep(
+                    time: dashboardClockTime(),
+                    title: partial ? "出货部分完成" : "出货失败",
+                    detail: "\(operationDetail)；\(reason)；请按提示核对后再决定是否重试",
+                    state: partial ? "warning" : "failure",
+                    duration: Date().timeIntervalSince(operationStartedAt)
+                ),
+                at: 0
+            )
+            self.dashboardSyncStatus = "❌ \(reason)"
+        }) { object in
+            if object["status_only"] as? Bool == true {
+                self.finishDashboardOperation("sync")
+                self.dashboardActivity.insert(
+                    InventoryStep(
+                        time: dashboardClockTime(),
+                        title: "出货完成",
+                        detail: "所选工厂单没有可出库五金；仅更新出货状态，未创建库存出库单",
+                        state: "success",
+                        duration: Date().timeIntervalSince(operationStartedAt)
+                    ),
+                    at: 0
+                )
+                self.dashboardSyncStatus = "✅ \(normalizedOrderID) 出货状态已更新"
+                self.refreshDashboardOrdersAfterOutbound()
+                return
+            }
+            self.finishDashboardOperation("sync")
+            let documentNumbers = (object["results"] as? [[String: Any]] ?? [])
+                .compactMap { $0["documentNumber"] as? String }
+                .filter { !$0.isEmpty }
+                .joined(separator: "、")
+            self.dashboardActivity.insert(
+                InventoryStep(
+                    time: dashboardClockTime(),
+                    title: "出货完成",
+                    detail: "\(operationDetail)；库存单 \(documentNumbers.isEmpty ? "已返回" : documentNumbers)；数据库已同步",
+                    state: "success",
+                    duration: Date().timeIntervalSince(operationStartedAt)
+                ),
+                at: 0
+            )
+            self.dashboardSyncStatus = "✅ \(normalizedOrderID) 出货已完成"
+            self.refreshDashboardOrdersAfterOutbound()
         }
     }
 
@@ -2909,7 +3330,12 @@ final class AppModel: ObservableObject {
                 self.inventorySteps.last(where: { $0.state == "running" })?.detail ?? "库存系统后台操作已完成",
                 "success"
             )
-            if object["customer_supplied"] as? Bool == true {
+            if object["status_only"] as? Bool == true {
+                self.inventoryWriteCompleted = true
+                self.inventoryStatus = "✅ 出货状态已记录（仅更新数据库）"
+                self.inventorySuccessMessage = "所选工厂单没有可出库五金，未创建库存系统出库单。"
+                self.addInventoryStep("✅ 出货状态已记录", "仅更新所选工厂单出货状态，未打开库存系统", "success")
+            } else if object["customer_supplied"] as? Bool == true {
                 self.inventoryWriteCompleted = true
                 self.inventoryStatus = "✅ 客户材料出库已记录（仅更新数据库）"
                 self.inventorySuccessMessage = "客户提供材料且没有需要出库的五金，未创建库存系统出库单。"
@@ -3329,6 +3755,9 @@ final class AppModel: ObservableObject {
         onFailure: ((String) -> Void)? = nil,
         completion: @escaping ([String: Any]) -> Void
     ) {
+        if !dashboardStatusIsInProgress(dashboardSyncStatus) {
+            dashboardSyncStatus = "正在处理库存系统操作…"
+        }
         if manageRunning {
             guard !inventoryRunning else { return }
             inventoryRunning = true
@@ -3354,33 +3783,33 @@ final class AppModel: ObservableObject {
             process.environment = self.environmentForOperation(operationID)
             process.standardOutput = output
             process.standardError = errors
+            let timeoutLock = NSLock()
+            var timedOut = false
+            var lastProgressAt = ProcessInfo.processInfo.systemUptime
             errors.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
+                timeoutLock.lock()
+                lastProgressAt = ProcessInfo.processInfo.systemUptime
+                timeoutLock.unlock()
                 DispatchQueue.main.async { self.consumeInventoryLogChunk(chunk) }
             }
             do {
                 try process.run()
-                let timeoutLock = NSLock()
-                var timedOut = false
-                let timeoutWork = DispatchWorkItem {
+                let timeoutSource = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+                timeoutSource.schedule(deadline: .now() + 5, repeating: 5)
+                timeoutSource.setEventHandler {
                     timeoutLock.lock()
-                    timedOut = process.isRunning
+                    let idle = ProcessInfo.processInfo.systemUptime - lastProgressAt
+                    let shouldTerminate = process.isRunning && idle >= inventoryInactivityTimeoutSeconds
+                    if shouldTerminate { timedOut = true }
                     timeoutLock.unlock()
-                    if process.isRunning {
-                        process.terminate()
-                    }
+                    if shouldTerminate { process.terminate() }
                 }
-                DispatchQueue.global(qos: .utility).asyncAfter(
-                    // Browser page waits are capped at 60 seconds; keep the
-                    // outer App deadline longer so one page wait can return
-                    // its specific diagnostic before the App cancels it.
-                    deadline: .now() + 90,
-                    execute: timeoutWork
-                )
+                timeoutSource.resume()
                 let data = output.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
-                timeoutWork.cancel()
+                timeoutSource.cancel()
                 errors.fileHandleForReading.readabilityHandler = nil
                 let remainder = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
                 DispatchQueue.main.async {
@@ -3389,12 +3818,17 @@ final class AppModel: ObservableObject {
                     if !self.inventoryStderrBuffer.isEmpty {
                         self.consumeInventoryLogChunk("\n")
                     }
+                    if dashboardStatusIsInProgress(self.dashboardSyncStatus) {
+                        self.dashboardSyncStatus = "✅ 库存系统后台操作已完成"
+                    }
                     timeoutLock.lock()
                     let operationTimedOut = timedOut
                     timeoutLock.unlock()
                     if operationTimedOut {
-                        let reason = "库存系统操作超过 90 秒未完成，请检查网络、登录状态或库存系统页面后重试。"
+                        let timeoutText = String(format: "%.0f", inventoryInactivityTimeoutSeconds)
+                        let reason = "库存系统连续 \(timeoutText) 秒没有进展，已停止；请检查库存系统页面后先核对历史单据，再决定是否重试。"
                         self.inventoryStatus = "❌ \(reason)"
+                        self.dashboardSyncStatus = "❌ \(reason)"
                         self.finishRunningInventoryStep(reason, "failure")
                         onFailure?(reason)
                         return
@@ -3403,16 +3837,18 @@ final class AppModel: ObservableObject {
                     guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                         let reason = businessFriendlyMessage(errorText, operation: "读取库存结果")
                         self.inventoryStatus = "❌ \(reason)"
+                        self.dashboardSyncStatus = "❌ \(reason)"
                         self.finishRunningInventoryStep(reason, "failure")
                         onFailure?(reason)
                         return
                     }
                     if let fatal = object["fatal"] as? [String: Any] {
                         let reason = businessFriendlyMessage(
-                            fatal["message"] as? String ?? "库存预检未通过，请检查 Traveler 和商品资料后重试。",
+                            fatal["message"] as? String ?? "库存操作未完成，请检查库存系统页面和本地订单数据后重试。",
                             operation: "库存操作"
                         )
                         self.inventoryStatus = "❌ \(reason)"
+                        self.dashboardSyncStatus = "❌ \(reason)"
                         self.finishRunningInventoryStep(reason, "failure")
                         onFailure?(reason)
                         return
@@ -3424,6 +3860,7 @@ final class AppModel: ObservableObject {
                     self.inventoryRunning = false
                     let reason = businessFriendlyMessage(error.localizedDescription, operation: "启动库存操作")
                     self.inventoryStatus = "❌ \(reason)"
+                    self.dashboardSyncStatus = "❌ \(reason)"
                     self.finishRunningInventoryStep(reason, "failure")
                     onFailure?(reason)
                 }
@@ -3493,6 +3930,11 @@ final class AppModel: ObservableObject {
                 continue
             }
             inventorySteps = appendingInventoryProgressStep(inventorySteps, message: message)
+            // Keep the order-center banner useful while the inventory page
+            // is navigating or filling a form. The inventory step history
+            // remains the detailed audit trail; this is only the concise
+            // current-operation summary.
+            dashboardSyncStatus = dashboardInventoryProgressText(message)
         }
     }
 
@@ -6885,7 +7327,7 @@ struct TopNavigationBar: View {
         }
         .sheet(isPresented: $model.showServerWriteConfirmation) {
             ServerWriteConfirmationSheet(model: model)
-                .frame(minWidth: 980, minHeight: 650)
+                .frame(width: 820, height: 650)
         }
         .sheet(isPresented: $model.showInventoryMappingWorkspace) {
             PendingInventoryMappingWorkspace(model: model)

@@ -13,7 +13,7 @@ import sys
 import time
 from urllib.parse import urlsplit
 from urllib.request import urlopen
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -45,6 +45,10 @@ INVENTORY_WORKBENCH_PREFIXES = (
     "http://www.jdy.com/workbench/",
 )
 INVENTORY_DOMAIN_SUFFIX = ".jdy.com"
+# This is a per-document browser subprocess guard.  The App-level guard is an
+# inactivity watchdog with a separate, longer budget so a multi-document
+# operation is not cancelled merely because the first document took time.
+INVENTORY_DOCUMENT_TIMEOUT_SECONDS = 90
 
 
 @dataclass
@@ -127,6 +131,11 @@ class InventoryPreview:
     # of an order.  Existing order-level outbound records must not be treated
     # as disappeared documents when this partial slice is saved.
     partial_scope: bool = False
+    # Some workflows operate on only one document kind from a mixed order.
+    # Direct factory shipment is hardware-only and must not compare its
+    # preview with an order-level materials record from an earlier production
+    # operation.
+    document_kinds: tuple[str, ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -463,12 +472,104 @@ def mark_customer_supplied_outbound(
     }
 
 
+def mark_no_hardware_outbound(
+    config: Config,
+    order_id: str,
+    selected_factory_orders: Iterable[str] | None = None,
+) -> dict:
+    """Mark shipment status when the selected factories have no hardware facts.
+
+    Shipment is a workflow state, while a hardware inventory document is an
+    optional side effect.  This path is intentionally limited to a selection
+    with no active, positive-quantity hardware; unmapped hardware must still
+    fail preflight instead of being silently marked as shipped.
+    """
+    normalized_order_id = order_id.strip().upper()
+    _, factory_rows = _database_factory_rows(config, normalized_order_id)
+    requested = {
+        str(value).strip().upper()
+        for value in (selected_factory_orders or [])
+        if str(value).strip()
+    }
+    factory_ids = requested or set(factory_rows)
+    unknown = sorted(factory_ids - set(factory_rows))
+    if unknown:
+        raise RuleError(
+            "inventory_factory_unknown",
+            "数据库中找不到所选工厂单，已停止出货：" + "、".join(unknown),
+            factory_orders=unknown,
+        )
+    if not factory_ids:
+        raise RuleError("inventory_factory_unknown", f"订单 {normalized_order_id} 没有可确认出货的工厂单")
+    detail, _ = _database_factory_rows(config, normalized_order_id)
+    hardware_in_selection = _usable_hardware_factory_orders(detail).intersection(factory_ids)
+    if hardware_in_selection:
+        raise RuleError(
+            "inventory_scope",
+            "所选工厂单存在五金数据，不能按无五金只更新状态：" + "、".join(sorted(hardware_in_selection)),
+            factory_orders=sorted(hardware_in_selection),
+        )
+
+    fingerprints = {
+        factory_order: database_outbound_fingerprint(config, normalized_order_id, factory_order)
+        for factory_order in sorted(factory_ids)
+    }
+    connection = sqlite3.connect(config.workflow_database)
+    try:
+        placeholders = ",".join("?" for _ in factory_ids)
+        rows = connection.execute(
+            f"select factory_order, outbound_status from factory_orders "
+            f"where order_id=? and factory_order in ({placeholders}) and aimes_status='active'",
+            [normalized_order_id, *sorted(factory_ids)],
+        ).fetchall()
+        by_factory = {str(row[0]).upper(): str(row[1] or "") for row in rows}
+        missing = sorted(factory_ids - set(by_factory))
+        if missing:
+            raise RuleError(
+                "inventory_factory_unknown",
+                "数据库中找不到所选工厂单，已停止出货：" + "、".join(missing),
+                factory_orders=missing,
+            )
+        already_outbound = sorted(
+            factory_order for factory_order, status in by_factory.items()
+            if status == "已出库"
+        )
+        if already_outbound:
+            raise RuleError(
+                "inventory_already_outbound",
+                "工厂单 " + "、".join(already_outbound) + " 已出库，不能重复出货",
+                factory_orders=already_outbound,
+            )
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        for factory_order, fingerprint in fingerprints.items():
+            connection.execute(
+                """
+                update factory_orders
+                set outbound_status='已出库', outbound_document='',
+                    outbound_mode='no_hardware', outbound_fingerprint=?, updated_at=?
+                where order_id=? and factory_order=? and aimes_status='active'
+                """,
+                (fingerprint, now, normalized_order_id, factory_order),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+    return {
+        "order_id": normalized_order_id,
+        "factory_orders": sorted(factory_ids),
+        "outbound_status": "已出库",
+        "outbound_mode": "no_hardware",
+        "inventory_document": False,
+    }
+
+
 def database_document_items(
     config: Config,
     order_id: str,
     selected_factory_orders: Iterable[str] | None = None,
     *,
     production_batch_number: str = "",
+    production_materials: Iterable[dict] | None = None,
     shipment_only: bool = False,
 ) -> tuple[str, dict[str, list[TravelerItem]], list[TravelerItem], dict[str, dict]]:
     """Build outbound source documents directly from persisted order facts.
@@ -496,8 +597,11 @@ def database_document_items(
     order_type = str(detail.get("order", {}).get("order_type", "")).strip()
     scope = outbound_scope_decisions(config, normalized_order_id, requested)
     material_requirement = scope["material"]["requirement"]
+    production_mode = production_materials is not None or bool(production_batch_number)
     materials = [] if shipment_only else list(detail.get("materials", []))
-    if production_batch_number:
+    if production_materials is not None:
+        materials = [dict(row) for row in production_materials]
+    elif production_batch_number:
         connection = sqlite3.connect(config.workflow_database)
         connection.row_factory = sqlite3.Row
         try:
@@ -543,7 +647,7 @@ def database_document_items(
         else:
             documents[normalized_order_id].append(item)
 
-    for row in ([] if production_batch_number else detail.get("hardware", [])):
+    for row in ([] if production_mode else detail.get("hardware", [])):
         factory_order = str(row.get("factory_order", "")).strip().upper()
         if requested and factory_order not in requested:
             continue
@@ -553,7 +657,13 @@ def database_document_items(
         factory = factory_rows.get(factory_order, {})
         remark = str(factory.get("factory_name", "")).strip() or factory_order
         documents.setdefault(remark, [])
-        name = str(row.get("name", "")).strip() or str(row.get("product_code", "")).strip()
+        product_code = str(row.get("product_code", "")).strip()
+        source_code = str(row.get("source_code", "")).strip()
+        name = (
+            product_code
+            if product_code and (product_code.upper().startswith("M") or (source_code and source_code != product_code))
+            else str(row.get("name", "")).strip() or product_code
+        )
         quantity = float(row.get("quantity", 0) or 0)
         item = TravelerItem(row_number, "五金", name, quantity, remark)
         row_number += 1
@@ -570,6 +680,8 @@ def database_document_items(
                 in {"remainder", "not_required"}
                 for factory_order in requested
             )
+        if shipment_only:
+            explicit_no_outbound = True
         if not explicit_no_outbound:
             raise RuleError("inventory_empty", f"数据库中没有订单 {normalized_order_id} 可出库的材料或五金")
     return normalized_order_id, documents, zero_items, factory_rows
@@ -708,12 +820,14 @@ def build_database_preview(
     selected_factory_orders: Iterable[str] | None = None,
     *,
     production_batch_number: str = "",
+    production_materials: Iterable[dict] | None = None,
     shipment_only: bool = False,
 ) -> InventoryPreview:
     """Map persisted SQLite order facts without generating a Traveler file."""
     normalized_order_id, documents, zero_items, _ = database_document_items(
         config, order_id, selected_factory_orders,
         production_batch_number=production_batch_number,
+        production_materials=production_materials,
         shipment_only=shipment_only,
     )
     selected_factory_ids = tuple(sorted({
@@ -725,7 +839,7 @@ def build_database_preview(
     detail, factory_rows = _database_factory_rows(config, normalized_order_id)
     excluded_items: list[dict] = []
     material_requirement = scope["material"]["requirement"]
-    if shipment_only or production_batch_number:
+    if shipment_only:
         material_requirement = "required"
     if material_requirement in {"customer_supplied", "remainder", "not_required"}:
         label = {
@@ -841,8 +955,11 @@ def build_database_preview(
         scope_decisions=scope["decisions"],
         excluded_items=excluded_items,
         no_outbound_required=not outbound and not missing and bool(
-            excluded_items or scope["material"]["requirement"] in {"customer_supplied", "remainder", "not_required"}
+            excluded_items
+            or scope["material"]["requirement"] in {"customer_supplied", "remainder", "not_required"}
+            or shipment_only
         ),
+        document_kinds=("hardware",) if shipment_only else (),
     )
 
 
@@ -928,7 +1045,13 @@ def build_factory_room_preview(
         quantity = float(row.get("quantity", 0) or 0)
         if quantity <= 0:
             continue
-        name = str(row.get("name", "")).strip() or str(row.get("product_code", "")).strip()
+        product_code = str(row.get("product_code", "")).strip()
+        source_code = str(row.get("source_code", "")).strip()
+        name = (
+            product_code
+            if product_code and (product_code.upper().startswith("M") or (source_code and source_code != product_code))
+            else str(row.get("name", "")).strip() or product_code
+        )
         documents[factory_name].append(
             TravelerItem(row_number, "五金", name, quantity, factory_name)
         )
@@ -1806,12 +1929,17 @@ HARDWARE_DISPLAY_NAMES = {
 }
 
 
-def ignored_hardware_reason(mappings: InventoryMappings, name: str = "", code: str = "") -> str | None:
+def ignored_hardware_reason(
+    mappings: InventoryMappings,
+    name: str = "",
+    code: str = "",
+    source_code: str = "",
+) -> str | None:
     """Match ignored hardware against raw report names, codes, and display aliases."""
-    candidates = [name, code]
-    display_name = HARDWARE_DISPLAY_NAMES.get(_normalize_name(code))
+    candidates = [name, code, source_code]
+    display_name = HARDWARE_DISPLAY_NAMES.get(_normalize_name(source_code or code))
     if display_name:
-        candidates.append(display_name)
+            candidates.append(display_name)
     for candidate in candidates:
         reason = mappings.ignored_reason(candidate)
         if reason is not None:
@@ -1829,7 +1957,7 @@ def remove_ignored_hardware_records(config: Config, names: Iterable[str]) -> int
     connection = sqlite3.connect(config.workflow_database)
     try:
         rows = connection.execute(
-            "select id, name, product_code from hardware_items"
+            "select id, name, product_code, source_code from hardware_items"
         ).fetchall()
         ids = [
             row[0]
@@ -1839,7 +1967,8 @@ def remove_ignored_hardware_records(config: Config, names: Iterable[str]) -> int
                 for candidate in (
                     row[1],
                     row[2],
-                    HARDWARE_DISPLAY_NAMES.get(_normalize_name(row[2]), ""),
+                    row[3],
+                    HARDWARE_DISPLAY_NAMES.get(_normalize_name(row[3] or row[2]), ""),
                 )
             )
         ]
@@ -1900,6 +2029,15 @@ def match_item(catalog: ProductCatalog, mappings: InventoryMappings, item: Trave
         if _normalize_name(product.category) == _normalize_name("Edge band"):
             return [edge_outbound(product, "人工指定")]
         return [outbound(product, item.quantity, "人工指定")]
+    # Database-backed hardware stores the canonical inventory SKU in
+    # ``product_code``. Accept that identity directly so outbound does not
+    # rematch a raw Server display name such as Left Rail.
+    try:
+        product = catalog.require_code(item.name)
+    except RuleError:
+        product = None
+    if product is not None:
+        return [outbound(product, item.quantity, "数据库 canonical SKU")]
     normalized = _normalize_name(item.name)
     if normalized == "PUSHOPEN":
         results = []
@@ -1966,11 +2104,12 @@ def resolve_inventory_items(
     """
     items = list(items)
     if not items:
-        return {"outbound": [], "ignored": [], "missing": []}
+        return {"outbound": [], "ignored": [], "missing": [], "accepted": []}
     mappings = InventoryMappings(config.workflow_database)
     outbound: list[OutboundItem] = []
     ignored: list[dict] = []
     missing: list[dict] = []
+    accepted: list[dict] = []
     with ProductDatabase(bootstrap_product_database(config)) as catalog:
         for item, source_code in items:
             source_code = _text(source_code)
@@ -1987,6 +2126,12 @@ def resolve_inventory_items(
                 else mappings.ignored_reason(item.name)
             )
             if reason is not None:
+                accepted.append({
+                    "name": item.name,
+                    "source_code": source_code,
+                    "product_codes": [],
+                    "ignored": True,
+                })
                 ignored.append({
                     **asdict(item),
                     "source_code": source_code,
@@ -1994,8 +2139,21 @@ def resolve_inventory_items(
                 })
                 continue
             try:
-                outbound.extend(match_item(catalog, mappings, match_item_value))
+                matched = match_item(catalog, mappings, match_item_value)
+                accepted.append({
+                    "name": item.name,
+                    "source_code": source_code,
+                    "product_codes": [entry.product_code for entry in matched],
+                    "ignored": False,
+                })
+                outbound.extend(matched)
             except RuleError as exc:
+                accepted.append({
+                    "name": item.name,
+                    "source_code": source_code,
+                    "product_codes": [],
+                    "ignored": False,
+                })
                 missing.append({
                     **asdict(item),
                     "source_code": source_code,
@@ -2003,7 +2161,121 @@ def resolve_inventory_items(
                     "message": str(exc),
                     **exc.context,
                 })
-    return {"outbound": outbound, "ignored": ignored, "missing": missing}
+    return {"outbound": outbound, "ignored": ignored, "missing": missing, "accepted": accepted}
+
+
+def resolved_product_code(resolution: dict, index: int, fallback: str = "") -> str:
+    """Return the canonical inventory SKU for one input item.
+
+    The fallback keeps older test doubles and historical preview payloads
+    readable; all real Server writes go through ``accepted`` and therefore
+    persist the catalog SKU, not the source report code.
+    """
+    accepted = resolution.get("accepted", []) if isinstance(resolution, dict) else []
+    if index < len(accepted):
+        codes = accepted[index].get("product_codes", []) or []
+        if len(codes) == 1:
+            return str(codes[0]).strip()
+    return str(fallback or "").strip()
+
+
+def repair_hardware_inventory_codes(config: Config) -> dict:
+    """Backfill canonical SKUs and collapse historical rail-pair rows.
+
+    Older rows used ``product_code`` for the AICNC source code.  The repaired
+    shape is ``product_code=<inventory SKU>`` and ``source_code=<AICNC code>``;
+    raw display text remains in ``name``.  Rows that still cannot resolve are
+    left untouched and returned for explicit review.
+    """
+    ensure_schema(config.workflow_database)
+    connection = sqlite3.connect(config.workflow_database)
+    connection.row_factory = sqlite3.Row
+    unresolved: list[dict] = []
+    canonicalized = 0
+    rails_collapsed = 0
+    rail_rows_removed = 0
+    try:
+        rows = connection.execute(
+            "select id, order_id, factory_order, product_code, source_code, name, spec, quantity, unit "
+            "from hardware_items where active=1 order by id"
+        ).fetchall()
+        with ProductDatabase(bootstrap_product_database(config)) as catalog:
+            for row in rows:
+                current_code = _text(row["product_code"])
+                source_code = _text(row["source_code"]) or current_code
+                try:
+                    product = catalog.require_code(current_code)
+                except RuleError:
+                    product = None
+                if product is not None:
+                    if _text(row["source_code"]) != source_code:
+                        connection.execute(
+                            "update hardware_items set source_code=? where id=?",
+                            (source_code, row["id"]),
+                        )
+                    continue
+                item = TravelerItem(
+                    row=int(row["id"]),
+                    section="五金",
+                    name=_text(row["name"]) or current_code,
+                    quantity=float(row["quantity"] or 0),
+                    document_remark="",
+                )
+                resolution = resolve_inventory_items(config, [(item, source_code)])
+                codes = (resolution.get("accepted", [{}])[0].get("product_codes", [])
+                         if resolution.get("accepted") else [])
+                if len(codes) != 1:
+                    unresolved.append({
+                        "id": int(row["id"]),
+                        "order_id": _text(row["order_id"]),
+                        "factory_order": _text(row["factory_order"]),
+                        "name": _text(row["name"]),
+                        "source_code": source_code,
+                    })
+                    continue
+                connection.execute(
+                    "update hardware_items set product_code=?, source_code=? where id=?",
+                    (str(codes[0]), source_code, row["id"]),
+                )
+                canonicalized += 1
+
+        refreshed = connection.execute(
+            "select id, order_id, factory_order, source_path, name, product_code, source_code, quantity "
+            "from hardware_items where active=1 order by id"
+        ).fetchall()
+        groups: dict[tuple[str, str, str], list[sqlite3.Row]] = defaultdict(list)
+        for row in refreshed:
+            groups[(_text(row["order_id"]).upper(), _text(row["factory_order"]).upper(), _text(row["source_path"]))].append(row)
+        for group_rows in groups.values():
+            left = [row for row in group_rows if _normalize_name(row["name"]) == "LEFTRAIL"]
+            right = [row for row in group_rows if _normalize_name(row["name"]) == "RIGHTRAIL"]
+            left_total = sum(float(row["quantity"] or 0) for row in left)
+            right_total = sum(float(row["quantity"] or 0) for row in right)
+            if not left or not right or left_total != right_total:
+                continue
+            keep = left[0]
+            connection.execute(
+                "update hardware_items set quantity=? where id=?",
+                (left_total, keep["id"]),
+            )
+            delete_ids = [row["id"] for row in left[1:] + right]
+            if delete_ids:
+                connection.executemany(
+                    "delete from hardware_items where id=?",
+                    ((row_id,) for row_id in delete_ids),
+                )
+                rail_rows_removed += len(delete_ids)
+            rails_collapsed += 1
+        connection.commit()
+    finally:
+        connection.close()
+    return {
+        "ok": True,
+        "canonicalized": canonicalized,
+        "rails_collapsed": rails_collapsed,
+        "rail_rows_removed": rail_rows_removed,
+        "unresolved": unresolved,
+    }
 
 
 def build_preview(
@@ -2180,6 +2452,136 @@ def update_manual_mapping(config: Config, old_name: str, name: str, product_code
     }
 
 
+class InventoryOperationJournal:
+    """Durable intent/result state for a browser-plus-database operation.
+
+    The journal is operational metadata, not a production or outbound fact.
+    It is written before browser automation so a retry can distinguish a
+    confirmed external save from an operation that never reached JDY.
+    """
+
+    def __init__(self, database: Path):
+        ensure_schema(database)
+        self.database = database
+
+    @staticmethod
+    def _canonical(value: object) -> str:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def prepare(
+        self,
+        operation_kind: str,
+        order_id: str,
+        factory_orders: Iterable[str],
+        payload: dict,
+    ) -> dict:
+        normalized_order = str(order_id or "").strip().upper()
+        normalized_factories = sorted({
+            str(value or "").strip().upper()
+            for value in factory_orders
+            if str(value or "").strip()
+        })
+        payload_json = self._canonical(payload)
+        identity_payload = json.loads(payload_json)
+        identity_draft = identity_payload.get("production_draft")
+        if isinstance(identity_draft, dict):
+            # A fresh in-memory batch number is generated for every safe retry.
+            # It must not hide an already-confirmed external save for the same
+            # order, factories, and material quantities.
+            identity_draft.pop("batch_number", None)
+            identity_draft.pop("production_time", None)
+        identity_payload_json = self._canonical(identity_payload)
+        payload_fingerprint = hashlib.sha256(identity_payload_json.encode("utf-8")).hexdigest()
+        identity = self._canonical({
+            "kind": operation_kind,
+            "order_id": normalized_order,
+            "factory_orders": normalized_factories,
+            "payload_fingerprint": payload_fingerprint,
+        })
+        operation_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        connection = sqlite3.connect(self.database)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute(
+                """insert into inventory_operations(
+                       operation_id, operation_kind, order_id,
+                       factory_orders_json, payload_json, payload_fingerprint,
+                       status, document_results_json, attempt_count,
+                       last_error, created_at, updated_at
+                   ) values(?,?,?,?,?,?,'prepared','[]',0,'',?,?)
+                   on conflict(operation_id) do update set
+                       payload_json=case
+                           when inventory_operations.status in ('external_confirmed','local_committed','verification_required','partial_external_confirmed')
+                           then inventory_operations.payload_json
+                           else excluded.payload_json
+                       end,
+                       updated_at=excluded.updated_at""",
+                (
+                    operation_id,
+                    operation_kind,
+                    normalized_order,
+                    self._canonical(normalized_factories),
+                    payload_json,
+                    payload_fingerprint,
+                    now,
+                    now,
+                ),
+            )
+            connection.commit()
+            row = connection.execute(
+                "select * from inventory_operations where operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            return dict(row) if row is not None else {}
+        finally:
+            connection.close()
+
+    def update(
+        self,
+        operation_id: str,
+        status: str,
+        *,
+        results: Iterable[dict] | None = None,
+        error: str = "",
+        increment_attempt: bool = False,
+    ) -> None:
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        connection = sqlite3.connect(self.database)
+        try:
+            assignments = ["status=?", "last_error=?", "updated_at=?"]
+            values: list[object] = [status, str(error or ""), now]
+            if results is not None:
+                assignments.append("document_results_json=?")
+                values.append(self._canonical(list(results)))
+            if increment_attempt:
+                assignments.append("attempt_count=attempt_count+1")
+            values.append(operation_id)
+            connection.execute(
+                f"update inventory_operations set {', '.join(assignments)} where operation_id=?",
+                values,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    @staticmethod
+    def decoded_payload(row: dict) -> dict:
+        try:
+            value = json.loads(str(row.get("payload_json", "{}")))
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def decoded_results(row: dict) -> list[dict]:
+        try:
+            value = json.loads(str(row.get("document_results_json", "[]")))
+        except json.JSONDecodeError:
+            return []
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
 class InventorySyncStore:
     def __init__(self, path: Path, backup_root: Path):
         self.path = path
@@ -2260,10 +2662,16 @@ class InventorySyncStore:
 
     def prepare_documents(self, preview: InventoryPreview) -> list[dict]:
         selected = preview._selected_document_set()
+        document_kinds = {
+            str(kind).strip().casefold()
+            for kind in preview.document_kinds
+            if str(kind).strip()
+        }
         previous = {
             str(record.get("remark", "")): record
             for record in self.records_for_order(preview.traveler.order_id)
-            if not selected or _normalize_name(str(record.get("remark", ""))) in selected
+            if (not document_kinds or str(record.get("kind", "")).strip().casefold() in document_kinds)
+            and (not selected or _normalize_name(str(record.get("remark", ""))) in selected)
         }
         current = {
             remark for remark in preview.traveler.documents
@@ -2316,7 +2724,14 @@ class InventorySyncStore:
             })
         return payloads
 
-    def save_success(self, preview: InventoryPreview, results: list[dict]) -> None:
+    def save_success(
+        self,
+        preview: InventoryPreview,
+        results: list[dict],
+        production_draft: dict | None = None,
+        operation_id: str = "",
+        commit_operation: bool = True,
+    ) -> None:
         self._backup_current()
         prepared = {item["remark"]: item for item in self.prepare_documents(preview)}
         for result in results:
@@ -2345,7 +2760,8 @@ class InventorySyncStore:
         # same state directory (normally ``data``).  Using parent.parent here
         # silently bypasses the central database after the storage cutover.
         central = self.path.parent / "workflow.sqlite3"
-        if central.is_file():
+        if central.is_file() or production_draft is not None or operation_id:
+            ensure_schema(central)
             connection = sqlite3.connect(central)
             try:
                 for result in results:
@@ -2359,15 +2775,24 @@ class InventorySyncStore:
                         "select factory_order from factory_orders where order_id=? and (factory_name=? or factory_order=?) limit 1",
                         (preview.traveler.order_id, remark, remark),
                     ).fetchone()
-                    # Materials are an order-level document.  In the order
-                    # center, an explicit factory selection is the evidence
-                    # that this document covered those exact factory orders.
-                    # Preserve that identity in the relation table without
-                    # changing the legacy single-value header column.  Do
-                    # not infer/broadcast an order-only record when there is
-                    # no explicit selection.
+                    # Production consumes order-level materials, but it does
+                    # not ship the selected factory orders. Keep the
+                    # inventory document and completed production batch as
+                    # separate facts; only a factory-scoped shipment may
+                    # populate outbound_document_factories.
+                    is_production_material_commit = (
+                        production_draft is not None
+                        and preview.source_type == "database"
+                        and _normalize_name(remark) == _normalize_name(preview.traveler.order_id)
+                    )
+                    # For an ordinary order-center material outbound, an
+                    # explicit factory selection remains the identity of the
+                    # covered factory orders. Do not infer/broadcast an
+                    # order-only record when there is no explicit selection.
                     linked_factory_values = (
-                        preview.selected_factory_orders
+                        ()
+                        if is_production_material_commit
+                        else preview.selected_factory_orders
                         if (
                             preview.source_type == "database"
                             and _normalize_name(remark) == _normalize_name(preview.traveler.order_id)
@@ -2394,6 +2819,22 @@ class InventorySyncStore:
                             document_number,
                             preview.traveler.order_id,
                             linked_factory_value,
+                        )
+                if production_draft is not None:
+                    from .production import record_completed_production
+
+                    record_completed_production(connection, production_draft)
+                if operation_id and commit_operation:
+                    updated = connection.execute(
+                        """update inventory_operations
+                           set status='local_committed', last_error='', updated_at=?
+                           where operation_id=?""",
+                        (datetime.now().astimezone().isoformat(timespec="seconds"), operation_id),
+                    ).rowcount
+                    if updated != 1:
+                        raise RuleError(
+                            "inventory_operation_missing",
+                            "库存操作恢复记录不存在，已停止本地业务提交",
                         )
                 connection.commit()
             finally:
@@ -2500,6 +2941,30 @@ def _persist_completed_outbound_results(
         for item in completed
         if str(item.get("documentNumber", "")).strip()
     ]
+
+
+def _persist_single_outbound_result(
+    config: Config,
+    preview: InventoryPreview | None,
+    result: dict,
+) -> str:
+    """Persist one externally confirmed document before the next is attempted."""
+    if preview is None or not (result.get("saved") or result.get("unchanged")):
+        return ""
+    document_number = str(result.get("documentNumber", "")).strip()
+    if not document_number:
+        raise RuleError(
+            "jdy_save_result",
+            "库存系统返回成功但缺少完整单据编号；请先查询库存历史核实，不要直接重复出库",
+        )
+    InventorySyncStore(_sync_path(config), config.backup_root).save_success(
+        preview,
+        [result],
+        # The operation remains partial until every requested document is
+        # confirmed.  The durable per-document ledger is still written now.
+        operation_id="",
+    )
+    return document_number
 
 
 def bootstrap_catalog(config: Config) -> Path:
@@ -3031,9 +3496,24 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
             order_id: str = "",
             room_material: bool = False,
             production_batch_number: str = "",
+            production_materials: Iterable[dict] | None = None,
             shipment_only: bool = False) -> dict:
     operation_started = time.perf_counter()
     progress(f"库存系统：开始准备 {action} 操作")
+    current_production_materials = (
+        [dict(item) for item in production_materials]
+        if production_materials is not None
+        else None
+    )
+    inventory_production_materials = current_production_materials
+    if current_production_materials is not None:
+        from .production import cumulative_production_materials
+
+        inventory_production_materials = cumulative_production_materials(
+            config,
+            order_id,
+            current_production_materials,
+        )
     username = _local_setting(config, "jdy_username")
     cdp_endpoint = _inventory_cdp_endpoint()
     existing_inventory_page = _find_existing_inventory_page(cdp_endpoint)
@@ -3050,11 +3530,18 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                 "库存系统：发现已登录的库存专用 Chrome 页面，将直接复用，不重新登录"
                 f"（{existing_url}）"
             )
-    else:
+    elif not (action == "outbound" and confirm_save):
         credentials_started = time.perf_counter()
         password = _keychain_password(username)
         progress(f"库存系统：未发现已登录页面，账号与钥匙串密码读取完成（用时 {time.perf_counter() - credentials_started:.2f} 秒）")
     preview = None
+    store = None
+    documents: list[dict] = []
+    production_draft = None
+    operation_journal = None
+    operation_id = ""
+    recovered_responses: list[dict] = []
+    partial_recovery = False
     if action == "outbound":
         if order_id.strip():
             if room_material:
@@ -3066,6 +3553,7 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                 preview = build_database_preview(
                     config, order_id, selected_factory_orders,
                     production_batch_number=production_batch_number,
+                    production_materials=inventory_production_materials,
                     shipment_only=shipment_only,
                 )
         else:
@@ -3086,7 +3574,7 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
             missing = "、".join(names) or "材料"
             raise RuleError(
                 "inventory_mapping_required",
-                f"当前出库数据存在未映射材料：{missing}。请先在出库页面完成材料映射后再出库",
+                f"当前出库数据存在未映射材料：{missing}。请先在订单材料确认阶段完成材料映射后再出库",
                 missing_items=preview.missing_items,
                 traveler_path=str(traveler_path) if traveler_path else "",
             )
@@ -3094,6 +3582,22 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
         documents = store.prepare_documents(preview)
         if not documents:
             if preview.no_outbound_required:
+                if shipment_only and order_id.strip():
+                    completion = mark_no_hardware_outbound(
+                        config,
+                        order_id,
+                        selected_factory_orders,
+                    )
+                    return {
+                        "ok": True,
+                        "saved": True,
+                        "no_outbound_required": True,
+                        "status_only": True,
+                        "database_updated": True,
+                        **completion,
+                        "scope_decisions": preview.scope_decisions,
+                        "message": "所选工厂单没有可出库五金，已确认出货并仅更新本地状态，未创建库存出库单",
+                    }
                 material_scope = next(
                     (
                         decision for decision in preview.scope_decisions
@@ -3147,11 +3651,88 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                 changed_factory_orders=changed_factory_orders,
             )
 
+        if current_production_materials is not None:
+            production_draft = {
+                "batch_number": production_batch_number,
+                "order_id": preview.traveler.order_id,
+                "selected_factory_orders": list(preview.selected_factory_orders),
+                "materials": current_production_materials,
+            }
+        if confirm_save:
+            operation_kind = (
+                "production" if production_draft is not None
+                else "shipment" if shipment_only
+                else "outbound"
+            )
+            operation_journal = InventoryOperationJournal(config.workflow_database)
+            operation_row = operation_journal.prepare(
+                operation_kind,
+                preview.traveler.order_id,
+                preview.selected_factory_orders,
+                {
+                    "documents": documents,
+                    "production_draft": production_draft,
+                },
+            )
+            operation_id = str(operation_row.get("operation_id", ""))
+            operation_status = str(operation_row.get("status", ""))
+            if operation_status == "verification_required":
+                raise RuleError(
+                    "inventory_verification_required",
+                    "上次库存操作的保存结果尚未确认；为避免重复出库，本次未再次提交。请先在库存历史中按订单备注核对后再处理",
+                )
+            if operation_status in {"external_confirmed", "local_committed", "partial_external_confirmed"}:
+                recovered_responses = operation_journal.decoded_results(operation_row)
+                saved_payload = operation_journal.decoded_payload(operation_row)
+                saved_draft = saved_payload.get("production_draft")
+                if isinstance(saved_draft, dict):
+                    production_draft = saved_draft
+                if not recovered_responses:
+                    raise RuleError(
+                        "inventory_operation_corrupt",
+                        "库存操作恢复记录缺少已确认的单据结果，请人工核对库存历史",
+                    )
+                if operation_status == "local_committed":
+                    return {
+                        "ok": True,
+                        "saved": True,
+                        "results": recovered_responses,
+                        "recovered": True,
+                        "syncRecorded": True,
+                        "productionCompleted": production_draft is not None,
+                    }
+                partial_recovery = operation_status == "partial_external_confirmed"
+                progress(
+                    "库存系统：发现上次已确认的外部保存结果，将跳过已完成单据，"
+                    + ("继续处理未完成单据" if partial_recovery else "只补做本地事务，不重复操作库存系统")
+                )
+            else:
+                operation_journal.update(
+                    operation_id,
+                    "submitting",
+                    increment_attempt=True,
+                )
+
+        if confirm_save and existing_inventory_page is None and not recovered_responses:
+            if operation_journal is not None and operation_id:
+                operation_journal.update(
+                    operation_id,
+                    "failed",
+                    error="没有发现已登录的库存专用 Chrome",
+                )
+            raise RuleError(
+                "inventory_session_required",
+                "没有发现已登录的库存专用 Chrome；请先在设置中打开库存系统并完成登录，再重试。本次未操作库存系统，也未写入本地业务数据",
+            )
+
     root = Path(__file__).resolve().parent.parent
-    runtime_started = time.perf_counter()
-    node, node_modules = _resolve_jdy_runtime(root)
-    progress(f"库存系统：自动化运行环境准备完成（用时 {time.perf_counter() - runtime_started:.2f} 秒）")
     helper = root / "tools" / "jdy_inventory.mjs"
+    node = Path("")
+    node_modules = Path("")
+    if not recovered_responses or partial_recovery:
+        runtime_started = time.perf_counter()
+        node, node_modules = _resolve_jdy_runtime(root)
+        progress(f"库存系统：自动化运行环境准备完成（用时 {time.perf_counter() - runtime_started:.2f} 秒）")
     request = {
         "action": action,
         "username": username,
@@ -3170,6 +3751,7 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
         # newly launched browser is closed after this task so Swift never
         # waits forever for the subprocess to finish.
         "keepBrowserOpen": False,
+        "diagnosticsDir": str(config.state_dir / "inventory" / "diagnostics"),
     }
     if existing_inventory_page is None:
         request["password"] = password
@@ -3210,8 +3792,17 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
             }
             for document in request["documents"]
         ]
-    responses = []
-    for browser_request in requests:
+    responses = list(recovered_responses)
+    completed_remarks = {
+        str(item.get("remark", "")).strip()
+        for item in recovered_responses
+        if str(item.get("remark", "")).strip()
+    }
+    browser_requests = [
+        item for item in requests
+        if str(item.get("remark", "")).strip() not in completed_remarks
+    ]
+    for browser_request in browser_requests:
         browser_started = time.perf_counter()
         progress(f"库存系统：开始浏览器操作（第 {len(responses) + 1}/{len(requests)} 个单据）")
         try:
@@ -3222,7 +3813,7 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                 # The browser's individual webpage waits are capped at 60s.
                 # Keep the process guard longer so startup plus one 60s page
                 # wait can finish and return its specific diagnostic.
-                timeout=90,
+                timeout=INVENTORY_DOCUMENT_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired as exc:
             def timeout_text(value: object) -> str:
@@ -3247,9 +3838,20 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                         f"{detail}；已完成单据已同步：{'、'.join(partial_numbers)}；"
                         "后续单据结果需要先查询库存历史再重试"
                     )
+                else:
+                    detail = f"{detail}；库存未确认成功，本次未写入本地业务数据库"
+            if operation_journal is not None and operation_id:
+                operation_journal.update(
+                    operation_id,
+                    "verification_required",
+                    results=responses,
+                    error=detail,
+                )
+            remark = str(browser_request.get("remark", "")).strip()
+            document_label = f"出库单 {remark} " if remark else "当前出库单 "
             raise RuleError(
                 "jdy_timeout",
-                f"库存系统操作超过 90 秒未完成：{detail}",
+                f"{document_label}浏览器操作超过 {INVENTORY_DOCUMENT_TIMEOUT_SECONDS} 秒未完成：{detail}",
             ) from exc
         progress(
             f"库存系统：浏览器操作进程结束（用时 {time.perf_counter() - browser_started:.2f} 秒）"
@@ -3264,14 +3866,62 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                     log_progress_payload(event)
             sys.stderr.write(result.stderr)
         if result.returncode != 0:
-            _persist_completed_outbound_results(
+            partial_numbers = _persist_completed_outbound_results(
                 config, preview, confirm_save, responses
             )
-            raise RuleError("jdy_browser", _jdy_error_detail(result.stderr))
+            detail = _jdy_error_detail(result.stderr)
+            if partial_numbers:
+                detail = (
+                    f"{detail}；已完成单据已同步：{'、'.join(partial_numbers)}；"
+                    "后续单据结果需要先查询库存历史再重试"
+                )
+            else:
+                detail = f"{detail}；库存未确认成功，本次未写入本地业务数据库"
+            if operation_journal is not None and operation_id:
+                ambiguous = any(
+                    marker in detail
+                    for marker in ("可能已经保存", "请先查询库存历史", "请人工核实", "保存后")
+                )
+                operation_journal.update(
+                    operation_id,
+                    "verification_required" if ambiguous else "failed",
+                    results=responses,
+                    error=detail,
+                )
+            raise RuleError("jdy_browser", detail)
         try:
-            responses.append(json.loads(result.stdout))
-        except json.JSONDecodeError as exc:
+            parsed_result = json.loads(result.stdout)
+            if not isinstance(parsed_result, dict):
+                raise ValueError("库存系统返回结果不是对象")
+            responses.append(parsed_result)
+        except (json.JSONDecodeError, ValueError) as exc:
+            if operation_journal is not None and operation_id:
+                operation_journal.update(
+                    operation_id,
+                    "verification_required",
+                    results=responses,
+                    error="库存系统返回结果无法解析，保存状态待核对",
+                )
             raise RuleError("jdy_browser", "库存系统返回结果无法解析") from exc
+        if action == "outbound" and confirm_save and operation_journal is not None and operation_id:
+            confirmed_number = _persist_single_outbound_result(config, preview, parsed_result)
+            if confirmed_number:
+                if len(responses) < len(requests):
+                    operation_journal.update(
+                        operation_id,
+                        "partial_external_confirmed",
+                        results=responses,
+                    )
+                    progress(
+                        f"库存系统：已完成第 {len(responses)}/{len(requests)} 个单据，"
+                        f"{confirmed_number} 已同步本地，后续重试将跳过该单据"
+                    )
+                else:
+                    operation_journal.update(
+                        operation_id,
+                        "external_confirmed",
+                        results=responses,
+                    )
     try:
         response = responses[0] if action != "outbound" else {
             "ok": True,
@@ -3287,10 +3937,52 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                 not str(item.get("documentNumber", "")).strip()
                 for item in results
             ):
-                raise RuleError("jdy_save_result", "库存单已返回成功，但缺少分单结果或单据编号；结果需要人工核实")
+                if operation_journal is not None and operation_id:
+                    operation_journal.update(
+                        operation_id,
+                        "verification_required",
+                        results=results,
+                        error="库存系统返回成功但缺少完整单据编号",
+                    )
+                raise RuleError(
+                    "jdy_save_result",
+                    "库存系统可能已经保存，但没有返回完整单据编号；请先查询库存历史核实，不要直接重复出库",
+                )
+            if operation_journal is not None and operation_id and not recovered_responses:
+                operation_journal.update(
+                    operation_id,
+                    "external_confirmed",
+                    results=results,
+                )
             store = InventorySyncStore(_sync_path(config), config.backup_root)
-            store.save_success(preview, results)
-            if production_batch_number:
+            try:
+                store.save_success(
+                    preview,
+                    results,
+                    production_draft=production_draft,
+                    operation_id=operation_id,
+                )
+            except Exception as exc:
+                raise RuleError(
+                    "local_sync_failed",
+                    "库存系统已成功返回出库单，但本地数据库同步失败；请先按单据号核对库存系统，再执行本地同步，不要重复出库",
+                    document_numbers=[
+                        str(item.get("documentNumber", "")).strip()
+                        for item in results
+                        if str(item.get("documentNumber", "")).strip()
+                    ],
+                ) from exc
+            if production_draft is not None:
+                response["production"] = {
+                    "batch_number": production_draft["batch_number"],
+                    "order_id": production_draft["order_id"],
+                    "factory_orders": sorted(set(production_draft["selected_factory_orders"])),
+                    "status": "completed",
+                }
+                response["productionCompleted"] = True
+            elif production_batch_number:
+                # Compatibility for old prepared batches created before the
+                # inventory-first flow was introduced.
                 from .production import complete_production_batch
                 response["production"] = complete_production_batch(config, production_batch_number)
                 response["productionCompleted"] = True
@@ -3401,7 +4093,7 @@ def inventory_main(argv: list[str] | None = None) -> int:
     parser.add_argument("action", choices=(
         "list", "list-names", "preview", "order-preview", "get-outbound-scope", "import-products", "preflight", "outbound",
         "find-outbound", "reconcile-folder", "ignore-item", "unignore-item",
-        "search-products", "set-mapping", "update-mapping", "remove-mapping", "list-mappings", "update-ignore", "set-outbound-scope", "update-products", "stock-check", "open-chrome", "close-chrome",
+        "search-products", "set-mapping", "update-mapping", "remove-mapping", "list-mappings", "update-ignore", "set-outbound-scope", "update-products", "stock-check", "repair-hardware", "open-chrome", "close-chrome",
     ))
     parser.add_argument("--traveler", type=Path)
     parser.add_argument("--order-id", default="")
@@ -3427,6 +4119,7 @@ def inventory_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--include-hardware", action="store_true")
     parser.add_argument("--room-material", action="store_true")
     parser.add_argument("--production-batch", default="")
+    parser.add_argument("--production-materials-json", default="")
     parser.add_argument("--shipment-only", action="store_true")
     args = parser.parse_args(argv)
     config = Config()
@@ -3486,6 +4179,8 @@ def inventory_main(argv: list[str] | None = None) -> int:
             if not args.traveler:
                 raise RuleError("inventory_argument", "stock-check 必须提供 --traveler")
             result = check_stock(config, args.traveler, args.include_hardware)
+        elif args.action == "repair-hardware":
+            result = repair_hardware_inventory_codes(config)
         elif args.action == "find-outbound":
             if not args.order_name:
                 raise RuleError("inventory_argument", "查询出库单必须提供 --order-name")
@@ -3531,6 +4226,14 @@ def inventory_main(argv: list[str] | None = None) -> int:
             ]
             result = {"ok": True, "items": results}
         else:
+            production_materials = None
+            if args.production_materials_json:
+                try:
+                    production_materials = json.loads(args.production_materials_json)
+                except json.JSONDecodeError as exc:
+                    raise RuleError("inventory_argument", "生产材料不是有效 JSON") from exc
+                if not isinstance(production_materials, list):
+                    raise RuleError("inventory_argument", "生产材料必须是数组")
             result = run_jdy(
                 config,
                 "outbound",
@@ -3541,6 +4244,7 @@ def inventory_main(argv: list[str] | None = None) -> int:
                 order_id=args.order_id,
                 room_material=args.room_material,
                 production_batch_number=args.production_batch,
+                production_materials=production_materials,
                 shipment_only=args.shipment_only,
             )
         logger.event("backend.command.completed", "库存系统操作完成", details={"action": args.action})

@@ -77,6 +77,271 @@ def _consumed(connection: sqlite3.Connection, order_id: str) -> dict[str, float]
     return {material_key(dict(row)): float(row["quantity"] or 0) for row in rows}
 
 
+def _order_material_rows(connection: sqlite3.Connection, order_id: str) -> list[dict]:
+    """Read one row per order-material identity, including duplicate sources."""
+    rows = connection.execute(
+        """select material_type, color, thickness, edge, unit, coalesce(sum(quantity), 0) quantity
+           from material_items
+           where order_id=?
+           group by material_type, color, thickness, edge, unit
+           order by material_type, color, thickness, edge, unit""",
+        (order_id,),
+    ).fetchall()
+    return [_material_row(row) for row in rows]
+
+
+def _inventory_name_key(value: object) -> str:
+    return "".join(character for character in str(value or "").casefold() if character.isalnum())
+
+
+def _material_display_name(item: dict) -> str:
+    material_type = _normal(item.get("material_type")).casefold()
+    color = _normal(item.get("color"))
+    thickness = _normal(item.get("thickness"))
+    if material_type in {"panel", "back"}:
+        return f"{thickness}mm--{color}"
+    if material_type == "edge":
+        return f"Edge banding--{color}"
+    if material_type == "plywood":
+        return f"{thickness}mm--Plywood"
+    return ""
+
+
+def _historical_material_product_codes(
+    connection: sqlite3.Connection,
+    materials: list[dict],
+) -> dict[str, str]:
+    """Resolve current material facts to inventory SKUs for legacy documents.
+
+    New production writes already store material quantities in
+    ``manual_production_batch_materials``.  Older inventory documents only
+    retain SKU/quantity in the audit JSON, so use the saved mapping first and
+    the product catalog as a deterministic fallback.  Ambiguous products are
+    deliberately ignored rather than guessed.
+    """
+    display_names = {
+        _inventory_name_key(_material_display_name(item)): item["key"]
+        for item in materials
+        if _material_display_name(item)
+    }
+    code_by_material_key: dict[str, str] = {}
+    if connection.execute(
+        "select 1 from sqlite_master where type='table' and name='inventory_resolution_rules'"
+    ).fetchone():
+        for row in connection.execute(
+            "select normalized_name, product_code from inventory_resolution_rules where rule_type='mapping'"
+        ).fetchall():
+            material_key_value = display_names.get(_inventory_name_key(row[0]))
+            if material_key_value and row[1]:
+                code_by_material_key[material_key_value] = str(row[1]).strip().upper()
+
+    if not connection.execute(
+        "select 1 from sqlite_master where type='table' and name='products'"
+    ).fetchone():
+        return code_by_material_key
+
+    products = connection.execute(
+        "select code, name, spec, category, status from products"
+    ).fetchall()
+    for item in materials:
+        key = item["key"]
+        if key in code_by_material_key:
+            continue
+        material_type = _normal(item.get("material_type")).casefold()
+        color_key = _inventory_name_key(item.get("color"))
+        thickness_key = _inventory_name_key(item.get("thickness"))
+        candidates = []
+        for product in products:
+            if str(product[4] or "").strip() not in {"", "启用"}:
+                continue
+            category_key = _inventory_name_key(product[3])
+            name_key = _inventory_name_key(product[1])
+            spec_key = _inventory_name_key(product[2])
+            if material_type == "edge":
+                category_matches = "edge" in category_key or "封边" in category_key
+            elif material_type == "plywood":
+                category_matches = "plywood" in category_key or "夹板" in category_key
+            else:
+                category_matches = "panel" in category_key or "板" in category_key
+            if not category_matches or (color_key and color_key not in name_key):
+                continue
+            if material_type != "edge" and thickness_key and thickness_key not in spec_key:
+                continue
+            candidates.append(str(product[0]).strip().upper())
+        if len(set(candidates)) == 1:
+            code_by_material_key[key] = candidates[0]
+    return code_by_material_key
+
+
+def _legacy_inventory_consumed(
+    config: Config,
+    connection: sqlite3.Connection,
+    order_id: str,
+) -> dict[str, float]:
+    """Read material consumed by pre-transaction legacy production records.
+
+    The legacy migration marked shipped factories as produced but had no
+    material rows.  Their confirmed inventory documents are still reliable
+    evidence, so use them only for those legacy batches.  Once a batch has
+    explicit material rows, this path skips it and avoids double counting.
+    """
+    audit_path = config.state_dir / "inventory-outbound-records.json"
+    try:
+        payload = json.loads(audit_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, json.JSONDecodeError):
+        return {}
+    records = payload.get("records", {}) if isinstance(payload, dict) else {}
+    if not isinstance(records, dict):
+        return {}
+
+    material_rows = []
+    for item in _order_material_rows(connection, order_id):
+        item["total_quantity"] = item.pop("quantity")
+        material_rows.append(item)
+    code_by_material_key = _historical_material_product_codes(connection, material_rows)
+    material_key_by_code = {code: key for key, code in code_by_material_key.items()}
+    if not material_key_by_code:
+        return {}
+
+    documents = connection.execute(
+        """select document_number, document_type, status, factory_order
+           from outbound_documents where order_id=?""",
+        (order_id,),
+    ).fetchall()
+    consumed: dict[str, float] = {}
+    for document in documents:
+        document_number = str(document[0] or "").strip()
+        record = next(
+            (
+                value for value in records.values()
+                if isinstance(value, dict)
+                and str(value.get("document_number", "")).strip() == document_number
+            ),
+            None,
+        )
+        if not record:
+            continue
+        kind = str(record.get("kind") or document[1] or "").strip().casefold()
+        if kind not in {"materials", "material", "板材", "材料"}:
+            continue
+        status = str(record.get("status") or document[2] or "").strip()
+        if status != "已出库":
+            continue
+        links = [
+            str(row[0]).strip().upper()
+            for row in connection.execute(
+                "select factory_order from outbound_document_factories where document_number=? and order_id=?",
+                (document_number, order_id),
+            ).fetchall()
+            if str(row[0]).strip()
+        ]
+        if not links and str(document[3] or "").strip().upper() != order_id:
+            links = [str(document[3]).strip().upper()]
+        if not links:
+            continue
+        legacy_factories = []
+        for factory_order in set(links):
+            legacy = connection.execute(
+                """select b.batch_id
+                   from manual_production_batch_factories f
+                   join manual_production_batches b on b.batch_id=f.batch_id
+                   where f.order_id=? and f.factory_order=?
+                     and b.status='completed' and b.source='legacy-outbound-migration'
+                     and not exists (
+                         select 1 from manual_production_batch_materials m
+                         where m.batch_id=b.batch_id
+                     ) limit 1""",
+                (order_id, factory_order),
+            ).fetchone()
+            if legacy:
+                legacy_factories.append(factory_order)
+        if not legacy_factories:
+            continue
+        for item in record.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("productCode", "")).strip().upper()
+            material_key_value = material_key_by_code.get(code)
+            if not material_key_value:
+                continue
+            try:
+                quantity = float(item.get("quantity", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if quantity > 0:
+                consumed[material_key_value] = consumed.get(material_key_value, 0.0) + quantity
+    return consumed
+
+
+def cumulative_production_materials(
+    config: Config,
+    order_id: str,
+    current_materials: Iterable[dict],
+) -> list[dict]:
+    """Return the order-level cumulative material quantity for inventory.
+
+    A production draft contains only the quantity consumed by the currently
+    selected factories.  JDY, however, keeps one material outbound document
+    per order.  Updating that document therefore requires completed manual
+    batches, legacy confirmed consumption, and the current draft to be added
+    together.  This helper is read-only; the current draft is still recorded
+    separately after JDY confirms the save.
+    """
+    normalized = _normal(order_id).upper()
+    connection = _connect(config)
+    try:
+        rows: list[dict] = []
+        by_key: dict[str, dict] = {}
+        for item in _order_material_rows(connection, normalized):
+            item["total_quantity"] = item.pop("quantity")
+            rows.append(item)
+            by_key[item["key"]] = item
+
+        cumulative = _consumed(connection, normalized)
+        for key, quantity in _legacy_inventory_consumed(config, connection, normalized).items():
+            cumulative[key] = cumulative.get(key, 0.0) + quantity
+
+        for raw in current_materials:
+            item = dict(raw)
+            key = _normal(item.get("key")) or material_key(item)
+            if key not in by_key:
+                raise RuleError(
+                    "production_material_unknown",
+                    "生产材料包含订单中不存在的项目，已停止库存出库",
+                )
+            try:
+                quantity = float(item.get("quantity", 0) or 0)
+            except (TypeError, ValueError) as exc:
+                raise RuleError("production_material_quantity", "生产材料数量无效") from exc
+            if quantity < 0:
+                raise RuleError("production_material_quantity", "生产材料数量不能小于 0")
+            cumulative[key] = cumulative.get(key, 0.0) + quantity
+
+        result = []
+        for item in rows:
+            quantity = cumulative.get(item["key"], 0.0)
+            if quantity <= 0:
+                continue
+            if quantity > item["total_quantity"] + 1e-9:
+                raise RuleError(
+                    "production_material_quantity",
+                    f"材料 {item['key']} 的累计生产数量超过订单总量："
+                    f"{quantity:g} > {item['total_quantity']:g}",
+                )
+            result.append({
+                "material_type": item["material_type"],
+                "color": item["color"],
+                "thickness": item["thickness"],
+                "edge": item["edge"],
+                "unit": item["unit"],
+                "quantity": quantity,
+                "key": item["key"],
+            })
+        return result
+    finally:
+        connection.close()
+
+
 def production_preview(config: Config, order_id: str, factory_orders: Iterable[str]) -> dict:
     normalized = _normal(order_id).upper()
     connection = _connect(config)
@@ -95,12 +360,9 @@ def production_preview(config: Config, order_id: str, factory_orders: Iterable[s
             raise RuleError("production_already_completed", "以下工厂单已经生产，不能重复生产：" + "、".join(already_produced), factory_orders=already_produced)
         materials = []
         consumed = _consumed(connection, normalized)
-        for row in connection.execute(
-            """select material_type, color, thickness, edge, unit, quantity
-               from material_items where order_id=? order by material_type, color, thickness, edge""",
-            (normalized,),
-        ).fetchall():
-            item = _material_row(row)
+        for key, quantity in _legacy_inventory_consumed(config, connection, normalized).items():
+            consumed[key] = consumed.get(key, 0.0) + quantity
+        for item in _order_material_rows(connection, normalized):
             item["total_quantity"] = item.pop("quantity")
             item["consumed_quantity"] = consumed.get(item["key"], 0.0)
             item["remaining_quantity"] = max(0.0, item["total_quantity"] - item["consumed_quantity"])
@@ -133,6 +395,12 @@ def _decode_materials(value: object) -> list[dict]:
 
 
 def prepare_production(config: Config, order_id: str, factory_orders: Iterable[str], materials: object) -> dict:
+    """Validate a production request without changing business state.
+
+    Inventory is an external system.  Keep this step as an in-memory draft;
+    the completed production batch is recorded only after inventory returns a
+    confirmed saved document.
+    """
     preview = production_preview(config, order_id, factory_orders)
     requested = {
         _normal(item.get("key")) or material_key(item): float(item.get("quantity", 0) or 0)
@@ -149,34 +417,92 @@ def prepare_production(config: Config, order_id: str, factory_orders: Iterable[s
         remaining = available[key]["remaining_quantity"]
         if quantity < 0 or quantity > remaining + 1e-9:
             raise RuleError("production_material_quantity", f"材料 {key} 的生产数量超过剩余可用数量：{remaining:g}")
+    selected_materials = []
+    for key, quantity in requested.items():
+        if quantity <= 0:
+            continue
+        item = available[key]
+        selected_materials.append({
+            "material_type": item["material_type"],
+            "color": item["color"],
+            "thickness": item["thickness"],
+            "edge": item["edge"],
+            "unit": item["unit"],
+            "quantity": quantity,
+            "key": key,
+        })
     now = _now()
     batch_number = f"MP-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
-    connection = _connect(config)
-    try:
-        cursor = connection.execute(
-            """insert into manual_production_batches(batch_number, order_id, production_time, source, status, created_at, updated_at)
-               values(?,?,?,?,?,?,?)""",
-            (batch_number, preview["order_id"], now, "manual", "prepared", now, now),
+    return {
+        **preview,
+        "batch_number": batch_number,
+        "production_time": now,
+        "status": "draft",
+        "materials": selected_materials,
+    }
+
+
+def record_completed_production(
+    connection: sqlite3.Connection,
+    draft: dict,
+) -> dict:
+    """Record a successfully completed production in an existing transaction."""
+    order_id = _normal(draft.get("order_id")).upper()
+    batch_number = _normal(draft.get("batch_number"))
+    factory_orders = [
+        _normal(value).upper()
+        for value in draft.get("selected_factory_orders", [])
+        if _normal(value)
+    ]
+    if not order_id or not batch_number or not factory_orders:
+        raise RuleError("production_record", "生产完成记录缺少订单、批次或工厂单")
+
+    existing = connection.execute(
+        "select 1 from manual_production_batches where batch_number=?",
+        (batch_number,),
+    ).fetchone()
+    if existing is not None:
+        raise RuleError("production_duplicate", f"生产批次已经记录：{batch_number}")
+
+    now = _normal(draft.get("production_time")) or _now()
+    cursor = connection.execute(
+        """insert into manual_production_batches(
+               batch_number, order_id, production_time, source, status, created_at, updated_at
+           ) values(?,?,?,?,?,?,?)""",
+        (batch_number, order_id, now, "manual", "completed", now, _now()),
+    )
+    batch_id = cursor.lastrowid
+    for factory_order in sorted(set(factory_orders)):
+        connection.execute(
+            "insert into manual_production_batch_factories(batch_id, order_id, factory_order) values(?,?,?)",
+            (batch_id, order_id, factory_order),
         )
-        batch_id = cursor.lastrowid
-        for factory_order in preview["selected_factory_orders"]:
-            connection.execute(
-                "insert into manual_production_batch_factories(batch_id, order_id, factory_order) values(?,?,?)",
-                (batch_id, preview["order_id"], factory_order),
-            )
-        for key, quantity in requested.items():
-            if quantity <= 0:
-                continue
-            item = available[key]
-            connection.execute(
-                """insert into manual_production_batch_materials(batch_id, order_id, material_type, color, thickness, edge, unit, quantity)
-                   values(?,?,?,?,?,?,?,?)""",
-                (batch_id, preview["order_id"], item["material_type"], item["color"], item["thickness"], item["edge"], item["unit"], quantity),
-            )
-        connection.commit()
-    finally:
-        connection.close()
-    return {**preview, "batch_number": batch_number, "production_time": now, "status": "prepared"}
+    for item in draft.get("materials", []):
+        quantity = float(item.get("quantity", 0) or 0)
+        if quantity <= 0:
+            continue
+        connection.execute(
+            """insert into manual_production_batch_materials(
+                   batch_id, order_id, material_type, color, thickness, edge, unit, quantity
+               ) values(?,?,?,?,?,?,?,?)""",
+            (
+                batch_id,
+                order_id,
+                _normal(item.get("material_type")),
+                _normal(item.get("color")),
+                _normal(item.get("thickness")),
+                _normal(item.get("edge")),
+                _normal(item.get("unit")),
+                quantity,
+            ),
+        )
+    return {
+        "ok": True,
+        "batch_number": batch_number,
+        "order_id": order_id,
+        "factory_orders": sorted(set(factory_orders)),
+        "status": "completed",
+    }
 
 
 def complete_production_batch(config: Config, batch_number: str) -> dict:
