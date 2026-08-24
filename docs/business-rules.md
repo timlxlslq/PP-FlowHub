@@ -70,7 +70,7 @@
 - 人工五金必须归属某个工厂单，且仅写入 `Hardware Accessory五金功能件`。
 - 用户设置为忽略的五金按名称、商品编号或已确认显示别名全局生效：不写入中央 SQLite，不生成 Traveler，也不进入库存出库；设置忽略时清理已有同项硬件事实，恢复忽略后只对后续重新同步的数据生效。
 - 订单材料、封边和五金写入中央 SQLite 前必须通过当前商品资料表的启用 SKU、有效人工映射或全局忽略；未完成项目阻止本次事实替换并进入待处理问题，不能先删除旧事实再留下半成品。AICNC 的 `WJ-*` 等来源编码只保留为来源/显示追溯信息，不视为库存 SKU。
-- 五金事实的 `product_code` 固定保存规范库存 SKU，`source_code` 保存 AICNC 原始编码，`name` 保存原始显示名称；所有新写入和历史修复都遵循这三个身份的分工。读取五金区块时，数量一致的 `Left Rail`/`Right Rail` 视为一对，只计其中一种数量；不一致时提示用户并停止写入，不能自动保留两行。
+- 五金事实的 `product_code` 固定保存规范库存 SKU，`source_code` 保存 AICNC 原始编码，`name` 保存原始显示名称；所有新写入和历史修复都遵循这三个身份的分工。读取五金区块时，数量一致的 `Left Rail`/`Right Rail` 或 `Lower Left Rail`/`Lower Right Rail` 视为一对，只计其中一种数量；低帮滑轨统一映射库存 SKU `M1003`（L-Rail）；不一致时提示用户并停止写入，不能自动保留两行。
 - Server 订单材料确认界面同时预览订单级板材/封边最终更新值和每个明确归属工厂单的五金；五金未完成 SKU 映射时可在同一界面映射或全局忽略，完成后一次确认写入。事务仍分别写入订单级材料和 `factory_order` 五金，已出货工厂单排除且不重复处理。
 - 同一工厂单在多个 Fittingslist 中出现时，数据库入库和 Traveler 预览统一按文件修改时间选择最新文件；内容一致的重复文件自动去重，最新时间相同但内容不同则阻止该工厂单写入并要求人工检查。
 - 当前已确认映射包括：`Hinge`/`TestFullHinge`→`M1001`、`Adjustable shelf holder`→`M1013`、`Cloth rod bracket - Fitting`→`M0179`、`Edge banding--Penelope FA44`→`M1043`、`19.1mm--Penelope FA44`→`M1042`、`8mm--Woodline 3`→`M1147`、`19.1mm--Walnut`→`M0159`、`Edge banding--Walnut`→`M0160`。忽略规则只读取用户维护的全局忽略列表，不内置任何特定商品的特殊忽略。

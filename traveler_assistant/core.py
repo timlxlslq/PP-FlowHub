@@ -26,6 +26,10 @@ from .database import (
 
 
 FACTORY_RE = re.compile(r"^F\d+$", re.IGNORECASE)
+FACTORY_NAME_ORDER_PREFIX_RE = re.compile(
+    r"^([A-Z]{1,3}\d{3,5}(?:-\d+)?)(?=$|[-\s_])",
+    re.IGNORECASE,
+)
 AIMES_BULK_FETCH_LIMIT = 50
 
 
@@ -34,6 +38,28 @@ class RuleError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.context = context
+
+
+def factory_name_order_prefix(factory_name: str) -> str:
+    """Return an explicit order-like prefix from an AIMES factory name."""
+    match = FACTORY_NAME_ORDER_PREFIX_RE.match(str(factory_name or "").strip())
+    return match.group(1).upper() if match else ""
+
+
+def factory_name_order_mismatch(factory_name: str, sales_order_name: str) -> tuple[str, str] | None:
+    """Return mismatched name/order prefixes without guessing a correction.
+
+    A split suffix such as ``PP0072-2`` is valid when the sales order is the
+    parent ``PP0072``. Names without an explicit order-like prefix are left
+    alone because older AIMES rows may use room names such as ``Kitchen``.
+    """
+    prefix = factory_name_order_prefix(factory_name)
+    order = str(sales_order_name or "").strip().upper()
+    if not prefix or not order or prefix == order:
+        return None
+    if re.fullmatch(rf"{re.escape(order)}-\d+", prefix):
+        return None
+    return prefix, order
 
 
 def progress(message: str, **details) -> None:
@@ -555,6 +581,12 @@ def _normalize_name(value: str) -> str:
     return re.sub(r"[\s_-]+", "", value).upper()
 
 
+RAIL_PAIR_NAMES = (
+    ("LEFTRAIL", "RIGHTRAIL", "Left Rail", "Right Rail"),
+    ("LOWERLEFTRAIL", "LOWERRIGHTRAIL", "Lower Left Rail", "Lower Right Rail"),
+)
+
+
 def parse_fittings_groups(
     path: Path,
     *,
@@ -614,26 +646,28 @@ def parse_fittings_groups(
                 unit=_text(sheet.cell(row, 9).value),
                 quantity=_number(sheet.cell(row, 11).value),
             ))
-        # A Left Rail and a Right Rail with the same quantity are the two
-        # sides of one physical rail pair.  Keep one source row so downstream
-        # inventory quantities represent pairs rather than individual sides.
-        left = [item for item in items if _normalize_name(item.name) == "LEFTRAIL"]
-        right = [item for item in items if _normalize_name(item.name) == "RIGHTRAIL"]
-        if left and right and (
-            len(left) != 1
-            or len(right) != 1
-            or left[0].quantity != right[0].quantity
-        ):
-            raise RuleError(
-                "paired_rail_quantity_mismatch",
-                f"工厂单 {factory} 的 Left Rail / Right Rail 数量不一致，"
-                f"Left Rail={left[0].quantity:g}、Right Rail={right[0].quantity:g}；"
-                "请人工核对后再写入。",
-                factory_order=factory,
-                left_quantity=left[0].quantity,
-                right_quantity=right[0].quantity,
-            )
-        if len(left) == 1 and len(right) == 1 and left[0].quantity == right[0].quantity:
-            items = [item for item in items if item is not right[0]]
+        # A left/right rail pair represents one physical rail set.  Keep one
+        # source row so downstream inventory quantities represent pairs rather
+        # than individual sides.  The same rule applies to high and lower
+        # rails, whose source names are different in the Fittingslist.
+        for left_name, right_name, left_label, right_label in RAIL_PAIR_NAMES:
+            left = [item for item in items if _normalize_name(item.name) == left_name]
+            right = [item for item in items if _normalize_name(item.name) == right_name]
+            if left and right and (
+                len(left) != 1
+                or len(right) != 1
+                or left[0].quantity != right[0].quantity
+            ):
+                raise RuleError(
+                    "paired_rail_quantity_mismatch",
+                    f"工厂单 {factory} 的 {left_label} / {right_label} 数量不一致，"
+                    f"{left_label}={left[0].quantity:g}、{right_label}={right[0].quantity:g}；"
+                    "请人工核对后再写入。",
+                    factory_order=factory,
+                    left_quantity=left[0].quantity,
+                    right_quantity=right[0].quantity,
+                )
+            if len(left) == 1 and len(right) == 1 and left[0].quantity == right[0].quantity:
+                items = [item for item in items if item is not right[0]]
         groups.append((factory, items))
     return groups

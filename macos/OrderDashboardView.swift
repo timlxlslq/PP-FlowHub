@@ -22,6 +22,7 @@ let orderDashboardMetricSpacing: CGFloat = 10
 // needs a separate color column.
 let orderDashboardFactoryColumnWidths: [CGFloat] = [150, 220, 110, 110, 120, 170]
 let orderDashboardFactorySelectionColumnWidth: CGFloat = 54
+let orderDashboardOperationColumnWidth: CGFloat = 136
 let dashboardMessageVisibleRowCount = 3
 let dashboardMessageRowHeight: CGFloat = 74
 let dashboardMessageViewportHeight = CGFloat(dashboardMessageVisibleRowCount) * dashboardMessageRowHeight
@@ -1077,6 +1078,7 @@ struct OrderDashboardView: View {
     @ObservedObject var model: AppModel
     @State private var expandedOrderID: String?
     @State private var detailOrder: OrderDashboardItem?
+    @State private var orderArrangementOrder: OrderDashboardItem?
     @State private var selectedFactoryID: String?
     @State private var selectedFactoryIDs: Set<String> = []
     @State private var searchText = ""
@@ -1137,6 +1139,9 @@ struct OrderDashboardView: View {
                 order: item
             )
             .frame(minWidth: 960, minHeight: 680)
+        }
+        .sheet(item: $orderArrangementOrder) { item in
+            OrderAnnotationsSheet(model: model, order: item)
         }
         .sheet(isPresented: $model.showCostSheet) {
             OrderCostSheet(model: model)
@@ -1506,6 +1511,7 @@ struct OrderDashboardView: View {
             tableHeader("出货进度")
             tableHeader("更新时间")
             tableHeader("操作")
+                .frame(width: orderDashboardOperationColumnWidth)
         }
         .font(.caption.weight(.semibold))
         .foregroundColor(.secondary)
@@ -1519,10 +1525,11 @@ struct OrderDashboardView: View {
             && model.selectedOrderPath == item.sourceFolder
         let status = item.stage
         return VStack(spacing: 0) {
-            OrderDashboardClickContainer(
-                onSingleClick: { toggleExpanded(item) },
-                onDoubleClick: { openOrderDetail(item) }
-            ) {
+            HStack(spacing: 0) {
+                OrderDashboardClickContainer(
+                    onSingleClick: { toggleExpanded(item) },
+                    onDoubleClick: { openOrderDetail(item) }
+                ) {
                 HStack(spacing: 0) {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .frame(width: 28, height: 28)
@@ -1606,15 +1613,34 @@ struct OrderDashboardView: View {
                     tableCell {
                         Text(item.modifiedAt.isEmpty ? "—" : appDisplayTimestamp(item.modifiedAt)).lineLimit(1)
                     }
-                    tableCell {
-                        Text(isExpanded ? "收起详情" : "查看详情")
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 11)
+            }
+            .frame(maxWidth: .infinity)
+
+                // Keep action buttons outside the row-level gesture recognizers.
+                tableCell {
+                    HStack(spacing: 8) {
+                        Button("详情") {
+                            openOrderDetail(item)
+                        }
+                        .buttonStyle(.borderless)
                         .foregroundColor(AppPalette.accent)
+
+                        Button("订单安排") {
+                            orderArrangementOrder = item
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundColor(AppPalette.accent)
+                        .help("打开订单备注与安装安排")
                     }
                 }
+                .frame(width: orderDashboardOperationColumnWidth)
                 .padding(.vertical, 11)
-                .background(isSelected ? AppPalette.accent.opacity(0.045) : AppPalette.surface)
-                .contentShape(Rectangle())
             }
+            .background(isSelected ? AppPalette.accent.opacity(0.045) : AppPalette.surface)
+            .contentShape(Rectangle())
 
             if isExpanded {
                 OrderDashboardDetailCard(
@@ -1740,7 +1766,6 @@ struct OrderDashboardDetailPage: View {
                                 }
                             }
                         }
-                        OrderAnnotationsEditor(model: model, order: order)
                         boardAndEdgeSection
                         hardwareSection
                     }
@@ -1957,12 +1982,64 @@ private func orderInstallationDraftValue(_ value: Date) -> String {
     orderInstallationDateFormatter().string(from: value)
 }
 
+private func orderInstallationPickerDisplayDate(_ value: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = .current
+    formatter.dateFormat = "M/d/yyyy"
+    return formatter.string(from: value)
+}
+
+private func orderInstallationInstallerSuggestions(from orders: [OrderDashboardItem]) -> [String] {
+    let installers = orders.flatMap { item in
+        item.plannedInstallationDays + item.actualInstallationDays
+    }
+    return Set(
+        installers
+            .map { $0.installer.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    ).sorted {
+        $0.localizedStandardCompare($1) == .orderedAscending
+    }
+}
+
+private struct OrderAnnotationsSheet: View {
+    @ObservedObject var model: AppModel
+    let order: OrderDashboardItem
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("订单安排 (\(order.orderId))")
+                    .font(.title2.weight(.semibold))
+                Spacer(minLength: 0)
+                Button("关闭") { dismiss() }
+                    .appActionButton(minWidth: 80)
+            }
+
+            ScrollView(.vertical) {
+                OrderAnnotationsEditor(model: model, order: order)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .scrollIndicators(.automatic)
+            .frame(maxHeight: 420)
+        }
+        .padding(AppLayout.contentPadding)
+        .frame(minWidth: 640, idealWidth: 700)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(AppPalette.background)
+    }
+}
+
 private struct OrderAnnotationsEditor: View {
     @ObservedObject var model: AppModel
     let order: OrderDashboardItem
     @State private var note: String
     @State private var plannedDays: [OrderInstallationDraft]
     @State private var actualDays: [OrderInstallationDraft]
+    @State private var datePickerRowID: UUID?
     @State private var status = ""
 
     init(model: AppModel, order: OrderDashboardItem) {
@@ -1975,6 +2052,7 @@ private struct OrderAnnotationsEditor: View {
         _actualDays = State(initialValue: order.actualInstallationDays.map {
             OrderInstallationDraft(date: orderInstallationDraftDate($0.date), installer: $0.installer)
         })
+        _datePickerRowID = State(initialValue: nil)
     }
 
     var body: some View {
@@ -2043,14 +2121,69 @@ private struct OrderAnnotationsEditor: View {
             } else {
                 ForEach(rows) { $day in
                     HStack(spacing: 8) {
-                        DatePicker("", selection: $day.date, displayedComponents: .date)
-                            .labelsHidden()
-                            .datePickerStyle(.field)
-                            .frame(width: 150)
-                        TextField("安装人/安装小组", text: $day.installer)
-                            .textFieldStyle(.roundedBorder)
+                        Button {
+                            datePickerRowID = datePickerRowID == day.id ? nil : day.id
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "calendar")
+                                    .foregroundColor(AppPalette.accent)
+                                Text(orderInstallationPickerDisplayDate(day.date))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .padding(.horizontal, 9)
+                            .frame(width: 156, height: 26, alignment: .leading)
+                        }
+                        .buttonStyle(.bordered)
+                        .popover(
+                            isPresented: Binding(
+                                get: { datePickerRowID == day.id },
+                                set: { isPresented in
+                                    if !isPresented && datePickerRowID == day.id {
+                                        datePickerRowID = nil
+                                    }
+                                }
+                            ),
+                            arrowEdge: .bottom
+                        ) {
+                            DatePicker("", selection: $day.date, displayedComponents: [.date])
+                                .labelsHidden()
+                                .datePickerStyle(.graphical)
+                                .padding(12)
+                        }
+
+                        HStack(spacing: 0) {
+                            TextField("安装人/安装小组", text: $day.installer)
+                                .textFieldStyle(.plain)
+                                .padding(.leading, 8)
+                                .frame(minHeight: 26)
+                            Menu {
+                                let suggestions = orderInstallationInstallerSuggestions(from: model.dashboardOrders)
+                                if suggestions.isEmpty {
+                                    Text("暂无历史安装人")
+                                } else {
+                                    ForEach(suggestions, id: \.self) { installer in
+                                        Button(installer) {
+                                            day.installer = installer
+                                        }
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "chevron.down")
+                                    .frame(width: 28, height: 26)
+                            }
+                            .menuStyle(.borderlessButton)
+                            .help("选择以前使用过的安装人或安装小组")
+                        }
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(AppPalette.separator)
+                        )
+                        .frame(maxWidth: .infinity)
                         Button {
                             rows.wrappedValue.removeAll { $0.id == day.id }
+                            if datePickerRowID == day.id {
+                                datePickerRowID = nil
+                            }
                         } label: {
                             Image(systemName: "trash")
                         }
@@ -2089,7 +2222,10 @@ private struct OrderAnnotationsEditor: View {
             orderID: order.orderId,
             userNote: note,
             plannedDays: planned,
-            actualDays: actual
+            actualDays: actual,
+            onStatusChange: { message in
+                status = message
+            }
         )
     }
 }
@@ -2181,37 +2317,30 @@ struct OrderDashboardDetailCard: View {
 
     private var panelColorsSummary: some View {
         let materials = orderDashboardPanelMaterials(model.orderMaterials)
-        return HStack(alignment: .center, spacing: 8) {
+        return HStack(alignment: .center, spacing: 10) {
             Text("Panel颜色")
                 .font(.subheadline.weight(.semibold))
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: true, vertical: false)
-            Spacer(minLength: 12)
             if materials.isEmpty {
                 Text("—")
                     .font(.title3.weight(.medium))
             } else {
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 100, maximum: 190), alignment: .trailing)],
-                    alignment: .trailing,
-                    spacing: 4
-                ) {
+                HStack(alignment: .center, spacing: 12) {
                     ForEach(materials) { material in
                         PanelMaterialHoverPreview(material: material) {
                             Text(material.color)
                                 .font(.title3.weight(.medium))
-                                .lineLimit(2)
-                                .multilineTextAlignment(.trailing)
-                                .frame(maxWidth: .infinity, alignment: .trailing)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                     }
                 }
-                .frame(maxWidth: 440, alignment: .trailing)
-                .layoutPriority(1)
             }
         }
         .frame(minHeight: AppLayout.controlHeight, alignment: .center)
-        .frame(maxWidth: .infinity, alignment: .trailing)
+        .fixedSize(horizontal: true, vertical: false)
+        .padding(.trailing, 64)
     }
 
     private var factoriesPanel: some View {

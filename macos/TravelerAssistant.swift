@@ -234,6 +234,10 @@ struct OrderDashboardItem: Identifiable {
     let factories: [OrderDashboardFactory]
 }
 
+func dashboardOrderRows(from object: [String: Any]) -> [[String: Any]]? {
+    object["orders"] as? [[String: Any]]
+}
+
 struct ServerChangePreview: Identifiable {
     let id: String
     let changeType: String
@@ -1840,7 +1844,7 @@ final class AppModel: ObservableObject {
     private func applyDashboardObject(_ object: [String: Any], includeChanges: Bool = true) {
         applyDashboardOperationTrace(object)
         applyCurrentIssues(from: object)
-        let rows = object["orders"] as? [[String: Any]] ?? []
+        guard let rows = dashboardOrderRows(from: object) else { return }
         dashboardOrders = rows.compactMap { row in
             guard let orderID = row["order_id"] as? String, !orderID.isEmpty else { return nil }
             let factories = (row["factories"] as? [[String: Any]] ?? []).compactMap { factory -> OrderDashboardFactory? in
@@ -4393,7 +4397,8 @@ final class AppModel: ObservableObject {
         orderID: String,
         userNote: String,
         plannedDays: [OrderInstallationDay],
-        actualDays: [OrderInstallationDay]
+        actualDays: [OrderInstallationDay],
+        onStatusChange: @escaping (String) -> Void = { _ in }
     ) {
         let encode: ([OrderInstallationDay]) -> String = { days in
             let payload = days.map { ["date": $0.date, "installer": $0.installer] }
@@ -4406,9 +4411,11 @@ final class AppModel: ObservableObject {
         let targetOrderID = orderID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !targetOrderID.isEmpty else {
             orderStatus = "无法保存订单信息：没有选择订单"
+            onStatusChange("保存失败：没有选择订单")
             return
         }
         orderStatus = "正在保存订单备注和安装安排…"
+        onStatusChange("正在保存…")
         addOrderStep("保存订单信息", "正在保存备注、计划安装日期和实际安装日期", "running")
         runOrder(
             [
@@ -4418,11 +4425,19 @@ final class AppModel: ObservableObject {
                 "--planned-installation-days", encode(plannedDays),
                 "--actual-installation-days", encode(actualDays),
             ],
-            failureStatus: "订单备注和安装安排保存失败"
+            failureStatus: "订单备注和安装安排保存失败",
+            onFailure: {
+                let message = businessFriendlyMessage(
+                    self.orderError,
+                    operation: "保存订单备注和安装安排"
+                )
+                onStatusChange("保存失败：\(message)")
+            }
         ) { object in
             self.applyDashboardObject(object, includeChanges: false)
             self.orderStatus = "订单备注和安装安排已保存"
             self.finishOrderStep("订单备注和安装安排已保存", "success")
+            onStatusChange("已保存")
         }
     }
 

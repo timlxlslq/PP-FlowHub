@@ -31,6 +31,7 @@ from traveler_assistant.inventory import (
     _is_inventory_service_workbench_url,
     _persist_completed_outbound_results,
     build_database_preview,
+    database_document_items,
     build_preview,
     check_stock,
     database_outbound_fingerprint,
@@ -46,6 +47,7 @@ from traveler_assistant.inventory import (
     reconcile_folder_status,
     run_jdy,
     resolve_inventory_items,
+    repair_hardware_inventory_codes,
     outbound_scope_decisions,
     set_ignored_mapping,
     save_manual_mapping,
@@ -345,6 +347,29 @@ class InventoryTests(unittest.TestCase):
             ).fetchall()
             self.assertEqual([row[0] for row in facts], [100.0, 5.0])
 
+    def test_database_outbound_blocks_mismatched_factory_name_order_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(state_dir=Path(directory) / "state")
+            config.prepare_storage()
+            store = OrderIndexStore(config.workflow_database)
+            store.connection.execute(
+                "insert into orders(order_id, order_type, updated_at) values(?,?,?)",
+                ("PP0072", "owned", "now"),
+            )
+            store.connection.execute(
+                "insert into factory_orders(factory_order, order_id, factory_name, sales_order_name, optimized, outbound_status, updated_at) values(?,?,?,?,?,?,?)",
+                ("F2608190230", "PP0072", "P0072-BED 2", "PP0072", 1, "未出库", "now"),
+            )
+            store.connection.execute(
+                "insert into hardware_items(order_id, factory_order, scope, product_code, name, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?,?)",
+                ("PP0072", "F2608190230", "factory_order", "M1001", "Hinge", 1, "件", "aicnc", "now"),
+            )
+            store.commit()
+            store.close()
+
+            with self.assertRaisesRegex(RuleError, "名称前缀 P0072.*PP0072"):
+                database_document_items(config, "PP0072", ["F2608190230"])
+
     def test_customer_supplied_scope_is_rejected_for_owned_order(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Config(state_dir=Path(directory) / "state")
@@ -478,7 +503,7 @@ class InventoryTests(unittest.TestCase):
         self.assertIn('if orderType != "owned"', detail_card)
         self.assertIn('Button("设置出库范围")', detail_card)
         detail = dashboard.split("struct OrderDashboardDetailPage", 1)[1].split(
-            "struct OrderDashboardDetailCard", 1
+            "private func orderInstallationDateFormatter", 1
         )[0]
         self.assertNotIn('Text("订单详情")', detail)
         self.assertIn("VStack(alignment: .leading, spacing: 14)", detail)
@@ -1495,6 +1520,59 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual([item["name"] for item in result["missing"]], ["未建档五金"])
             self.assertEqual(result["missing"][0]["source_code"], "WJ-UNKNOWN")
             self.assertEqual(result["outbound"], [])
+
+    def test_lower_rail_names_resolve_to_l_rail_sku(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(state_dir=root / "state")
+            config.prepare_storage()
+            catalog_path = config.state_dir / "inventory" / "current-products.xlsx"
+            make_catalog(catalog_path)
+            workbook = load_workbook(catalog_path)
+            workbook.active.append(["Hardware", "M1003", "L-Rail", "", "启用", "件"])
+            workbook.save(catalog_path)
+
+            result = resolve_inventory_items(
+                config,
+                [(TravelerItem(1, "五金", "Lower Left Rail", 1, "F0099"), "")],
+            )
+
+            self.assertEqual(result["missing"], [])
+            self.assertEqual(result["outbound"][0].product_code, "M1003")
+
+    def test_repair_hardware_collapses_lower_rail_pair_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(state_dir=root / "state")
+            config.prepare_storage()
+            catalog_path = config.state_dir / "inventory" / "current-products.xlsx"
+            make_catalog(catalog_path)
+            workbook = load_workbook(catalog_path)
+            workbook.active.append(["Hardware", "M1003", "L-Rail", "", "启用", "件"])
+            workbook.save(catalog_path)
+
+            connection = sqlite3.connect(config.workflow_database)
+            connection.executemany(
+                """insert into hardware_items(
+                    order_id, factory_order, product_code, source_code, name,
+                    quantity, source_type, source_path, updated_at
+                ) values(?,?,?,?,?,?,?,?,?)""",
+                [
+                    ("PP0099", "F0099", "M1003", "L-Rail", "Lower Left Rail", 1, "aicnc", "/server/fittings.xlsx", "now"),
+                    ("PP0099", "F0099", "M1003", "L-Rail", "Lower Right Rail", 1, "aicnc", "/server/fittings.xlsx", "now"),
+                ],
+            )
+            connection.commit()
+            connection.close()
+
+            result = repair_hardware_inventory_codes(config)
+
+            self.assertEqual(result["rails_collapsed"], 1)
+            self.assertEqual(result["rail_rows_removed"], 1)
+            rows = sqlite3.connect(config.workflow_database).execute(
+                "select name, product_code, quantity from hardware_items"
+            ).fetchall()
+            self.assertEqual(rows, [("Lower Left Rail", "M1003", 1.0)])
 
     def test_ignoring_hardware_removes_existing_database_facts(self):
         with tempfile.TemporaryDirectory() as directory:

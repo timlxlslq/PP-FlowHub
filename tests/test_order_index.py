@@ -775,6 +775,10 @@ class OrderIndexTests(unittest.TestCase):
             )
 
             self.assertTrue(saved["saved"])
+            self.assertEqual(
+                [item["order_id"] for item in saved["orders"]],
+                ["PP9999"],
+            )
             row = saved["order"]
             self.assertEqual(row["user_note"], "客户要求安装前确认台面颜色")
             self.assertEqual(row["installation"]["planned"]["start_date"], "2026-07-08")
@@ -1827,6 +1831,27 @@ class OrderIndexTests(unittest.TestCase):
         )
         self.assertEqual(unassigned_visible, [])
         self.assertEqual(unassigned_warnings[0]["suggested_order_id"], "CS001")
+
+    def test_aimes_factory_name_order_prefix_mismatch_is_a_warning(self):
+        issue = _aimes_row_issue({
+            "factory_order": "F2608190230",
+            "factory_name": "P0072-BED 2",
+            "sales_order_name": "PP0072",
+            "split_time": "2026-08-19 13:06:45",
+        })
+        self.assertIsNotNone(issue)
+        self.assertIn("订单前缀 P0072 与销售单名称 PP0072 不一致", issue["reason"])
+        visible, warnings = _partition_aimes_rows(
+            [{
+                "factory_order": "F2608190230",
+                "factory_name": "P0072-BED 2",
+                "sales_order_name": "PP0072",
+                "split_time": "2026-08-19 13:06:45",
+            }],
+            set(),
+        )
+        self.assertEqual(visible, [])
+        self.assertEqual(warnings[0]["factory_order"], "F2608190230")
 
     def test_fittings_factory_order_uses_order_folder_hint(self):
         candidates = {}

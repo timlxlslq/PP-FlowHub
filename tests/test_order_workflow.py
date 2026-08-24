@@ -119,7 +119,13 @@ def make_fittings(path: Path, groups: list[tuple[str, float]]):
     wb.save(path)
 
 
-def make_rail_fittings(path: Path, left_quantity: float, right_quantity: float):
+def make_rail_fittings(
+    path: Path,
+    left_quantity: float,
+    right_quantity: float,
+    left_name: str = "Left Rail",
+    right_name: str = "Right Rail",
+):
     wb = Workbook()
     ws = wb.active
     ws.title = "Page1"
@@ -128,7 +134,7 @@ def make_rail_fittings(path: Path, left_quantity: float, right_quantity: float):
     header = 6
     for column, value in ((3, "Name"), (5, "Code"), (6, "Size"), (11, "Quantity")):
         ws.cell(header, column).value = value
-    for row, name, quantity in ((7, "Left Rail", left_quantity), (8, "Right Rail", right_quantity)):
+    for row, name, quantity in ((7, left_name, left_quantity), (8, right_name, right_quantity)):
         ws.cell(row, 3).value = name
         ws.cell(row, 5).value = "H-Rail"
         ws.cell(row, 9).value = "Piece"
@@ -711,6 +717,19 @@ class OrderWorkflowTests(unittest.TestCase):
             with self.assertRaises(RuleError) as raised:
                 parse_fittings_groups(path)
             self.assertEqual(raised.exception.code, "paired_rail_quantity_mismatch")
+
+            make_rail_fittings(
+                path,
+                1,
+                1,
+                left_name="Lower Left Rail",
+                right_name="Lower Right Rail",
+            )
+            groups = parse_fittings_groups(path)
+            self.assertEqual(
+                [(item.name, item.quantity) for item in groups[0][1]],
+                [("Lower Left Rail", 1.0)],
+            )
 
     def test_single_color_materials_and_integer_validation(self):
         with tempfile.TemporaryDirectory() as temp:

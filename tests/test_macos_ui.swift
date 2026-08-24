@@ -235,6 +235,49 @@ private struct MacOSUIRegressionTests {
     }
 
     private static func testOrderDashboardRules() {
+        require(
+            dashboardOrderRows(from: ["order": ["order_id": "PP0072"]]) == nil,
+            "部分订单响应不应被当作完整订单列表"
+        )
+        require(
+            dashboardOrderRows(from: ["orders": [["order_id": "PP0072"]]])?.count == 1,
+            "完整订单列表响应没有被识别"
+        )
+        let dashboardSource = try! String(
+            contentsOfFile: "macos/OrderDashboardView.swift",
+            encoding: .utf8
+        )
+        require(
+            dashboardSource.contains("Button(\"详情\")")
+                && dashboardSource.contains("Button(\"订单安排\")")
+                && dashboardSource.contains(".sheet(item: $orderArrangementOrder)"),
+            "订单行没有同时提供材料详情和独立订单安排入口"
+        )
+        if let rowStart = dashboardSource.range(of: "private func orderRow"),
+           let rowEnd = dashboardSource.range(of: "private func prepareSelectedOrder", range: rowStart.upperBound..<dashboardSource.endIndex) {
+            let rowSource = String(dashboardSource[rowStart.lowerBound..<rowEnd.lowerBound])
+            if let gestureStart = rowSource.range(of: "OrderDashboardClickContainer("),
+               let gestureEnd = rowSource.range(of: "// Keep action buttons outside the row-level gesture recognizers.", range: gestureStart.upperBound..<rowSource.endIndex) {
+                let gestureSource = String(rowSource[gestureStart.lowerBound..<gestureEnd.lowerBound])
+                require(
+                    !gestureSource.contains("Button(\"详情\")")
+                        && !gestureSource.contains("Button(\"订单安排\")"),
+                    "订单操作按钮仍位于订单行单/双击手势区域内"
+                )
+            } else {
+                require(false, "无法定位订单行手势区域与操作列的边界")
+            }
+        } else {
+            require(false, "无法定位订单行源码范围")
+        }
+        if let detailStart = dashboardSource.range(of: "struct OrderDashboardDetailPage: View"),
+           let detailEnd = dashboardSource.range(of: "private var orderIdentityCard", range: detailStart.upperBound..<dashboardSource.endIndex) {
+            let detailHeader = String(dashboardSource[detailStart.lowerBound..<detailEnd.lowerBound])
+            require(
+                !detailHeader.contains("OrderAnnotationsEditor("),
+                "材料详情页不应继续嵌入订单备注与安装安排编辑器"
+            )
+        }
         require(dashboardStatusIsInProgress("正在后台扫描 Server 变化…"), "进行中的 Server 状态未被识别")
         require(!dashboardStatusIsInProgress("✅ Server 扫描完成"), "已完成的 Server 状态被误判为进行中")
         require(orderDashboardIsCompleted("已出货"), "已出货订单没有被识别为已完成")
@@ -328,6 +371,29 @@ private struct MacOSUIRegressionTests {
             "非连续安装日期的开始日、结束日或天数摘要错误"
         )
         require(orderInstallationDisplayDate("2026-07-08") == "7/8", "安装日期显示格式错误")
+        require(
+            dashboardSource.contains(".datePickerStyle(.graphical)")
+                && dashboardSource.contains("orderInstallationPickerDisplayDate")
+                && dashboardSource.contains("datePickerRowID"),
+            "安装日期必须通过按钮弹出日历式年月日选择器"
+        )
+        require(
+            dashboardSource.contains("orderInstallationInstallerSuggestions")
+                && dashboardSource.contains("Menu {")
+                && dashboardSource.contains("TextField(\"安装人/安装小组\""),
+            "安装人输入框必须支持历史下拉选择和直接输入新名称"
+        )
+        require(
+            dashboardSource.contains(".frame(minWidth: 640, idealWidth: 700)")
+                && dashboardSource.contains(".fixedSize(horizontal: false, vertical: true)")
+                && dashboardSource.contains(".frame(maxHeight: 420)"),
+            "订单安排窗口尺寸没有按紧凑布局调整"
+        )
+        require(
+            dashboardSource.contains(".background(AppPalette.background)")
+                && !dashboardSource.contains(".frame(minWidth: 640, idealWidth: 700)\n        .appPageFrame()"),
+            "订单安排弹窗不应继续继承主窗口的最小高度"
+        )
         require(
             orderDashboardMetricsFit(width: AppLayout.windowMinWidth, horizontalPadding: AppLayout.contentPadding),
             "订单指标卡在最小窗口宽度下无法保持一行显示"
@@ -878,6 +944,14 @@ private struct MacOSUIRegressionTests {
         require(
             dashboard.contains("remainingQuantity <= 0"),
             "生产弹窗没有禁用零剩余材料输入框"
+        )
+        require(
+            dashboard.contains("HStack(alignment: .center, spacing: 10)") &&
+                dashboard.contains("HStack(alignment: .center, spacing: 12)") &&
+                dashboard.contains(".lineLimit(1)") &&
+                dashboard.contains(".fixedSize(horizontal: true, vertical: false)") &&
+                dashboard.contains(".padding(.trailing, 64)"),
+            "Panel颜色标题和颜色值没有使用紧凑的右侧安全布局"
         )
         require(
             dashboard.contains("Button(\"确认生产并扣减材料\")") &&

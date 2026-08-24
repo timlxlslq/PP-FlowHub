@@ -22,7 +22,14 @@ from typing import Iterable
 
 from openpyxl import load_workbook
 
-from .core import Config, RuleError, _normalize_name, _text, progress
+from .core import (
+    Config,
+    RuleError,
+    _normalize_name,
+    _text,
+    factory_name_order_mismatch,
+    progress,
+)
 from .operation_log import configure_operation_log, log_database_statement, log_progress_payload
 from .database import ensure_outbound_document_factory_links, ensure_schema
 
@@ -592,6 +599,26 @@ def database_document_items(
             "inventory_factory_unknown",
             "数据库中找不到所选工厂单，已停止出库：" + "、".join(unknown),
             factory_orders=unknown,
+        )
+    invalid_names = []
+    for factory_order, factory in factory_rows.items():
+        if requested and factory_order not in requested:
+            continue
+        mismatch = factory_name_order_mismatch(
+            str(factory.get("factory_name", "")),
+            str(factory.get("sales_order_name", "")),
+        )
+        if mismatch:
+            prefix, order = mismatch
+            invalid_names.append(
+                f"{factory_order}（名称前缀 {prefix}，销售单 {order}）"
+            )
+    if invalid_names:
+        raise RuleError(
+            "factory_name_order_mismatch",
+            "工厂单名称与销售单号不一致，已停止生成出库备注，请先修正 AIMES 后重新获取："
+            + "、".join(sorted(invalid_names)),
+            factory_orders=[item.split("（", 1)[0] for item in sorted(invalid_names)],
         )
 
     order_type = str(detail.get("order", {}).get("order_type", "")).strip()
@@ -1928,6 +1955,14 @@ HARDWARE_DISPLAY_NAMES = {
     "LRAIL": "L-Rail",
 }
 
+# Some AICNC reports identify low rails by their side-specific source name
+# instead of the canonical inventory display name.  Resolve the source name
+# from the report itself so it cannot be mistaken for an H-Rail mapping.
+HARDWARE_NAME_DISPLAY_NAMES = {
+    "LOWERLEFTRAIL": "L-Rail",
+    "LOWERRIGHTRAIL": "L-Rail",
+}
+
 
 def ignored_hardware_reason(
     mappings: InventoryMappings,
@@ -1937,6 +1972,9 @@ def ignored_hardware_reason(
 ) -> str | None:
     """Match ignored hardware against raw report names, codes, and display aliases."""
     candidates = [name, code, source_code]
+    name_display_name = HARDWARE_NAME_DISPLAY_NAMES.get(_normalize_name(name))
+    if name_display_name:
+        candidates.append(name_display_name)
     display_name = HARDWARE_DISPLAY_NAMES.get(_normalize_name(source_code or code))
     if display_name:
             candidates.append(display_name)
@@ -1968,6 +2006,7 @@ def remove_ignored_hardware_records(config: Config, names: Iterable[str]) -> int
                     row[1],
                     row[2],
                     row[3],
+                    HARDWARE_NAME_DISPLAY_NAMES.get(_normalize_name(row[1]), ""),
                     HARDWARE_DISPLAY_NAMES.get(_normalize_name(row[3] or row[2]), ""),
                 )
             )
@@ -1990,6 +2029,8 @@ FIXED_CODES = {
     "TESTFULLHINGE": "M1001",
     "HRAIL": "M1002",
     "LRAIL": "M1003",
+    "LOWERLEFTRAIL": "M1003",
+    "LOWERRIGHTRAIL": "M1003",
     "M.C(L)": "M1089",
 }
 
@@ -2117,7 +2158,10 @@ def resolve_inventory_items(
             # Use that name only for catalog matching; keep the original
             # source code on the resolution record and in persisted facts.
             match_item_value = item
-            display_name = HARDWARE_DISPLAY_NAMES.get(_normalize_name(source_code))
+            display_name = (
+                HARDWARE_NAME_DISPLAY_NAMES.get(_normalize_name(item.name))
+                or HARDWARE_DISPLAY_NAMES.get(_normalize_name(source_code))
+            )
             if item.section == "五金" and display_name and not _normalize_name(item.name) == _normalize_name(display_name):
                 match_item_value = replace(item, name=display_name)
             reason = (
@@ -2247,25 +2291,29 @@ def repair_hardware_inventory_codes(config: Config) -> dict:
         for row in refreshed:
             groups[(_text(row["order_id"]).upper(), _text(row["factory_order"]).upper(), _text(row["source_path"]))].append(row)
         for group_rows in groups.values():
-            left = [row for row in group_rows if _normalize_name(row["name"]) == "LEFTRAIL"]
-            right = [row for row in group_rows if _normalize_name(row["name"]) == "RIGHTRAIL"]
-            left_total = sum(float(row["quantity"] or 0) for row in left)
-            right_total = sum(float(row["quantity"] or 0) for row in right)
-            if not left or not right or left_total != right_total:
-                continue
-            keep = left[0]
-            connection.execute(
-                "update hardware_items set quantity=? where id=?",
-                (left_total, keep["id"]),
-            )
-            delete_ids = [row["id"] for row in left[1:] + right]
-            if delete_ids:
-                connection.executemany(
-                    "delete from hardware_items where id=?",
-                    ((row_id,) for row_id in delete_ids),
+            for left_name, right_name in (
+                ("LEFTRAIL", "RIGHTRAIL"),
+                ("LOWERLEFTRAIL", "LOWERRIGHTRAIL"),
+            ):
+                left = [row for row in group_rows if _normalize_name(row["name"]) == left_name]
+                right = [row for row in group_rows if _normalize_name(row["name"]) == right_name]
+                left_total = sum(float(row["quantity"] or 0) for row in left)
+                right_total = sum(float(row["quantity"] or 0) for row in right)
+                if not left or not right or left_total != right_total:
+                    continue
+                keep = left[0]
+                connection.execute(
+                    "update hardware_items set quantity=? where id=?",
+                    (left_total, keep["id"]),
                 )
-                rail_rows_removed += len(delete_ids)
-            rails_collapsed += 1
+                delete_ids = [row["id"] for row in left[1:] + right]
+                if delete_ids:
+                    connection.executemany(
+                        "delete from hardware_items where id=?",
+                        ((row_id,) for row_id in delete_ids),
+                    )
+                    rail_rows_removed += len(delete_ids)
+                rails_collapsed += 1
         connection.commit()
     finally:
         connection.close()

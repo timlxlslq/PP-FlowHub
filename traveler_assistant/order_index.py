@@ -18,6 +18,7 @@ from .core import (
     AIMES_BULK_FETCH_LIMIT,
     Config,
     RuleError,
+    factory_name_order_mismatch,
     load_aimes_order_cache,
     load_factory_name_cache,
     save_aimes_order_cache,
@@ -362,10 +363,15 @@ def _aimes_row_issue(row: dict) -> dict | None:
         reasons.append("销售单名称不是 PP 加 4 位数字（可带数字后缀）或 CS 加 3 位数字")
         candidate = _order_id_from_factory_name(factory_name)
         suggested_order_id = _valid_aimes_order_id(candidate) if candidate else ""
-    elif sales_order_name.startswith("PP") and int(sales_order_name[2:6]) < MINIMUM_PP_NUMBER:
-        # PP0035 以前属于明确排除的历史范围，不是数据异常。
-        if not reasons:
-            return None
+    else:
+        if sales_order_name.startswith("PP") and int(sales_order_name[2:6]) < MINIMUM_PP_NUMBER:
+            # PP0035 以前属于明确排除的历史范围，不是数据异常。
+            if not reasons:
+                return None
+        mismatch = factory_name_order_mismatch(factory_name, sales_order_name)
+        if mismatch:
+            prefix, order = mismatch
+            reasons.append(f"工厂单名称订单前缀 {prefix} 与销售单名称 {order} 不一致")
     if not reasons:
         return None
     return {
@@ -1239,7 +1245,11 @@ class OrderIndexStore:
                     for date_type, rows in normalized.items()
                 },
             }
-        return {"saved": True, "order": summary}
+        # The SwiftUI dashboard applies this response to its full in-memory
+        # order snapshot.  Return the complete summaries so saving an
+        # order-level annotation cannot be mistaken for a partial dashboard
+        # response and clear every other row.
+        return {"saved": True, "order": summary, "orders": self.summaries()}
 
     def upsert_factory(
         self,
