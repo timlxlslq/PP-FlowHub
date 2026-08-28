@@ -32,6 +32,7 @@ from traveler_assistant.order_index import (
     _record_generated_material_baseline,
     _report_files,
     _replace_server_material_facts,
+    _reconcile_authoritative_server_material_sources,
     reconcile_outbound_statuses,
     _server_snapshot,
     _server_folder_rename_pairs,
@@ -210,6 +211,26 @@ class OrderIndexTests(unittest.TestCase):
             make_materials(folder / "PP9999 materials.xlsx")
             make_board_material_report(report / "pp-板材清单.xlsx", factory="F100", name="PP9999-KITCHEN")
             make_fittings(report / "Fittingslist.xlsx", [("F100", 2)])
+            stale = OrderIndexStore(config.workflow_database)
+            stale.upsert_order(
+                "PP9999",
+                validation_status="数据异常",
+                source_folder=str(folder),
+            )
+            stale.upsert_factory(
+                "F100",
+                order_id="PP9999",
+                factory_name="PP9999-KITCHEN",
+                sales_order_name="PP9999",
+                name_source="AIMES",
+                ownership_status="已确认",
+            )
+            stale.connection.execute(
+                "update orders set validation_message=? where order_id=?",
+                ("旧的订单校验错误", "PP9999"),
+            )
+            stale.commit()
+            stale.close()
 
             with patch(
                 "traveler_assistant.order_index.sync_order_index",
@@ -221,11 +242,13 @@ class OrderIndexTests(unittest.TestCase):
                 preview = preview_server_changes(config, [folder])
             sync.assert_called_once()
             self.assertFalse(sync.call_args.kwargs["full_refresh"])
-            self.assertFalse(sync.call_args.kwargs["validate_selected_orders"])
+            self.assertTrue(sync.call_args.kwargs["validate_selected_orders"])
             self.assertFalse(sync.call_args.kwargs["refresh_outbound_statuses"])
             self.assertFalse(sync.call_args.kwargs["reconcile_outbound"])
             payload = preview["server_write_preview"]
             self.assertEqual(payload["orders"][0]["order_id"], "PP9999")
+            self.assertEqual(payload["orders"][0]["validation_status"], "正常")
+            self.assertEqual(payload["orders"][0]["validation_message"], "")
             self.assertEqual(payload["orders"][0]["factories"][0]["factory_order"], "F100")
             self.assertIn("materials", payload)
             self.assertEqual(
@@ -234,13 +257,190 @@ class OrderIndexTests(unittest.TestCase):
             )
             store = OrderIndexStore(config.workflow_database)
             try:
-                self.assertEqual(store.connection.execute("select count(*) from orders").fetchone()[0], 0)
+                self.assertEqual(store.connection.execute("select count(*) from orders").fetchone()[0], 1)
                 self.assertEqual(
                     store.connection.execute("select count(*) from material_items").fetchone()[0],
                     0,
                 )
             finally:
                 store.close()
+
+    def test_selected_server_folder_validation_does_not_touch_other_aimes_orders(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(
+                state_dir=root / "state",
+                source_root=root / "source",
+                order_root=root / "orders",
+            )
+            config.prepare_storage()
+            selected_folder = config.source_root / "PP9999"
+            report = selected_folder / "Report"
+            report.mkdir(parents=True)
+            from tests.test_order_workflow import make_board_material_report, make_fittings, make_materials
+            make_materials(selected_folder / "PP9999 materials.xlsx")
+            make_board_material_report(report / "pp-板材清单.xlsx", factory="F100", name="PP9999-KITCHEN")
+            make_fittings(report / "Fittingslist.xlsx", [("F100", 2)])
+
+            other_folder = config.source_root / "PP8888"
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_order(
+                "PP8888",
+                validation_status="数据异常",
+                source_folder=str(other_folder),
+            )
+            store.connection.execute(
+                "update orders set validation_message=? where order_id=?",
+                ("保留的历史校验结果", "PP8888"),
+            )
+            store.upsert_factory(
+                "F200",
+                order_id="PP8888",
+                factory_name="PP8888-KITCHEN",
+                sales_order_name="PP8888",
+                name_source="AIMES",
+                ownership_status="已确认",
+            )
+            store.commit()
+            store.close()
+
+            with patch(
+                "traveler_assistant.inventory.resolve_inventory_items",
+                return_value={"missing": []},
+            ):
+                preview_server_changes(config, [selected_folder])
+
+            store = OrderIndexStore(config.workflow_database)
+            try:
+                self.assertEqual(
+                    store.connection.execute(
+                        "select validation_status, validation_message from orders where order_id=?",
+                        ("PP8888",),
+                    ).fetchone(),
+                    ("数据异常", "保留的历史校验结果"),
+                )
+            finally:
+                store.close()
+
+    def test_server_preview_uses_recut_board_as_increment_and_base_fittings_only(self):
+        """A recut board adds material without replacing the base hardware report."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(
+                state_dir=root / "state",
+                source_root=root / "source",
+                order_root=root / "orders",
+            )
+            config.prepare_storage()
+            folder = config.source_root / "PP9999"
+            base_report = folder / "Report"
+            recut_report = folder / "PP9999-recut" / "Report"
+
+            from tests.test_order_workflow import (
+                make_board_material_report,
+                make_fittings,
+                make_materials,
+            )
+
+            folder.mkdir(parents=True)
+            make_materials(folder / "PP9999 materials.xlsx")
+            make_board_material_report(
+                base_report / "pp-板材清单.xlsx",
+                factory="F100",
+                name="PP9999-KITCHEN",
+                plywood_qty=2,
+            )
+            make_board_material_report(
+                recut_report / "pp-板材清单.xlsx",
+                factory="F100",
+                name="PP9999-KITCHEN",
+                plywood_qty=1,
+            )
+            make_fittings(base_report / "Fittingslist.xlsx", [("F100", 2)])
+            make_fittings(recut_report / "Fittingslist.xlsx", [("F100", 7)])
+
+            current = OrderIndexStore(config.workflow_database)
+            current.upsert_order(
+                "PP9999",
+                validation_status="数据异常",
+                source_folder=str(folder),
+            )
+            current.upsert_factory(
+                "F100",
+                order_id="PP9999",
+                factory_name="PP9999-KITCHEN",
+                sales_order_name="PP9999",
+                name_source="AIMES",
+                ownership_status="已确认",
+                optimized=True,
+            )
+            current.connection.execute(
+                """insert into material_items(
+                    order_id, material_type, color, thickness, quantity, unit, edge,
+                    source_type, source_path, source_fingerprint, updated_at
+                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "PP9999", "plywood", "", "18.0", 2, "pcs", "",
+                    "aihouse", str((folder / "PP9999 materials.xlsx").resolve()), "old", "old",
+                ),
+            )
+            current.connection.execute(
+                """insert into hardware_items(
+                    order_id, factory_order, product_code, name, spec, quantity,
+                    unit, source_type, source_path, active, updated_at
+                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "PP9999", "F100", "71T950A", "Hinge", "", 2,
+                    "pcs", "aicnc", str(folder.resolve()), 1, "old",
+                ),
+            )
+            current.commit()
+            self.assertEqual(
+                current.connection.execute(
+                    "select quantity, source_path from material_items where order_id='PP9999'"
+                ).fetchone(),
+                (2.0, str((folder / "PP9999 materials.xlsx").resolve())),
+            )
+            current.close()
+
+            with patch(
+                "traveler_assistant.inventory.resolve_inventory_items",
+                return_value={"missing": [], "ignored": [], "outbound": []},
+            ):
+                payload = preview_server_changes(config, [folder])["server_write_preview"]
+
+            order = next(item for item in payload["orders"] if item["order_id"] == "PP9999")
+            plywood_changes = [
+                item for item in order["material_changes"]
+                if item["material_type"] == "plywood"
+                and item["thickness"] == "18.0"
+            ]
+            self.assertTrue(
+                any(
+                    item["old_quantity"] == 2.0 and item["new_quantity"] == 3.0
+                    for item in plywood_changes
+                ),
+                plywood_changes,
+            )
+            self.assertEqual(order["hardware_changes"], [])
+            self.assertTrue(
+                any(
+                    str(item["source_path"]).endswith(
+                        "PP9999-recut/Report/pp-板材清单.xlsx"
+                    )
+                    and item["material_type"] == "plywood"
+                    and item["thickness"] == "18.0"
+                    and item["quantity"] == 1.0
+                    for item in payload["materials"]
+                )
+            )
+            self.assertEqual(
+                {
+                    str(item["source_path"])
+                    for item in payload["hardware_source_items"]
+                },
+                {str((base_report / "Fittingslist.xlsx").resolve())},
+            )
 
     def test_server_confirmation_writes_materials_and_factory_hardware_after_mapping(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -259,13 +459,30 @@ class OrderIndexTests(unittest.TestCase):
             make_board_material_report(report / "pp-板材清单.xlsx", factory="F100", name="PP9999-KITCHEN")
             make_fittings(report / "Fittingslist.xlsx", [("F100", 2)])
 
+            current = OrderIndexStore(config.workflow_database)
+            current.upsert_order(
+                "PP9999",
+                validation_status="正常",
+                source_folder=str(folder),
+            )
+            current.upsert_factory(
+                "F100",
+                order_id="PP9999",
+                factory_name="PP9999-KITCHEN",
+                sales_order_name="PP9999",
+                name_source="AIMES",
+                ownership_status="已确认",
+            )
+            current.commit()
+            current.close()
+
             fitting = SimpleNamespace(
                 code="WJ-UNMAPPED", name="Unmapped Hinge", size="Full", unit="Piece", quantity=2
             )
 
             def resolve_items(current_config, pairs):
                 mappings = InventoryMappings(current_config.workflow_database)
-                if not any(item.section == "五金" for item, _ in pairs):
+                if not any(item.name == "Unmapped Hinge" for item, _ in pairs):
                     return {"missing": [], "ignored": [], "outbound": []}
                 if mappings.manual_code("Unmapped Hinge"):
                     return {"missing": [], "ignored": [], "outbound": []}
@@ -284,6 +501,9 @@ class OrderIndexTests(unittest.TestCase):
                 "traveler_assistant.order_workflow.parse_fittings_groups",
                 return_value=[("F100", [fitting])],
             ), patch(
+                "traveler_assistant.order_workflow.resolve_inventory_items",
+                side_effect=resolve_items,
+            ), patch(
                 "traveler_assistant.inventory.resolve_inventory_items",
                 side_effect=resolve_items,
             ):
@@ -294,9 +514,21 @@ class OrderIndexTests(unittest.TestCase):
                 [item["name"] for item in payload["hardware_mapping_requirements"]],
                 ["Unmapped Hinge"],
             )
+            invalid_payload = dict(payload)
+            invalid_payload["orders"] = [
+                dict(payload["orders"][0], validation_status="数据异常", validation_message="旧的校验错误")
+            ]
+            with self.assertRaises(RuleError) as blocked_validation:
+                confirm_server_material_preview_memory(
+                    config, invalid_payload, confirm_write=True
+                )
+            self.assertEqual(blocked_validation.exception.code, "order_validation")
             with patch(
                 "traveler_assistant.order_workflow.parse_fittings_groups",
                 return_value=[("F100", [fitting])],
+            ), patch(
+                "traveler_assistant.order_workflow.resolve_inventory_items",
+                side_effect=resolve_items,
             ), patch(
                 "traveler_assistant.inventory.resolve_inventory_items",
                 side_effect=resolve_items,
@@ -308,6 +540,9 @@ class OrderIndexTests(unittest.TestCase):
             with patch(
                 "traveler_assistant.order_workflow.parse_fittings_groups",
                 return_value=[("F100", [fitting])],
+            ), patch(
+                "traveler_assistant.order_workflow.resolve_inventory_items",
+                side_effect=resolve_items,
             ), patch(
                 "traveler_assistant.inventory.resolve_inventory_items",
                 side_effect=resolve_items,
@@ -380,6 +615,14 @@ class OrderIndexTests(unittest.TestCase):
             )
             config.prepare_storage()
             folder = config.source_root / "CS999"
+            current = OrderIndexStore(config.workflow_database)
+            current.upsert_order(
+                "CS999",
+                validation_status="正常",
+                source_folder=str(folder),
+            )
+            current.commit()
+            current.close()
             report = folder / "Report"
             report.mkdir(parents=True)
             from tests.test_order_workflow import make_board_material_report, make_fittings, make_materials
@@ -766,7 +1009,6 @@ class OrderIndexTests(unittest.TestCase):
                 user_note="客户要求安装前确认台面颜色",
                 planned_days=[
                     {"date": "2026-07-08", "installer": "安装组 A"},
-                    {"date": "2026-07-11", "installer": "安装组 B"},
                 ],
                 actual_days=[
                     {"date": "2026-07-08", "installer": "安装组 A"},
@@ -782,9 +1024,10 @@ class OrderIndexTests(unittest.TestCase):
             row = saved["order"]
             self.assertEqual(row["user_note"], "客户要求安装前确认台面颜色")
             self.assertEqual(row["installation"]["planned"]["start_date"], "2026-07-08")
-            self.assertEqual(row["installation"]["planned"]["end_date"], "2026-07-11")
-            self.assertEqual(row["installation"]["planned"]["day_count"], 2)
+            self.assertEqual(row["installation"]["planned"]["end_date"], "2026-07-08")
+            self.assertEqual(row["installation"]["planned"]["day_count"], 1)
             self.assertEqual(row["installation"]["actual"]["days"][1]["installer"], "安装组 A")
+            self.assertEqual(row["installation"]["actual"]["day_count"], 2)
 
             reopened = OrderIndexStore(config.workflow_database)
             reopened.upsert_order("PP9999", server_seen="2026-08-18T12:00:00")
@@ -811,15 +1054,27 @@ class OrderIndexTests(unittest.TestCase):
                 saved["order"]["installation"]["planned"]["days"],
                 [{"date": "2026-07-08", "installer": ""}],
             )
+            with self.assertRaisesRegex(ValueError, "计划安装日期只能填写一个开始日期"):
+                store.save_order_annotations(
+                    "PP9999",
+                    user_note="",
+                    planned_days=[
+                        {"date": "2026-07-08", "installer": ""},
+                        {"date": "2026-07-11", "installer": ""},
+                    ],
+                    actual_days=[],
+                )
             with self.assertRaisesRegex(ValueError, "日期重复"):
                 store.save_order_annotations(
                     "PP9999",
                     user_note="",
                     planned_days=[
                         {"date": "2026-07-08", "installer": "安装组"},
+                    ],
+                    actual_days=[
+                        {"date": "2026-07-08", "installer": "安装组"},
                         {"date": "2026-07-08", "installer": "安装组"},
                     ],
-                    actual_days=[],
                 )
             store.close()
 
@@ -873,6 +1128,47 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual({row[0] for row in rows}, {str(current_path)})
             self.assertEqual(rows[0][2], 2)
             self.assertTrue(rows[0][1])
+
+    def test_server_material_scope_retires_rows_from_previous_server_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state")
+            config.prepare_storage()
+            store = OrderIndexStore(config.workflow_database)
+            current_folder = root / "server" / "Optimized Orders" / "PP0072"
+            old_folder = root / "fixtures" / "Optimized Orders" / "PP0072"
+            current_path = current_folder / "PP0072 materials.xlsx"
+            old_path = old_folder / "PP0072 materials.xlsx"
+            for path in (current_path, old_path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            for path in (current_path, old_path):
+                store.connection.execute(
+                    """insert into material_items(
+                        order_id, material_type, color, thickness, quantity, unit,
+                        source_type, source_path, updated_at
+                    ) values(?,?,?,?,?,?,?,?,?)""",
+                    ("PP0072", "plywood", "", "18.0", 22, "pcs", "aihouse", str(path), "now"),
+                )
+                store.connection.execute(
+                    """insert into source_files(
+                        path, source_folder, kind, order_id, modified_at, size, last_seen
+                    ) values(?,?,?,?,?,?,?)""",
+                    (str(path), str(path.parent), "material", "PP0072", 1, 1, "now"),
+                )
+            removed = _reconcile_authoritative_server_material_sources(
+                store, {"PP0072": {str(current_folder)}}
+            )
+            rows = store.connection.execute(
+                "select source_path, quantity from material_items where order_id='PP0072' order by source_path"
+            ).fetchall()
+            source_rows = store.connection.execute(
+                "select source_folder from source_files where order_id='PP0072' order by source_folder"
+            ).fetchall()
+            store.close()
+
+            self.assertEqual(removed, {"PP0072"})
+            self.assertEqual(rows, [(str(current_path), 22.0)])
+            self.assertEqual(source_rows, [(str(current_folder),)])
 
     def test_prepared_sync_can_resolve_material_mappings_before_fittings_import_path(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1376,6 +1672,73 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(expired["server"]["changes"], [])
             self.assertEqual(expired["current_issues"], [])
             reopened = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            permanent = reopened.connection.execute(
+                "select permanent from ignored_server_folders where path = ?", (str(folder),)
+            ).fetchone()[0]
+            reopened.close()
+            self.assertEqual(permanent, 1)
+
+    def test_temporary_folder_can_be_ignored_for_one_month_and_reappears_on_change(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state", source_root=root / "source")
+            folder = config.source_root / "temporary-production"
+            folder.mkdir(parents=True)
+
+            first = scan_server_changes(config)
+            self.assertTrue(any(item["path"] == str(folder) for item in first["server"]["changes"]))
+
+            ignored = ignore_server_folder(config, folder)
+            self.assertEqual(ignored["pending_server_changes"], [])
+            self.assertEqual(ignored["current_issues"], [])
+            self.assertEqual(scan_server_changes(config)["server"]["changes"], [])
+
+            report = folder / "Report" / "pp-板材清单.xlsx"
+            from tests.test_order_workflow import make_board_material_report
+            make_board_material_report(report, factory="F100", name="TMP-KITCHEN")
+            changed = scan_server_changes(config)
+            self.assertTrue(any(item["path"] == str(report) for item in changed["server"]["changes"]))
+
+    def test_ignoring_folder_does_not_run_a_second_full_server_scan(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state", source_root=root / "source")
+            folder = config.source_root / "temporary-production"
+            folder.mkdir(parents=True)
+
+            with patch("traveler_assistant.order_index.scan_server_changes") as scan:
+                result = ignore_server_folder(config, folder)
+
+            scan.assert_not_called()
+            self.assertEqual(result["pending_server_changes"], [])
+            self.assertEqual(result["current_issues"], [])
+            store = OrderIndexStore(config.workflow_database)
+            ignored = store.ignored_server_folder(str(folder))
+            store.close()
+            self.assertIsNotNone(ignored)
+            self.assertFalse(ignored["permanent"])
+
+    def test_temporary_folder_becomes_permanently_ignored_after_watch_window(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state", source_root=root / "source")
+            folder = config.source_root / "temporary-production"
+            folder.mkdir(parents=True)
+            scan_server_changes(config)
+            ignore_server_folder(config, folder)
+
+            store = OrderIndexStore(config.workflow_database)
+            store.connection.execute(
+                "update ignored_server_folders set watch_until = ? where path = ?",
+                ("2000-01-01T00:00:00", str(folder)),
+            )
+            store.commit()
+            store.close()
+
+            expired = scan_server_changes(config)
+            self.assertEqual(expired["server"]["changes"], [])
+            self.assertEqual(expired["current_issues"], [])
+            reopened = OrderIndexStore(config.workflow_database)
             permanent = reopened.connection.execute(
                 "select permanent from ignored_server_folders where path = ?", (str(folder),)
             ).fetchone()[0]
@@ -2596,6 +2959,63 @@ class OrderIndexTests(unittest.TestCase):
 
             self.assertFalse(any(
                 issue["kind"] == "hardware_selection"
+                for issue in result["current_issues"]
+            ))
+            reopened = OrderIndexStore(config.workflow_database)
+            issue = reopened.connection.execute(
+                "select status, resolved_at from active_issues where issue_key = ?",
+                (issue_key,),
+            ).fetchone()
+            reopened.close()
+
+        self.assertEqual(issue[0], "resolved")
+        self.assertTrue(issue[1])
+
+    def test_fully_shipped_folder_resolves_stale_order_validation_issue(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(
+                state_dir=root / "state",
+                source_root=root / "server" / "Optimized Orders",
+            )
+            config.prepare_storage()
+            folder = config.source_root / "PP9999"
+            folder.mkdir(parents=True)
+
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_aimes_factory(
+                "F100",
+                order_id="PP9999",
+                factory_name="PP9999 KITCHEN",
+                sales_order_name="PP9999",
+                split_time="2026-08-10T08:30:00",
+                seen_at="2026-08-10T08:30:00",
+            )
+            issue_key = "order_validation:PP9999"
+            store.upsert_active_issue(
+                issue_key=issue_key,
+                kind="order_validation",
+                order_id="PP9999",
+                path=str(folder),
+                message="历史订单校验失败",
+                seen_at="2026-08-10T09:00:00",
+            )
+            store.commit()
+            store.close()
+
+            with patch(
+                "traveler_assistant.order_index._load_outbound_records",
+                return_value=[{
+                    "order_id": "PP9999",
+                    "remark": "PP9999 KITCHEN",
+                    "status": "已出库",
+                    "document_number": "QTCK001",
+                }],
+            ):
+                result = scan_server_changes(config)
+
+            self.assertFalse(any(
+                issue["kind"] == "order_validation"
                 for issue in result["current_issues"]
             ))
             reopened = OrderIndexStore(config.workflow_database)

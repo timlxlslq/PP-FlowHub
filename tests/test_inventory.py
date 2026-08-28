@@ -30,6 +30,7 @@ from traveler_assistant.inventory import (
     _is_inventory_domain_url,
     _is_inventory_service_workbench_url,
     _persist_completed_outbound_results,
+    _assert_single_server_material_source,
     build_database_preview,
     database_document_items,
     build_preview,
@@ -154,6 +155,29 @@ def make_priced_catalog(path: Path):
 
 
 class InventoryTests(unittest.TestCase):
+    def test_database_outbound_blocks_multiple_base_server_material_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(state_dir=root / "state")
+            config.prepare_storage()
+            connection = sqlite3.connect(config.workflow_database)
+            for path in (
+                root / "server" / "Optimized Orders" / "PP0072" / "pp0072 materials.xlsx",
+                root / "fixtures" / "Optimized Orders" / "PP0072" / "pp0072 materials.xlsx",
+            ):
+                connection.execute(
+                    """insert into material_items(
+                        order_id, material_type, color, thickness, quantity, unit,
+                        source_type, source_path, updated_at
+                    ) values(?,?,?,?,?,?,?,?,?)""",
+                    ("PP0072", "plywood", "", "18.0", 22, "pcs", "aihouse", str(path), "now"),
+                )
+            connection.commit()
+            connection.close()
+
+            with self.assertRaisesRegex(RuleError, "多个 Server 材料来源"):
+                _assert_single_server_material_source(config, "PP0072")
+
     def test_shipment_without_hardware_marks_status_without_inventory_document(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1867,6 +1891,103 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(links, [])
             self.assertEqual(status, ("未出库", ""))
             self.assertEqual(batch, ("completed",))
+
+    def test_split_production_material_document_cleans_stale_factory_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(state_dir=root / "state")
+            config.prepare_storage()
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_order("PP0057", validation_status="正常")
+            for factory_order, factory_name in (
+                ("F-PRODUCTION-KITCHEN", "PP0057-KITCHEN"),
+                ("F-PRODUCTION-LAUNDRY", "PP0057-LAUNDRY"),
+            ):
+                store.upsert_factory(
+                    factory_order,
+                    order_id="PP0057",
+                    factory_name=factory_name,
+                    sales_order_name="PP0057",
+                    name_source="AIMES",
+                    ownership_status="已确认",
+                    optimized=True,
+                    outbound_status="未出库",
+                )
+            store.commit()
+            store.close()
+
+            source_item = TravelerItem(1, "板材与封边", "18mm--Plywood", 2, "PP0057")
+            outbound_item = OutboundItem(
+                traveler_name="18mm--Plywood",
+                product_code="M0001",
+                product_name="18mm Plywood",
+                quantity=2,
+                section="板材与封边",
+                match_source="test",
+                document_remark="PP0057",
+                unit="张",
+            )
+            preview = InventoryPreview(
+                traveler=TravelerData(
+                    path=config.workflow_database.resolve(),
+                    pp_folder="PP0057",
+                    order_id="PP0057",
+                    order_name="PP0057",
+                    items=[source_item],
+                    zero_items=[],
+                    documents={"PP0057": [source_item]},
+                    modified_at="2026-08-25T00:00:00",
+                    fingerprint="test-fingerprint",
+                ),
+                outbound_items=[outbound_item],
+                selected_factory_orders=("F-PRODUCTION-KITCHEN", "F-PRODUCTION-LAUNDRY"),
+                source_type="database",
+            )
+            production_draft = {
+                "batch_number": "MP-PRODUCTION-SPLIT-001",
+                "order_id": "PP0057",
+                "selected_factory_orders": ["F-PRODUCTION-KITCHEN", "F-PRODUCTION-LAUNDRY"],
+                "materials": [{"material_type": "plywood", "color": "", "thickness": "18", "edge": "", "unit": "张", "quantity": 2}],
+            }
+            sync = InventorySyncStore(
+                config.state_dir / "inventory-outbound-records.json",
+                config.backup_root,
+            )
+            sync.save_success(
+                preview,
+                [{"remark": "PP0057", "saved": True, "documentNumber": "QTCK-PRODUCTION-SPLIT"}],
+                production_draft=production_draft,
+            )
+
+            connection = sqlite3.connect(config.workflow_database)
+            connection.execute(
+                "insert into outbound_document_factories(document_number, order_id, factory_order, created_at, updated_at) values(?,?,?,?,?)",
+                ("QTCK-PRODUCTION-SPLIT", "PP0057", "F-PRODUCTION-KITCHEN", "now", "now"),
+            )
+            connection.execute(
+                "update factory_orders set outbound_status='已出库', outbound_document='QTCK-PRODUCTION-SPLIT', outbound_mode='inventory' where order_id='PP0057'"
+            )
+            connection.commit()
+            connection.close()
+
+            self.assertEqual(reconcile_outbound_statuses(config), 2)
+            connection = sqlite3.connect(config.workflow_database)
+            links = connection.execute(
+                "select factory_order from outbound_document_factories where document_number='QTCK-PRODUCTION-SPLIT'"
+            ).fetchall()
+            statuses = connection.execute(
+                "select factory_order, outbound_status, outbound_document from factory_orders where order_id='PP0057' order by factory_order"
+            ).fetchall()
+            kind = connection.execute(
+                "select document_type from outbound_documents where document_number='QTCK-PRODUCTION-SPLIT'"
+            ).fetchone()
+            connection.close()
+            self.assertEqual(links, [])
+            self.assertEqual(statuses, [
+                ("F-PRODUCTION-KITCHEN", "未出库", ""),
+                ("F-PRODUCTION-LAUNDRY", "未出库", ""),
+            ])
+            self.assertEqual(kind, ("production_materials",))
 
     def test_previous_hardware_block_becoming_empty_requires_manual_void(self):
         with tempfile.TemporaryDirectory() as directory:

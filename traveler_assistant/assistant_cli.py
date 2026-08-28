@@ -1,3 +1,11 @@
+"""Assistant command entry point and local/Agent routing policy.
+
+This module chooses between deterministic parsing, an exact learned-command
+cache, and the Agent fallback.  Regardless of how intent is understood, the
+result enters the same typed gateway, where approval and business validation
+are recalculated locally.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -100,6 +108,7 @@ def _agent_command(store: RuntimeStore, text: str) -> tuple[LocalCommand | None,
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run ``pp-flowhub assistant`` and emit one machine-readable result."""
     parser = argparse.ArgumentParser(prog="pp-flowhub assistant")
     parser.add_argument("text", nargs="?")
     parser.add_argument("--usage", action="store_true")

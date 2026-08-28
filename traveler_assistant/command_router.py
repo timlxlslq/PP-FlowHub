@@ -1,3 +1,11 @@
+"""Deterministic parsing for the small set of common assistant commands.
+
+The router converts user text into a typed :class:`LocalCommand`.  It is
+deliberately narrower than a natural-language model: a command is returned
+only when the required business arguments can be recognized locally.  The
+returned action is still checked by the gateway before any write occurs.
+"""
+
 from __future__ import annotations
 
 import re
@@ -50,6 +58,12 @@ def normalize_command_text(text: str) -> str:
 
 
 def parse_local_command(text: str) -> LocalCommand | None:
+    """Parse a supported common command, or return ``None`` for ambiguity.
+
+    Returning ``None`` is an intentional handoff to the learned-command or
+    Agent path; it is not itself a failure.  Keep this function free of file,
+    database, and external-system side effects so it remains cheap to test.
+    """
     normalized = normalize_command_text(text)
     if not normalized:
         return None

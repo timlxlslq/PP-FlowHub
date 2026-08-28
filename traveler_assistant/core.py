@@ -1,3 +1,11 @@
+"""Shared configuration, validation and external-identity helpers.
+
+This module is a low-level support layer for the workflow modules.  It owns
+configuration resolution, business-facing rule errors, common normalization,
+and the AIMES lookup boundary.  It should not decide which UI action to run;
+that decision belongs to the CLI/router and tool gateway.
+"""
+
 from __future__ import annotations
 
 import json
@@ -646,26 +654,43 @@ def parse_fittings_groups(
                 unit=_text(sheet.cell(row, 9).value),
                 quantity=_number(sheet.cell(row, 11).value),
             ))
-        # A left/right rail pair represents one physical rail set.  Keep one
-        # source row so downstream inventory quantities represent pairs rather
-        # than individual sides.  The same rule applies to high and lower
-        # rails, whose source names are different in the Fittingslist.
+        # A left/right rail pair represents one physical rail set.  Validate
+        # and canonicalize it here so every downstream consumer receives one
+        # source row per physical set.  The same rule applies to high and
+        # lower rails, whose source names are different in the Fittingslist.
         for left_name, right_name, left_label, right_label in RAIL_PAIR_NAMES:
             left = [item for item in items if _normalize_name(item.name) == left_name]
             right = [item for item in items if _normalize_name(item.name) == right_name]
-            if left and right and (
-                len(left) != 1
+            if (left or right) and (
+                bool(left) != bool(right)
+                or len(left) != 1
                 or len(right) != 1
-                or left[0].quantity != right[0].quantity
+                or (
+                    left
+                    and right
+                    and left[0].quantity != right[0].quantity
+                )
             ):
+                left_quantity = left[0].quantity if len(left) == 1 else None
+                right_quantity = right[0].quantity if len(right) == 1 else None
+                left_display = (
+                    f"{left_quantity:g}"
+                    if left_quantity is not None
+                    else "缺失" if not left else f"{len(left)} 行"
+                )
+                right_display = (
+                    f"{right_quantity:g}"
+                    if right_quantity is not None
+                    else "缺失" if not right else f"{len(right)} 行"
+                )
                 raise RuleError(
                     "paired_rail_quantity_mismatch",
                     f"工厂单 {factory} 的 {left_label} / {right_label} 数量不一致，"
-                    f"{left_label}={left[0].quantity:g}、{right_label}={right[0].quantity:g}；"
+                    f"{left_label}={left_display}、{right_label}={right_display}；"
                     "请人工核对后再写入。",
                     factory_order=factory,
-                    left_quantity=left[0].quantity,
-                    right_quantity=right[0].quantity,
+                    left_quantity=left_quantity,
+                    right_quantity=right_quantity,
                 )
             if len(left) == 1 and len(right) == 1 and left[0].quantity == right[0].quantity:
                 items = [item for item in items if item is not right[0]]

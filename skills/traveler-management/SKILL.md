@@ -27,5 +27,5 @@ Read only the relevant branch reference:
 
 - Use only the bundled project template.
 - Accept only canonical sheet names; reject malformed workbooks.
-- Preserve user-entered hardware only inside the `Hardware Accessory五金功能件` area and associate it with one factory order.
+- Preserve user-entered hardware as central SQLite order facts, associate it with one factory order, and include it in `Hardware Accessory五金功能件` only when a Traveler is later generated.
 - Do not contain Excel-writing code in this Skill.

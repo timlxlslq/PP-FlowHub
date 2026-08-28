@@ -49,7 +49,7 @@ INSTRUCTIONS = """你是工作流程助手的轻量路由 Agent。你只把用�
 - check_inventory_stock：直接用中央数据库订单事实比对某个订单的板材和封边实时库存，不要求生成 Traveler，需要订单号。
 - generate_traveler：生成或创建 Traveler，需要订单号。
 - update_traveler：更新 Traveler，需要订单号。
-- add_manual_hardware：在已生成 Traveler 的指定工厂单中添加人工五金，必须同时取得 order_id、完整 factory_name、product_code 和正整数 quantity；备注可选。`PP9999-KITCHEN` 和 `PP1234-2-LAUNDRY` 都是完整 factory_name：订单号后可以直接接房间名，也可以先带分单编号。
+- add_manual_hardware：在中央 SQLite 的指定工厂单中添加人工五金，不要求已生成 Traveler；必须同时取得 order_id、factory_order 或完整 factory_name、product_code 和正整数 quantity；备注可选。`PP9999-KITCHEN` 和 `PP1234-2-LAUNDRY` 都是完整 factory_name：订单号后可以直接接房间名，也可以先带分单编号。
 - unsupported：不属于以上动作，或者必要订单号缺失。
 
 “在服务器上找一下 PP0063”属于 preview_order。“比对 CS004 的库存”属于 check_inventory_stock。“帮我在 PP1234-2-LAUNDRY 的人工五金里补两件 M0144”属于 add_manual_hardware，order_id 是 PP1234-2，quantity 是 2。不要猜测缺失的字段。explanation 只用一句简短中文说明。"""

@@ -1,3 +1,6 @@
+// Assistant page: speech/text input, command preview, approval, and result
+// presentation.  Command interpretation and business validation remain in
+// the Python CLI/Gateway so the App and CLI use the same contract.
 import AVFoundation
 import AppKit
 import Speech

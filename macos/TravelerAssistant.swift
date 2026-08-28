@@ -1,3 +1,10 @@
+// Main application model and process bridge.
+//
+// SwiftUI owns presentation state and user interaction.  Python owns the
+// deterministic business rules, database work, and external-system edges.
+// Keep this file focused on starting commands, consuming JSON/progress, and
+// translating results into visible App state; do not duplicate Excel or
+// SQLite business rules here.
 import SwiftUI
 import AppKit
 import Security
@@ -845,6 +852,22 @@ func serverChangePreviews(_ rows: [[String: Any]]) -> [ServerChangePreview] {
             manualOnly: row["manual_only"] as? Bool ?? false,
             eventTime: row["event_time"] as? String ?? ""
         )
+    }
+}
+
+func serverChangesExcludingFolder(
+    _ changes: [ServerChangePreview],
+    folderPath: String
+) -> [ServerChangePreview] {
+    let prefix = folderPath.hasSuffix("/") ? folderPath : folderPath + "/"
+    return changes.filter { change in
+        let sourceFolder = change.sourceFolder.isEmpty
+            ? URL(fileURLWithPath: change.path).deletingLastPathComponent().path
+            : change.sourceFolder
+        return sourceFolder != folderPath
+            && !sourceFolder.hasPrefix(prefix)
+            && change.path != folderPath
+            && !change.path.hasPrefix(prefix)
     }
 }
 
@@ -2543,8 +2566,7 @@ final class AppModel: ObservableObject {
         }) { object in
             self.finishDashboardOperation("sync")
             self.applyDashboardObject(object, includeChanges: false)
-            self.dashboardSyncStatus = "✅ 订单列表已刷新；正在刷新待处理中心…"
-            self.scanDashboardServer(background: true, presentIfNeeded: false)
+            self.dashboardSyncStatus = "✅ 订单列表已刷新；待处理中心将在下次手动扫描时更新"
         }
     }
 
@@ -2601,7 +2623,7 @@ final class AppModel: ObservableObject {
         logUserAction("点击忽略 Server 文件夹")
         guard !orderRunning else { return }
         beginDashboardOperation("server", label: "记录 Server 忽略设置")
-        dashboardServerStatus = "正在记录忽略设置：(URL(fileURLWithPath: folderPath).lastPathComponent)…"
+        dashboardServerStatus = "正在记录忽略设置：\(URL(fileURLWithPath: folderPath).lastPathComponent)…"
         dashboardSyncStatus = dashboardServerStatus
         runOrder(
             ["ignore-server-folder", "--folder", folderPath],
@@ -2613,8 +2635,10 @@ final class AppModel: ObservableObject {
         ) { object in
             self.finishDashboardOperation("server")
             self.applyCurrentIssues(from: object)
-            let rows = object["pending_server_changes"] as? [[String: Any]] ?? []
-            self.pendingServerChanges = serverChangePreviews(rows)
+            self.pendingServerChanges = serverChangesExcludingFolder(
+                self.pendingServerChanges,
+                folderPath: folderPath
+            )
             self.selectedServerFolderPaths.remove(folderPath)
             self.closePendingCenterIfEmpty()
             self.dashboardServerStatus = "✅ 已忽略文件夹；未来一个月内发生变化会重新提醒"

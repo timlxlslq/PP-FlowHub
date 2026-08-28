@@ -52,3 +52,4 @@ PYTHONPATH=".:vendor" .venv/bin/python3 -m unittest discover -s tests -v
 ```
 
 正式业务规则见 [docs/business-rules.md](docs/business-rules.md)，系统分层见 [docs/architecture/system-architecture.md](docs/architecture/system-architecture.md)。
+接手学习入口见 [docs/learning/04-handoff-guide.md](docs/learning/04-handoff-guide.md)，其中按用户场景说明源码阅读、调试和安全修改路径。

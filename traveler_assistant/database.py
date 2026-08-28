@@ -17,6 +17,7 @@ from typing import Any
 
 
 def database_path(state_dir: Path) -> Path:
+    """Return the single central SQLite path for an application state dir."""
     return state_dir / "workflow.sqlite3"
 
 

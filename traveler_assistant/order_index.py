@@ -1,3 +1,12 @@
+"""Order index, synchronization evidence, and pending-issue state.
+
+This module connects external identity/report observations to the central
+SQLite index.  It does not make Server file metadata into production facts:
+source paths, fingerprints, AIMES identities, outbound evidence, and user
+decisions remain distinguishable records.  The module is large because the
+index is also the recovery point for dashboard status and pending work.
+"""
+
 from __future__ import annotations
 
 import json
@@ -178,6 +187,64 @@ def _server_folder_fingerprint(folder: Path) -> str:
     ).hexdigest()
 
 
+def _server_folder_ignore_metadata(
+    folder: Path,
+) -> tuple[list[tuple[Path, str]], list[str], str]:
+    """Read ignore-action metadata in one workbook traversal.
+
+    ``related_order_ids`` and ``_server_folder_fingerprint`` both enumerate a
+    temporary Server folder. That is especially expensive over SMB. Keep
+    their existing semantics, including board-name order IDs, while sharing
+    the single workbook enumeration performed by this action.
+    """
+    from .order_workflow import _order_ids_in_text, parse_board_identity
+
+    found_order_ids = _order_ids_in_text(folder.name)
+    report_files: list[tuple[Path, str]] = []
+    fingerprint_rows: list[tuple[str, str, int, int]] = []
+    for path in folder.rglob("*.xlsx"):
+        if path.name.startswith("~$"):
+            continue
+        found_order_ids.update(_order_ids_in_text(path.name))
+        lowered = path.name.lower()
+        kind = ""
+        if lowered.startswith("fittingslist"):
+            kind = "fittings"
+        elif "板材清单" in path.name:
+            kind = "board"
+            try:
+                _, board_name = parse_board_identity(path)
+            except Exception:
+                board_name = ""
+            found_order_ids.update(_order_ids_in_text(board_name))
+        elif "material" in lowered and not lowered.startswith("panelmaterial"):
+            kind = "material"
+        if kind:
+            report_files.append((path, kind))
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            fingerprint_rows.append(
+                (
+                    str(path.relative_to(folder)),
+                    kind,
+                    int(stat.st_mtime_ns),
+                    int(stat.st_size),
+                )
+            )
+    for path in folder.rglob("*.xml"):
+        found_order_ids.update(_order_ids_in_text(path.name))
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {"reports": sorted(fingerprint_rows)},
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return report_files, sorted(found_order_ids), fingerprint
+
+
 def _file_content_fingerprint(path: Path) -> str:
     """Return a stable SHA-256 fingerprint for a readable Server report."""
     digest = hashlib.sha256()
@@ -212,14 +279,43 @@ def _replace_server_material_facts(
     observed_at: str,
 ) -> None:
     """Replace one order's Server material facts as a single source set."""
+    normalized_order_id = order_id.upper()
+    # A base material workbook is a complete replacement for the base set,
+    # but nested ``*-recut`` board reports are additive sources.  Deleting all
+    # rows here used to erase a recut's newly inserted 18mm plywood whenever
+    # the root workbook happened to be visited later in the same scan.
+    existing_paths = store.connection.execute(
+        "select distinct source_path from material_items "
+        "where order_id=? and source_type='aihouse'",
+        (normalized_order_id,),
+    ).fetchall()
+    for (source_path,) in existing_paths:
+        if not _is_recut_material_source(Path(str(source_path or ""))):
+            store.connection.execute(
+                "delete from material_items where order_id=? "
+                "and source_type='aihouse' and source_path=?",
+                (normalized_order_id, str(source_path or "")),
+            )
+    _insert_server_material_source_facts(
+        store, normalized_order_id, path, parsed_materials, parsed_edges,
+        mappings, observed_at,
+    )
+
+
+def _insert_server_material_source_facts(
+    store: "OrderIndexStore",
+    order_id: str,
+    path: Path,
+    parsed_materials: list,
+    parsed_edges: dict[str, float],
+    mappings: InventoryMappings,
+    observed_at: str,
+) -> None:
+    """Insert one source-scoped Server material fact set."""
     from .order_workflow import _material_inventory_name
 
     normalized_order_id = order_id.upper()
     source_fingerprint = _material_source_fingerprint(store, path)
-    store.connection.execute(
-        "delete from material_items where order_id=? and source_type='aihouse'",
-        (normalized_order_id,),
-    )
     for item in parsed_materials:
         if mappings.ignored_reason(_material_inventory_name(item.kind, item.thickness, item.color)) is not None:
             continue
@@ -243,6 +339,27 @@ def _replace_server_material_facts(
             (normalized_order_id, "edge", color, "", float(quantity), "m", color,
              "aihouse", str(path), source_fingerprint, observed_at),
         )
+
+
+def _replace_server_incremental_material_facts(
+    store: "OrderIndexStore",
+    order_id: str,
+    path: Path,
+    parsed_materials: list,
+    parsed_edges: dict[str, float],
+    mappings: InventoryMappings,
+    observed_at: str,
+) -> None:
+    """Replace one incremental Server report without replacing the base order set."""
+    normalized_order_id = order_id.upper()
+    store.connection.execute(
+        "delete from material_items where order_id=? and source_type='aihouse' and source_path=?",
+        (normalized_order_id, str(path)),
+    )
+    _insert_server_material_source_facts(
+        store, normalized_order_id, path, parsed_materials, parsed_edges,
+        mappings, observed_at,
+    )
 
 
 def _server_scan_baseline(config: Config) -> float:
@@ -1186,6 +1303,8 @@ class OrderIndexStore:
         for date_type, values in (("planned", planned_days), ("actual", actual_days)):
             if not isinstance(values, list):
                 raise ValueError(f"{date_type} 安装日期格式不正确")
+            if date_type == "planned" and len(values) > 1:
+                raise ValueError("计划安装日期只能填写一个开始日期")
             rows: list[tuple[str, str]] = []
             seen_dates: set[str] = set()
             for value in values:
@@ -2085,6 +2204,129 @@ def _report_files(folder: Path) -> list[tuple[Path, str]]:
     return result
 
 
+def _is_recut_material_source(path: Path) -> bool:
+    """Return whether a material source path is inside a recut scope."""
+    return any(
+        part.casefold() == "recut" or part.casefold().endswith("-recut")
+        for part in path.expanduser().resolve().parts[:-1]
+    )
+
+
+def _is_recut_server_report(path: Path, source_folder: Path) -> bool:
+    """Return whether a recognized report belongs to a nested recut scope."""
+    try:
+        relative_parts = path.expanduser().resolve().relative_to(
+            source_folder.expanduser().resolve()
+        ).parts[:-1]
+    except ValueError:
+        return False
+    return any(
+        part.casefold() == "recut" or part.casefold().endswith("-recut")
+        for part in relative_parts
+    )
+
+
+def _delete_server_material_source_facts(
+    store: "OrderIndexStore",
+    source_path: str,
+) -> None:
+    """Remove all derived Server material facts for one obsolete workbook."""
+    normalized_path = str(source_path or "")
+    if not normalized_path:
+        return
+    store.connection.execute(
+        "delete from server_material_allocations where source_path = ?",
+        (normalized_path,),
+    )
+    store.connection.execute(
+        "delete from material_items where source_type='aihouse' and source_path = ?",
+        (normalized_path,),
+    )
+
+
+def _reconcile_authoritative_server_material_sources(
+    store: "OrderIndexStore",
+    folders_by_order: dict[str, set[str]],
+) -> set[str]:
+    """Keep only current Server-folder material sources for scanned orders.
+
+    ``material_items`` deliberately includes ``source_path`` in its identity
+    so a path migration cannot overwrite a newer source accidentally.  That
+    safety property also means an old source root must be explicitly retired;
+    otherwise identical workbooks from the old and new roots are summed by
+    production and inventory calculations.
+    """
+    removed_orders: set[str] = set()
+    for raw_order_id, raw_folders in folders_by_order.items():
+        order_id = str(raw_order_id or "").strip().upper()
+        folders = sorted({str(folder) for folder in raw_folders if str(folder)})
+        if not order_id or not folders:
+            continue
+        material_paths = [
+            str(row[0] or "")
+            for row in store.connection.execute(
+                "select distinct source_path from material_items "
+                "where order_id=? and source_type='aihouse'",
+                (order_id,),
+            ).fetchall()
+        ]
+        for source_path in material_paths:
+            if not _path_in_folders(source_path, folders):
+                _delete_server_material_source_facts(store, source_path)
+                removed_orders.add(order_id)
+
+        source_rows = store.connection.execute(
+            "select path, source_folder, order_id from source_files"
+        ).fetchall()
+        for path, source_folder, source_order in source_rows:
+            source_order_ids = {
+                token.strip().upper()
+                for token in str(source_order or "").split("、")
+                if token.strip()
+            }
+            if order_id not in source_order_ids:
+                continue
+            if not any(_path_in_folders(str(source_folder or ""), [folder]) for folder in folders):
+                store.connection.execute("delete from source_files where path=?", (str(path),))
+    return removed_orders
+
+
+def _hardware_report_paths(
+    paths: Iterable[Path],
+    source_folder: Path,
+) -> list[Path]:
+    """Exclude nested recut Fittingslists when a base report exists."""
+    all_paths = sorted({Path(path) for path in paths}, key=lambda item: str(item).casefold())
+    base_paths = [
+        path for path in all_paths
+        if not _is_recut_server_report(path, source_folder)
+    ]
+    return base_paths or all_paths
+
+
+def _selected_hardware_report_paths(
+    source_rows: Iterable[tuple[str, str]],
+) -> set[str]:
+    """Select one non-recut Fittingslist block per factory and folder."""
+    grouped: dict[str, list[Path]] = defaultdict(list)
+    for path, source_folder in source_rows:
+        if path and source_folder:
+            grouped[str(source_folder)].append(Path(path))
+    selected_paths: set[str] = set()
+    for source_folder, paths in grouped.items():
+        candidates = _hardware_report_paths(paths, Path(source_folder))
+        try:
+            selected, _, _, _ = select_latest_fittings(candidates)
+        except RuleError:
+            # The normal sync pass records the detailed report error. Keep the
+            # candidate paths here so the preview does not silently erase all
+            # hardware while that error is being shown.
+            selected_paths.update(str(path) for path in candidates)
+        else:
+            selected_paths.update(str(item.path) for item in selected.values())
+    return selected_paths
+
+
 def _optimization_artifacts(folder: Path) -> list[Path]:
     """Return recognizable CNC optimization outputs under one order folder."""
     result: list[Path] = []
@@ -2536,11 +2778,22 @@ def _refresh_outbound_status(
     records = _load_outbound_records(config) if records is None else records
     outbound_mode, stored_fingerprint = _factory_outbound_metadata(config, factory)
     allow_order_alias = bool(factory_group and len(factory_group) == 1)
+    production_document_numbers = {
+        str(record.get("document_number", "")).strip()
+        for record in records
+        if str(record.get("kind", "")).strip().casefold() == "production_materials"
+        and str(record.get("document_number", "")).strip()
+    }
     exact_records = []
     order_alias_records = []
     exact_aliases = _outbound_exact_aliases(factory)
     for record in records:
         if _outbound_key(record.get("order_id")) != _outbound_key(factory.get("order_id")):
+            continue
+        if (
+            str(record.get("kind", "")).strip().casefold() == "production_materials"
+            or str(record.get("document_number", "")).strip() in production_document_numbers
+        ):
             continue
         remark = _outbound_key(record.get("remark"))
         if remark in exact_aliases:
@@ -2776,6 +3029,16 @@ def reconcile_outbound_statuses(
             records,
             factory_group=order_factories,
         )
+        production_document_numbers = {
+            str(record.get("document_number", "")).strip()
+            for record in records
+            if str(record.get("kind", "")).strip().casefold() == "production_materials"
+            and str(record.get("document_number", "")).strip()
+        }
+        stale_production_status = (
+            status == "未出库"
+            and str(factory.get("outbound_document", "")).strip() in production_document_numbers
+        )
         # Legacy migration records prior hardware shipment separately from
         # the old combined material document.  Do not let the old material
         # fingerprint turn that historical shipment back into "需要更新".
@@ -2789,10 +3052,19 @@ def reconcile_outbound_statuses(
         ).fetchone()
         if legacy_production and matched_document:
             status = "已出库"
-        if status not in {"已出库", "需要更新"}:
+        if status not in {"已出库", "需要更新"} and not stale_production_status:
             continue
-        if not matched_document and factory["outbound_mode"] != "customer_supplied":
+        if (
+            not matched_document
+            and factory["outbound_mode"] != "customer_supplied"
+            and not stale_production_status
+        ):
             continue
+        if stale_production_status:
+            store.connection.execute(
+                "delete from outbound_document_factories where document_number=?",
+                (str(factory.get("outbound_document", "")).strip(),),
+            )
         desired_status = status
         if (
             factory["outbound_status"] == desired_status
@@ -2809,8 +3081,8 @@ def reconcile_outbound_statuses(
             (
                 desired_status,
                 matched_document,
-                "inventory" if matched_document else factory["outbound_mode"],
-                "" if matched_document else factory["outbound_fingerprint"],
+                "" if stale_production_status else "inventory" if matched_document else factory["outbound_mode"],
+                "" if matched_document or stale_production_status else factory["outbound_fingerprint"],
                 _now(),
                 factory["factory_order"],
             ),
@@ -2961,7 +3233,17 @@ def _resolve_fully_shipped_server_issues(
     validation pass that could close them.  Keep the historical sync_changes
     rows, but remove the stale open items.
     """
-    resolvable_kinds = {"material_validation", "hardware_selection"}
+    # A validation error can remain open after the order has been completely
+    # shipped (for example, a transient AIMES credential failure during a
+    # later index refresh).  Once every known factory order in the folder has
+    # a confirmed outbound record, the folder is intentionally excluded from
+    # automatic Server scans, so that stale order-level validation issue must
+    # be closed here as well.  Keep the historical sync_changes row intact.
+    resolvable_kinds = {
+        "material_validation",
+        "hardware_selection",
+        "order_validation",
+    }
     resolved = 0
     for issue in store.active_issues():
         if issue.get("kind") not in resolvable_kinds or issue.get("status") != "open":
@@ -3089,7 +3371,12 @@ def _verify_missing_aimes_factories(
 
 
 def sync_aimes_index(config: Config, *, force: bool = False, if_needed: bool = False) -> dict:
-    """Refresh only AIMES identity data; never scan or parse Server files."""
+    """Refresh only AIMES identity data; never scan or parse Server files.
+
+    Keeping this boundary separate from Server scanning matters for both
+    performance and diagnosis: an AIMES refresh can update factory identity
+    evidence without implying that a Server report changed.
+    """
     from .core import refresh_aimes_recent_orders
 
     operation_started = time.perf_counter()
@@ -4765,6 +5052,8 @@ def sync_order_index(
     """
     from .order_workflow import (
         ORDER_FOLDER_RE as SOURCE_ORDER_FOLDER_RE,
+        MaterialItem,
+        _board_report_materials,
         parse_board_identity,
         parse_fittings_groups,
         parse_order_materials,
@@ -4960,6 +5249,7 @@ def sync_order_index(
     exact_lookup_error = ""
     canonical_order_folders: dict[str, Path] = {}
     scanned_folder_paths = {str(folder) for folder in server_folders}
+    authoritative_material_folders: dict[str, set[str]] = defaultdict(set)
     if server_snapshot_entries is not None:
         previous_for_rename = {
             row[0]: {
@@ -5070,6 +5360,8 @@ def sync_order_index(
                 )
             display_order_id = "、".join(folder_order_ids)
             server_order_ids.update(order_id.upper() for order_id in folder_order_ids if order_id)
+            for folder_order_id in folder_order_ids:
+                authoritative_material_folders[folder_order_id.upper()].add(str(folder))
             if standard_folder:
                 for folder_order_id in folder_order_ids:
                     if folder.name.casefold() == folder_order_id.casefold():
@@ -5122,17 +5414,18 @@ def sync_order_index(
             else:
                 report_files = [(path, kind, None) for path, kind in _report_files(folder)]
             fittings_paths = [path for path, kind, _ in report_files if kind == "fittings"]
+            hardware_fittings_paths = _hardware_report_paths(fittings_paths, folder)
             selected_fittings = {}
             fittings_selection_error: RuleError | None = None
             should_select_fittings = (
                 include_hardware
-                and bool(fittings_paths)
+                and bool(hardware_fittings_paths)
                 and not manual_folder
                 and not all(order_id.upper().startswith("CS") for order_id in folder_order_ids)
             )
             if should_select_fittings:
                 try:
-                    selected_fittings, _, _, _ = select_latest_fittings(fittings_paths)
+                    selected_fittings, _, _, _ = select_latest_fittings(hardware_fittings_paths)
                 except RuleError as exc:
                     fittings_selection_error = exc
                     issue_key = f"hardware_selection:{display_order_id}:{folder}"
@@ -5374,6 +5667,42 @@ def sync_order_index(
                         order_hint = _order_id_from_factory_name(name) or (
                             folder_order_ids[0] if len(folder_order_ids) == 1 else ""
                         )
+                        if (
+                            order_hint
+                            and config.storage_prepared
+                            and _is_recut_server_report(path, folder)
+                        ):
+                            if inventory_mappings is None:
+                                raise RuleError(
+                                    "material_mapping",
+                                    "库存映射数据库尚未准备好，无法读取 recut 板材增量",
+                                )
+                            report_materials = _board_report_materials(
+                                path, order_hint, allow_unscoped=False
+                            )
+                            incremental_materials = [
+                                MaterialItem("plywood", thickness, "", quantity)
+                                for thickness, quantity in report_materials["plywood"].items()
+                                if quantity
+                            ]
+                            incremental_materials.extend(
+                                MaterialItem("panel", thickness, color, quantity)
+                                for (thickness, color), quantity in report_materials["panels"].items()
+                                if quantity
+                            )
+                            _replace_server_incremental_material_facts(
+                                store,
+                                order_hint,
+                                path,
+                                incremental_materials,
+                                report_materials["edges"],
+                                inventory_mappings,
+                                server_seen,
+                            )
+                            store.connection.execute(
+                                "update orders set material_status='板材 · 封边', updated_at=? where order_id=?",
+                                (server_seen, order_hint.upper()),
+                            )
                         store.update_source_file_identity(
                             path,
                             order_id=order_hint,
@@ -5749,6 +6078,8 @@ def sync_order_index(
                     message=f"删除订单 {order_id or '相关订单'} 的{_source_file_data_label(kind)}：{Path(old_path).name}",
                     path=old_path,
                 )
+            if kind == "material":
+                _delete_server_material_source_facts(store, old_path)
             store.connection.execute("delete from source_files where path = ?", (old_path,))
             if kind in {"board", "fittings", "material"}:
                 changed_order_ids.update(
@@ -5758,17 +6089,42 @@ def sync_order_index(
                 )
     finish_phase("stale_source_cleanup")
 
-    all_validation_rows = list(store.connection.execute(
-        """
-        select distinct orders.order_id, orders.source_folder
-        from orders
-        join factory_orders on factory_orders.order_id = orders.order_id
-        where orders.source_folder <> ''
-          and factory_orders.aimes_status = 'active'
-          and factory_orders.name_source = 'AIMES'
-          and factory_orders.sales_order_name = orders.order_id
-        """
-    ).fetchall())
+    removed_material_orders = _reconcile_authoritative_server_material_sources(
+        store, authoritative_material_folders
+    )
+    changed_order_ids.update(removed_material_orders)
+    finish_phase("material_source_scope_reconciliation")
+
+    validation_params: list[str] = []
+    # A manually selected Server folder is an explicit request to recheck the
+    # contained order.  Do not let the candidate-resolution phase's temporary
+    # ``Server`` identity prevent that order from entering validation; doing
+    # so would leave the previous validation_status/validation_message in the
+    # preview database and make a repaired report look broken forever.
+    if selected_folder is not None or selected_folders is not None:
+        selected_validation_folders = sorted(scanned_folder_paths)
+        if selected_validation_folders:
+            placeholders = ",".join("?" for _ in selected_validation_folders)
+            validation_scope_sql = "orders.source_folder in (" + placeholders + ")"
+            validation_params.extend(selected_validation_folders)
+        else:
+            validation_scope_sql = "1 = 0"
+    else:
+        validation_scope_sql = (
+            "factory_orders.name_source = 'AIMES' and "
+            "factory_orders.sales_order_name = orders.order_id"
+        )
+    validation_query = (
+        "select distinct orders.order_id, orders.source_folder "
+        "from orders join factory_orders on factory_orders.order_id = orders.order_id "
+        "where orders.source_folder <> '' "
+        "and factory_orders.aimes_status = 'active' and ("
+        + validation_scope_sql
+        + ")"
+    )
+    all_validation_rows = list(
+        store.connection.execute(validation_query, tuple(validation_params)).fetchall()
+    )
     full_validation = bool(
         full_refresh
         or process_temporary
@@ -5777,7 +6133,7 @@ def sync_order_index(
             and (selected_folder is not None or selected_folders is not None)
         )
     )
-    validation_rows = all_validation_rows if full_refresh else [
+    validation_rows = all_validation_rows if full_validation else [
         row for row in all_validation_rows
         if str(row[0]).upper() in changed_order_ids
     ]
@@ -5796,7 +6152,13 @@ def sync_order_index(
     for order in validation_rows:
         order_id, source_folder = order
         try:
-            preview = preview_order(config, Path(source_folder), order_id)
+            # Validation must not overwrite the source-scoped Server facts
+            # just parsed above.  ``preview_order`` historically persisted
+            # the root material workbook and would erase recut increments
+            # before the confirmation payload was built.
+            preview = preview_order(
+                config, Path(source_folder), order_id, persist_facts=False
+            )
             factory_ids = {factory.factory_order for factory in preview.factories}
             if not factory_ids:
                 # CUT TO SIZE previews intentionally omit hardware/factory
@@ -6269,13 +6631,23 @@ def _server_hardware_changes(
                group by product_code, name, spec, unit""",
             (factory_order,),
         ).fetchall()
-        return {
-            _server_change_key(row[0], row[1], row[2], row[3]): {
+        grouped_rows: dict[tuple[str, ...], dict] = {}
+        for row in rows:
+            # SKU is the stable business identity.  Source labels such as
+            # ``Hinge`` and ``TestFullHinge`` may vary between exports, while
+            # report specs and units may be absent or localized (``pcs`` vs
+            # ``Piece``); comparing those presentation fields creates false
+            # delete/add pairs in the preview.
+            key = _server_change_key(row[0])
+            item = grouped_rows.setdefault(key, {
                 "product_code": str(row[0] or ""), "name": str(row[1] or ""),
                 "spec": str(row[2] or ""), "unit": str(row[3] or ""),
-                "quantity": float(row[4] or 0),
-            } for row in rows
-        }
+                "quantity": 0.0,
+            })
+            item["quantity"] += float(row[4] or 0)
+            if not item["name"] and row[1]:
+                item["name"] = str(row[1])
+        return grouped_rows
     old = grouped(current)
     new = grouped(preview)
     changes = []
@@ -6328,12 +6700,34 @@ def _refresh_server_preview_hardware(
             """select path, source_folder from source_files
                where kind='fittings' order by path"""
         ).fetchall()
-        paths = sorted({
-            str(path)
+        scoped_rows = [
+            (str(path or ""), str(source_folder or ""))
             for path, source_folder in source_rows
             if _path_in_folders(str(source_folder or ""), folder_paths)
             and str(path or "")
-        })
+        ]
+        paths = sorted(_selected_hardware_report_paths(scoped_rows))
+        selected_factory_orders: set[str] = set()
+        for path in paths:
+            try:
+                groups = parse_fittings_groups(Path(path))
+            except Exception:
+                continue
+            for factory_order, _ in groups:
+                normalized_factory = str(factory_order).strip().upper()
+                owner = preview.connection.execute(
+                    "select order_id from factory_orders where factory_order=?",
+                    (normalized_factory,),
+                ).fetchone()
+                if owner is not None and str(owner[0] or "").strip().upper() in skipped_orders:
+                    continue
+                selected_factory_orders.add(normalized_factory)
+        if selected_factory_orders:
+            placeholders = ",".join("?" for _ in selected_factory_orders)
+            preview.connection.execute(
+                f"delete from hardware_items where source_type='aicnc' and factory_order in ({placeholders})",
+                tuple(sorted(selected_factory_orders)),
+            )
         for path in paths:
             try:
                 groups = parse_fittings_groups(Path(path))
@@ -6734,10 +7128,17 @@ def _server_preview_hardware_source_items(
     rows = preview_store.connection.execute(
         "select path, source_folder from source_files where kind='fittings' order by path"
     ).fetchall()
+    scoped_rows = [
+        (str(path or ""), str(source_folder or ""))
+        for path, source_folder in rows
+        if _path_in_folders(str(source_folder or ""), folder_paths)
+        and str(path or "")
+    ]
+    selected_paths = _selected_hardware_report_paths(scoped_rows)
     result: list[dict] = []
-    for path, source_folder in rows:
+    for path, source_folder in scoped_rows:
         path = str(path or "")
-        if not path or not _path_in_folders(str(source_folder or ""), folder_paths):
+        if not path or path not in selected_paths:
             continue
         try:
             groups = parse_fittings_groups(Path(path))
@@ -6809,7 +7210,7 @@ def preview_server_changes(
             process_temporary=False,
             include_hardware=include_hardware,
             full_refresh=False,
-            validate_selected_orders=False,
+            validate_selected_orders=True,
             refresh_outbound_statuses=False,
             reconcile_outbound=False,
         )
@@ -6853,6 +7254,7 @@ def preview_server_changes(
             config, None, "", normalized_folders, include_hardware,
             preview_store=preview_store,
         ) | {
+            "validation_recomputed": True,
             "hardware_mapping_requirements": payload["hardware_mapping_requirements"],
             "hardware_source_items": _server_preview_hardware_source_items(
                 preview_store, [str(folder) for folder in normalized_folders]
@@ -7001,6 +7403,59 @@ def _memory_factory_selection(payload: dict, order_id: str = "", factory_order: 
     return selected
 
 
+def _server_preview_order_validation_errors(
+    orders: Iterable[dict],
+    selected_order_ids: set[str] | None = None,
+    *,
+    require_recomputed: bool = False,
+) -> list[str]:
+    """Return validation failures that must block a Server confirmation."""
+    wanted = {
+        str(order_id or "").strip().upper()
+        for order_id in (selected_order_ids or set())
+        if str(order_id or "").strip()
+    }
+    failures: list[str] = []
+    for order in orders:
+        if not isinstance(order, dict):
+            continue
+        order_id = str(order.get("order_id", "")).strip().upper()
+        if not order_id or (wanted and order_id not in wanted):
+            continue
+        status = str(order.get("validation_status", "")).strip() or "待校验"
+        message = str(order.get("validation_message", "")).strip()
+        # Older token-based material-allocation previews did not run the
+        # selected-order validation pass and therefore carry the schema
+        # default ``待同步`` without an error message. Preserve that legacy
+        # contract; the in-memory Server folder flow sets
+        # ``require_recomputed`` and rejects it instead.
+        if not require_recomputed and status == "待同步" and not message:
+            continue
+        if status == "正常":
+            continue
+        failures.append(f"{order_id}：{status}" + (f"；{message}" if message else ""))
+    return failures
+
+
+def _require_valid_server_preview_orders(
+    orders: Iterable[dict],
+    selected_order_ids: set[str] | None = None,
+    *,
+    require_recomputed: bool = False,
+) -> None:
+    failures = _server_preview_order_validation_errors(
+        orders,
+        selected_order_ids,
+        require_recomputed=require_recomputed,
+    )
+    if failures:
+        raise RuleError(
+            "order_validation",
+            "以下订单未通过重新校验，不能确认写入：" + "；".join(failures),
+            orders=failures,
+        )
+
+
 def _insert_memory_records(connection: sqlite3.Connection, table: str, rows: list[dict]) -> None:
     target_columns = {
         str(row[1]) for row in connection.execute(f"pragma table_info({table})").fetchall()
@@ -7137,6 +7592,11 @@ def _confirm_memory_preview(
             for item in payload.get("orders", [])
             if isinstance(item, dict) and str(item.get("order_id", "")).strip()
         }
+    _require_valid_server_preview_orders(
+        payload.get("orders", []),
+        selected_order_ids,
+        require_recomputed=bool(payload.get("validation_recomputed")),
+    )
     skipped_orders = {
         str(value or "").strip().upper()
         for value in skip_hardware_order_ids
@@ -7386,6 +7846,14 @@ def confirm_server_material_allocations(
             token,
             [Path(path) for path in scope_paths],
             include_hardware=True,
+        )
+        _require_valid_server_preview_orders(
+            preview_payload.get("orders", []),
+            {
+                str(order.get("order_id", "")).strip().upper()
+                for order in preview_payload.get("orders", [])
+                if isinstance(order, dict) and str(order.get("order_id", "")).strip()
+            },
         )
         actionable_factories = [
             (str(factory["factory_order"]).upper(), str(order["order_id"]).upper())
@@ -8081,7 +8549,7 @@ def resolve_current_issue(config: Config, issue_key: str, order_id: str = "", fa
 
 
 def ignore_server_folder(config: Config, folder: Path) -> dict:
-    """Watch a report-less mixed folder for 30 days, then ignore it permanently."""
+    """Watch a non-standard Server folder for 30 days, then ignore it permanently."""
     roots = _available_server_roots(config)
     if not roots:
         from .order_workflow import resolve_source_root
@@ -8095,20 +8563,22 @@ def ignore_server_folder(config: Config, folder: Path) -> dict:
     # the configured root is traversed as /var/..., which would split one
     # folder into two ignore keys.
     selected = root / selected_resolved.relative_to(root.resolve())
-    if not _is_mixed_order_folder(selected):
-        raise ValueError("只有缺少报表的混单文件夹可以使用此忽略操作")
-    if _report_files(selected):
+    mixed_order = _is_mixed_order_folder(selected)
+    if _is_standard_order_folder(selected.name):
+        raise ValueError("标准订单文件夹不能使用此忽略操作")
+    report_files, folder_order_ids, folder_fingerprint = _server_folder_ignore_metadata(selected)
+    if mixed_order and report_files:
         raise ValueError("该文件夹已经出现报表，请重新扫描并处理，不需要忽略")
 
     ignored_at = datetime.now()
     store = OrderIndexStore(config.workflow_database)
     path = str(selected)
-    order_id = "、".join(_folder_order_ids(selected))
+    order_id = "、".join(folder_order_ids)
     store.set_ignored_server_folder(
         path,
         order_id=order_id,
         folder_name=selected.name,
-        fingerprint=_server_folder_fingerprint(selected),
+        fingerprint=folder_fingerprint,
         ignored_at=ignored_at.isoformat(timespec="seconds"),
         watch_until=(ignored_at + timedelta(days=SERVER_FOLDER_IGNORE_WATCH_DAYS)).isoformat(timespec="seconds"),
     )
@@ -8120,25 +8590,28 @@ def ignore_server_folder(config: Config, folder: Path) -> dict:
         changed_at=ignored_at.isoformat(timespec="seconds"),
     )
     store.resolve_active_issue(f"server_missing_report:{path}")
+    store.resolve_active_issue(f"temporary_processing:{path}")
+    folder_label = "无报表混单" if mixed_order else "临时"
     store.add_change(
         severity="info",
         kind="server_folder_ignored",
         order_id=order_id,
         path=path,
         message=(
-            f"已忽略无报表混单文件夹 {selected.name}；未来 {SERVER_FOLDER_IGNORE_WATCH_DAYS} 天内若出现可识别报表，系统会重新提醒。"
+            f"已忽略{folder_label}文件夹 {selected.name}；未来 {SERVER_FOLDER_IGNORE_WATCH_DAYS} 天内若发生变化，系统会重新提醒。"
         ),
     )
     store.commit()
+    current_issues = store.active_issues()
     store.close()
-    scan = scan_server_changes(config)
     return {
         "ok": True,
         "ignored_folder": path,
         "watch_until": (ignored_at + timedelta(days=SERVER_FOLDER_IGNORE_WATCH_DAYS)).isoformat(timespec="seconds"),
-        "server": scan["server"],
-        "pending_server_changes": scan["server"]["changes"],
-        "current_issues": scan["current_issues"],
+        # The caller already has the pending Server snapshot in memory. Do
+        # not rescan both Server roots merely to redisplay that snapshot.
+        "pending_server_changes": [],
+        "current_issues": current_issues,
     }
 
 

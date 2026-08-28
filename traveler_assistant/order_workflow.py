@@ -1,3 +1,11 @@
+"""Deterministic order preview and Traveler generation workflow.
+
+The workflow reads external order reports and central facts, converts them to
+preview objects, and renders the approved result into the Traveler template.
+It owns Excel layout compatibility and validation; the SwiftUI layer should
+only display the resulting payload and progress.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -71,6 +79,7 @@ class PreviewFitting:
     unit: str
     quantity: float
     ignored: bool
+    remarks: str = ""
 
 
 @dataclass
@@ -78,6 +87,7 @@ class FactoryPreview:
     factory_order: str
     order_name: str
     fittings: list[PreviewFitting]
+    manual_hardware: list[PreviewFitting] = field(default_factory=list)
 
 
 @dataclass
@@ -1389,22 +1399,20 @@ def _normalize_fittings(items: list[FittingItem], mappings: InventoryMappings) -
     direct = {"WJ-CBT": ("Shelf Holder", "pcs/个"), "71T950A": ("Hinge", "pcs/个")}
     rails = {"H-RAIL": ("H-Rail", "set/套"), "L-RAIL": ("L-Rail", "set/套")}
     aggregate: dict[tuple[str, str, str, str], float] = defaultdict(float)
-    rail_sides: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     for item in items:
         code = _text(item.code).upper()
         if code in direct:
             name, unit = direct[code]
             aggregate[(name, code, "", unit)] += item.quantity
         elif code in rails:
-            side = "right" if "right" in item.name.lower() else "left" if "left" in item.name.lower() else "unknown"
-            rail_sides[code][side] += item.quantity
+            # parse_fittings_groups() has already validated and collapsed an
+            # equal left/right pair into one canonical source row.  Do not
+            # reconstruct the pair here: doing so turns a valid collapsed
+            # pair into a false "missing right side" error.
+            name, unit = rails[code]
+            aggregate[(name, code, "", unit)] += item.quantity
         else:
             aggregate[(_text(item.name), code, _text(item.size), _text(item.unit) or "pcs/个")] += item.quantity
-    for code, sides in rail_sides.items():
-        name, unit = rails[code]
-        if set(sides) != {"left", "right"} or abs(sides["left"] - sides["right"]) > EPSILON:
-            raise RuleError("rail_mismatch", f"{name} 左右数量不一致：{dict(sides)}")
-        aggregate[(name, code, "", unit)] += sides["left"]
     result = []
     for (name, code, size, unit), quantity in sorted(aggregate.items()):
         key = _ignored_key(name, code, size, unit)
@@ -1578,6 +1586,7 @@ def preview_order(
     include_hardware: bool = True,
     temporary_factory_order: str = "",
     temporary_factory_name: str = "",
+    persist_facts: bool = True,
 ) -> OrderPreview:
     if not folder.is_dir():
         raise RuleError("missing_order_folder", f"订单文件夹不存在：{folder}")
@@ -1664,7 +1673,8 @@ def preview_order(
             include_hardware=include_hardware,
             material_room_rows=selected_room_rows,
         )
-        persist_preview(config, result)
+        if persist_facts:
+            persist_preview(config, result)
         return result
     if include_hardware:
         fittings, fitting_warnings = _choose_fittings(
@@ -1753,7 +1763,8 @@ def preview_order(
         include_hardware=include_hardware,
         material_room_rows=selected_room_rows,
     )
-    persist_preview(config, result)
+    if persist_facts:
+        persist_preview(config, result)
     return result
 
 
@@ -2399,7 +2410,12 @@ def _prepare_picking_list(wb, preview: OrderPreview) -> None:
         _paste_snapshot(ws, base, cursor)
         if slots > 4:
             insertion = cursor + 7
-            ws.insert_rows(insertion, slots - 4)
+            # ``insert_rows`` does not move merged ranges.  The base snapshot
+            # contains the manual-hardware title immediately after the
+            # automatic fitting rows, so inserting extra fitting rows without
+            # shifting its merges leaves the title merge over the fifth item
+            # (for example TB18) and hides that item's values after reload.
+            _shift_merges_for_insert(ws, insertion, slots - 4)
             template_row = cursor + 6
             for row in range(insertion, insertion + slots - 4):
                 ws.row_dimensions[row].height = ws.row_dimensions[template_row].height
@@ -2440,6 +2456,24 @@ def _prepare_picking_list(wb, preview: OrderPreview) -> None:
                 ws.cell(row, 7).value = item.quantity if item else None
         cursor += block_height
 
+    manual_hardware = {}
+    for factory in preview.factories:
+        items = [item for item in factory.manual_hardware if not item.ignored]
+        if not items:
+            continue
+        manual_hardware[factory.order_name or factory.factory_order] = [
+            {
+                "sku": item.code,
+                "name": item.name,
+                "spec": item.size,
+                "quantity": item.quantity,
+                "remarks": item.remarks,
+            }
+            for item in items
+        ]
+    if manual_hardware:
+        _restore_manual_hardware(ws, manual_hardware)
+
 
 def _purchase_material_rows(preview: OrderPreview) -> list[tuple[str, str, float]]:
     rows: list[tuple[str, str, float]] = []
@@ -2471,7 +2505,8 @@ def _purchase_material_rows(preview: OrderPreview) -> list[tuple[str, str, float
 def _purchase_hardware_rows(preview: OrderPreview) -> list[tuple[str, str, float, str]]:
     rows: list[tuple[str, str, float, str]] = []
     for factory in sorted(preview.factories, key=lambda item: (item.factory_order.casefold(), item.order_name.casefold())):
-        for item in sorted(factory.fittings, key=lambda fitting: (fitting.name.casefold(), fitting.code.casefold())):
+        hardware = [*factory.fittings, *factory.manual_hardware]
+        for item in sorted(hardware, key=lambda fitting: (fitting.name.casefold(), fitting.code.casefold())):
             if item.ignored or item.quantity <= EPSILON:
                 continue
             rows.append((
@@ -2709,24 +2744,39 @@ def _positive_hardware_quantity(value) -> int:
     return int(round(number))
 
 
-def _manual_hardware_target(ws, factory_name: str) -> str:
+def _resolve_manual_hardware_factory(
+    config: Config,
+    order_id: str,
+    factory_name: str,
+) -> tuple[str, str]:
+    """Resolve the display name to the canonical factory-order identifier."""
+    import sqlite3
+
     requested = _text(factory_name)
-    matches = []
-    for row in range(1, ws.max_row + 1):
-        if _text(ws.cell(row, 1).value) != "Name/工厂单名称":
-            continue
-        current = next(
-            (_text(ws.cell(row, col).value) for col in range(2, ws.max_column + 1) if _text(ws.cell(row, col).value)),
-            "",
-        )
-        if current.casefold() == requested.casefold():
-            matches.append(current)
-    if len(matches) != 1:
+    connection = sqlite3.connect(config.workflow_database)
+    try:
+        rows = connection.execute(
+            """
+            select factory_order, factory_name
+            from factory_orders
+            where order_id=?
+              and aimes_status='active'
+              and (upper(factory_name)=upper(?) or upper(factory_order)=upper(?))
+            order by factory_order
+            """,
+            (order_id.upper(), requested, requested),
+        ).fetchall()
+    finally:
+        connection.close()
+    if len(rows) != 1:
         raise RuleError(
             "manual_hardware_factory_missing",
-            f"Traveler 中找不到唯一工厂单名称：{factory_name}",
+            f"数据库中找不到唯一有效工厂单：{factory_name}",
+            order_id=order_id.upper(),
+            factory_name=requested,
+            match_count=len(rows),
         )
-    return matches[0]
+    return _text(rows[0][0]), _text(rows[0][1])
 
 
 def preview_manual_hardware(
@@ -2737,33 +2787,15 @@ def preview_manual_hardware(
     quantity,
     remarks: str = "",
 ) -> dict:
-    traveler = find_existing_traveler(config, order_id)
     with ProductDatabase(bootstrap_product_database(config)) as catalog:
         product = catalog.require_code(product_code.strip().upper())
-    factory = factory_name.strip()
-    if traveler is not None:
-        workbook = load_workbook(traveler, data_only=False, read_only=False)
-        required = {WORK_ORDER_SHEET, USAGE_LIST_SHEET, PICKING_LIST_SHEET}
-        if not required.issubset(workbook.sheetnames):
-            raise RuleError("traveler_schema", f"Traveler 缺少必要工作表：{sorted(required - set(workbook.sheetnames))}")
-        factory = _manual_hardware_target(workbook[PICKING_LIST_SHEET], factory_name)
-    else:
-        import sqlite3
-        connection = sqlite3.connect(config.workflow_database)
-        try:
-            row = connection.execute(
-                "select factory_name from factory_orders where order_id=? and (factory_name=? or factory_order=?)",
-                (order_id.upper(), factory_name, factory_name),
-            ).fetchone()
-        finally:
-            connection.close()
-        if row is not None:
-            factory = row[0]
-        elif not factory:
-            raise RuleError("factory_order_missing", f"数据库中找不到工厂单：{factory_name}")
+    factory_order, factory = _resolve_manual_hardware_factory(config, order_id, factory_name)
     return {
-        "traveler": str(traveler) if traveler else "",
+        # Kept as an empty compatibility field for older Gateway/UI payloads.
+        # Manual hardware is no longer read from or written to a Traveler.
+        "traveler": "",
         "order_id": order_id.upper(),
+        "factory_order": factory_order,
         "factory_name": factory,
         "product_code": product.code,
         "product_name": product.name,
@@ -2793,88 +2825,136 @@ def add_manual_hardware(
     preview = preview_manual_hardware(
         config, order_id, factory_name, product_code, quantity, remarks
     )
-    traveler = Path(preview["traveler"])
-    if config.storage_prepared:
-        import sqlite3
-        observed = datetime.now().astimezone().isoformat(timespec="seconds")
-        connection = sqlite3.connect(config.workflow_database)
-        try:
-            mappings = InventoryMappings(config.workflow_database)
-            if ignored_hardware_reason(
-                mappings,
-                preview["product_name"],
-                preview["product_code"],
-            ) is not None:
-                raise RuleError(
-                    "hardware_ignored",
-                    f"五金已被设置为忽略，不能写入数据库：{preview['product_name']}",
-                )
+    if not config.storage_prepared:
+        raise RuleError("database_not_prepared", "中央数据库尚未准备完成，不能写入人工五金")
+
+    import sqlite3
+
+    order = order_id.upper()
+    observed = datetime.now().astimezone().isoformat(timespec="seconds")
+    connection = sqlite3.connect(config.workflow_database)
+    try:
+        mappings = InventoryMappings(config.workflow_database)
+        if ignored_hardware_reason(
+            mappings,
+            preview["product_name"],
+            preview["product_code"],
+        ) is not None:
+            raise RuleError(
+                "hardware_ignored",
+                f"五金已被设置为忽略，不能写入数据库：{preview['product_name']}",
+            )
+
+        connection.execute("begin")
+        rows = connection.execute(
+            """
+            select id, quantity, remarks
+            from hardware_items
+            where order_id=?
+              and factory_order=?
+              and product_code=?
+              and spec=?
+              and source_type='manual'
+              and active=1
+            order by id
+            """,
+            (order, preview["factory_order"], preview["product_code"], preview["spec"]),
+        ).fetchall()
+        saved_quantity = preview["quantity"]
+        remarks = [preview["remarks"]]
+        if rows:
+            saved_quantity += sum(_positive_hardware_quantity(row[1]) for row in rows)
+            remarks = [_text(row[2]) for row in rows] + remarks
+            primary_id = rows[0][0]
             connection.execute(
-                """insert into hardware_items(
+                """
+                update hardware_items
+                set quantity=?, remarks=?, name=?, source_code=?, unit=?, updated_at=?
+                where id=?
+                """,
+                (
+                    float(saved_quantity),
+                    "；".join(dict.fromkeys(item for item in remarks if item)) or "人工添加",
+                    preview["product_name"],
+                    preview["product_code"],
+                    "pcs/个",
+                    observed,
+                    primary_id,
+                ),
+            )
+            duplicate_ids = [row[0] for row in rows[1:]]
+            if duplicate_ids:
+                connection.executemany("delete from hardware_items where id=?", ((item_id,) for item_id in duplicate_ids))
+            result_kind = "increased"
+        else:
+            connection.execute(
+                """
+                insert into hardware_items(
                     order_id,factory_order,scope,product_code,source_code,name,spec,quantity,unit,
                     source_type,source_path,remarks,updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (order_id.upper(), preview["factory_name"], "factory_order", preview["product_code"], preview["product_code"],
-                 preview["product_name"], preview["spec"], float(preview["quantity"]), "pcs/个",
-                 "manual", "", preview["remarks"], observed),
+                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    order,
+                    preview["factory_order"],
+                    "factory_order",
+                    preview["product_code"],
+                    preview["product_code"],
+                    preview["product_name"],
+                    preview["spec"],
+                    float(saved_quantity),
+                    "pcs/个",
+                    "manual",
+                    "",
+                    preview["remarks"],
+                    observed,
+                ),
             )
-            connection.commit()
-        finally:
-            connection.close()
-    if not traveler.is_file():
-        return Path(""), Path(""), {**preview, "result": "added", "saved_quantity": preview["quantity"], "stored_in_database": True}
-    with tempfile.TemporaryDirectory(prefix="manual-hardware-") as temporary:
-        draft = Path(temporary) / traveler.name
-        shutil.copy2(traveler, draft)
-        workbook = load_workbook(draft, data_only=False)
-        sheet = workbook[PICKING_LIST_SHEET]
-        existing = _manual_hardware(sheet)
-        items = existing.setdefault(preview["factory_name"], [])
-        matching = next(
-            (
-                item for item in items
-                if _text(item["sku"]).casefold() == preview["product_code"].casefold()
-                and _text(item["spec"]).casefold() == preview["spec"].casefold()
-            ),
-            None,
-        )
-        if matching is None:
-            items.append({
-                "sku": preview["product_code"],
-                "name": preview["product_name"],
-                "spec": preview["spec"],
-                "quantity": preview["quantity"],
-                "remarks": preview["remarks"],
-            })
             result_kind = "added"
-        else:
-            matching["quantity"] = _positive_hardware_quantity(matching["quantity"]) + preview["quantity"]
-            if preview["remarks"] not in {_text(matching["remarks"]), "人工添加"}:
-                current = _text(matching["remarks"])
-                matching["remarks"] = "；".join(filter(None, (current, preview["remarks"])))
-            result_kind = "increased"
-        _restore_manual_hardware(sheet, existing)
-        workbook.calculation = CalcProperties(calcMode="auto", fullCalcOnLoad=True, forceFullCalc=True)
-        workbook.save(draft)
-        check = load_workbook(draft, data_only=False, read_only=False)
-        saved = _manual_hardware(check[PICKING_LIST_SHEET]).get(preview["factory_name"], [])
-        verified = next(
-            (
-                item for item in saved
-                if _text(item["sku"]).casefold() == preview["product_code"].casefold()
-                and _text(item["spec"]).casefold() == preview["spec"].casefold()
-            ),
-            None,
-        )
-        if verified is None:
-            raise RuleError("write_verification", "人工五金写入后重新打开未找到目标记录")
-        backup = _backup_traveler(config, traveler, order_id, "manual-hardware-backup")
-        os.replace(draft, traveler)
-    result = {**preview, "result": result_kind, "saved_quantity": verified["quantity"]}
-    return traveler, backup, result
+
+        connection.commit()
+        verified = connection.execute(
+            """
+            select count(*), sum(quantity)
+            from hardware_items
+            where order_id=?
+              and factory_order=?
+              and product_code=?
+              and spec=?
+              and source_type='manual'
+              and active=1
+            """,
+            (order, preview["factory_order"], preview["product_code"], preview["spec"]),
+        ).fetchone()
+        if verified[0] != 1 or verified[1] is None or abs(float(verified[1]) - saved_quantity) > EPSILON:
+            raise RuleError("write_verification", "人工五金写入数据库后重新读取校验失败")
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+    result = {
+        **preview,
+        "result": result_kind,
+        "saved_quantity": saved_quantity,
+        "stored_in_database": True,
+        "traveler": "",
+    }
+    # The tuple shape remains compatible with the existing Gateway/CLI.  Both
+    # paths are intentionally empty because this operation has no Traveler
+    # file side effect and therefore no Traveler backup.
+    return Path(""), Path(""), result
 
 
 def generate_order_traveler(config: Config, preview: OrderPreview) -> Path:
+    """Render one preview into a new Traveler using the current template.
+
+    The preview is the boundary between parsed business facts and Excel
+    layout.  Generation writes a new file in the configured output area and
+    validates the workbook structure before returning its path; it does not
+    silently turn a preview into an external inventory operation.
+    """
     destination = _traveler_path(config, preview.order_id)
     destination_dir = destination.parent
     if destination.exists():
@@ -3023,19 +3103,25 @@ def generate_database_order_traveler(config: Config, order_id: str) -> Path:
             material_items.append(MaterialItem(kind, thickness, color, quantity))
 
     hardware_by_factory: dict[str, list[PreviewFitting]] = defaultdict(list)
+    manual_hardware_by_factory: dict[str, list[PreviewFitting]] = defaultdict(list)
     for row in detail["hardware"]:
         factory_order = _text(row.get("factory_order")) or "未分配工厂单"
-        hardware_by_factory[factory_order].append(PreviewFitting(
-            key=f"{factory_order}:{row.get('product_code', '')}:{row.get('name', '')}:{len(hardware_by_factory[factory_order])}",
+        item = PreviewFitting(
+            key=f"{factory_order}:{row.get('product_code', '')}:{row.get('name', '')}:{len(hardware_by_factory[factory_order]) + len(manual_hardware_by_factory[factory_order])}",
             name=_text(row.get("name")),
             code=_text(row.get("product_code")),
             size=_text(row.get("spec")),
             unit=_text(row.get("unit")),
             quantity=_number(row.get("quantity"), "数据库五金数量"),
             ignored=False,
-        ))
+            remarks=_text(row.get("remarks")),
+        )
+        if _text(row.get("source_type")).casefold() == "manual":
+            manual_hardware_by_factory[factory_order].append(item)
+        else:
+            hardware_by_factory[factory_order].append(item)
     factory_rows = { _text(row.get("factory_order")): row for row in detail["factory_orders"] if _text(row.get("factory_order")) }
-    orphan_hardware = sorted(set(hardware_by_factory) - set(factory_rows))
+    orphan_hardware = sorted((set(hardware_by_factory) | set(manual_hardware_by_factory)) - set(factory_rows))
     if orphan_hardware:
         raise RuleError(
             "factory_hardware_mismatch",
@@ -3048,6 +3134,7 @@ def generate_database_order_traveler(config: Config, order_id: str) -> Path:
             factory_order=factory_order,
             order_name=_text(row.get("factory_name")) or factory_order,
             fittings=hardware_by_factory.get(factory_order, []),
+            manual_hardware=manual_hardware_by_factory.get(factory_order, []),
         )
         for factory_order, row in sorted(factory_rows.items())
     ]
@@ -3086,6 +3173,7 @@ def generate_temporary_traveler(config: Config, preview: OrderPreview) -> Path:
 
 
 def update_order_traveler(config: Config, preview: OrderPreview) -> tuple[Path, Path]:
+    """Back up and atomically update an existing Traveler from a preview."""
     existing = find_existing_traveler(config, preview.order_id)
     if not existing:
         raise RuleError("traveler_not_found", f"找不到可更新的 Traveler：{_traveler_path(config, preview.order_id)}")
@@ -3440,7 +3528,11 @@ def main(argv: list[str] | None = None) -> int:
                     args.quantity,
                     args.remarks,
                 )
-                result = {**saved, "updated": str(traveler), "backup": str(backup)}
+                result = {
+                    **saved,
+                    "updated": str(traveler) if traveler != Path("") else "",
+                    "backup": str(backup) if backup != Path("") else "",
+                }
             else:
                 result = {"approval_required": True, "preview": result}
         elif args.command == "assign-material":

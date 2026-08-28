@@ -1,3 +1,6 @@
+// Order-center views and layout helpers.  The dashboard renders persisted
+// order facts and starts operations through AppModel; it should not infer
+// production, shipment, or installation facts from display-only state.
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
@@ -29,6 +32,67 @@ let dashboardMessageViewportHeight = CGFloat(dashboardMessageVisibleRowCount) * 
 let dashboardMessageHoverDelay: TimeInterval = 1.0
 let dashboardMessageHoverCloseGrace: TimeInterval = 0.8
 let panelMaterialHoverDelay: TimeInterval = 1.0
+let orderInstallationDatePickerPopoverWidth: CGFloat = 320
+let orderInstallationDatePickerPopoverHeight: CGFloat = 300
+let orderInstallationDisplayDateFormat = "yyyy年M月d日"
+
+func currentIssueRequiresInventoryMapping(_ issue: CurrentIssue) -> Bool {
+    if issue.kind == "material_mapping" || issue.kind == "hardware_mapping" {
+        return true
+    }
+    if issue.kind == "temporary_processing" && issue.message.contains("未映射材料") {
+        return true
+    }
+    // Material SKU failures are currently persisted as material_validation
+    // together with ordinary workbook/read failures. Only the explicit SKU
+    // wording should open the mapping workspace; malformed files must keep
+    // the normal "mark handled" action.
+    return issue.kind == "material_validation"
+        && issue.message.contains("未完成商品 SKU 处理")
+}
+
+private func serverWriteMaterialTypeRank(_ materialType: String) -> Int {
+    switch materialType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "plywood": return 0
+    case "panel", "back": return 1
+    case "edge": return 2
+    default: return 3
+    }
+}
+
+private func serverWritePlywoodThicknessRank(_ thickness: String) -> Int {
+    let value = Double(thickness) ?? .greatestFiniteMagnitude
+    if abs(value - 18) < 0.01 { return 0 }
+    if abs(value - 14.5) < 0.01 { return 1 }
+    if abs(value - 5.4) < 0.01 { return 2 }
+    return 3
+}
+
+func sortedServerWriteMaterialChanges(_ changes: [ServerWriteMaterialChange]) -> [ServerWriteMaterialChange] {
+    changes.sorted { left, right in
+        let leftType = serverWriteMaterialTypeRank(left.materialType)
+        let rightType = serverWriteMaterialTypeRank(right.materialType)
+        if leftType != rightType { return leftType < rightType }
+
+        if leftType == 0 {
+            let leftThicknessRank = serverWritePlywoodThicknessRank(left.thickness)
+            let rightThicknessRank = serverWritePlywoodThicknessRank(right.thickness)
+            if leftThicknessRank != rightThicknessRank { return leftThicknessRank < rightThicknessRank }
+        }
+
+        let leftThickness = Double(left.thickness) ?? .greatestFiniteMagnitude
+        let rightThickness = Double(right.thickness) ?? .greatestFiniteMagnitude
+        if abs(leftThickness - rightThickness) > 0.01 { return leftThickness < rightThickness }
+
+        let leftLabel = [left.color, left.thickness, left.edge]
+            .joined(separator: "|")
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        let rightLabel = [right.color, right.thickness, right.edge]
+            .joined(separator: "|")
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        return leftLabel.localizedStandardCompare(rightLabel) == .orderedAscending
+    }
+}
 
 func dashboardMessageHoverCanPresent(appIsActive: Bool, mainWindowIsFrontmost: Bool) -> Bool {
     appIsActive && mainWindowIsFrontmost
@@ -422,7 +486,7 @@ func orderInstallationDisplayDate(_ value: String) -> String {
           let day = Int(parts[2]) else {
         return value
     }
-    return "\(month)/\(day)"
+    return "\(parts[0])年\(month)月\(day)日"
 }
 
 func orderInstallationDateSummary(_ days: [OrderInstallationDay]) -> String {
@@ -434,11 +498,25 @@ func orderInstallationDateSummary(_ days: [OrderInstallationDay]) -> String {
     return "\(range) · \(dates.count)天"
 }
 
-func orderInstallationQuickSummary(_ item: OrderDashboardItem) -> String {
-    let actual = orderInstallationDateSummary(item.actualInstallationDays)
-    if !actual.isEmpty { return "实际安装 \(actual)" }
-    let planned = orderInstallationDateSummary(item.plannedInstallationDays)
-    return planned.isEmpty ? "" : "计划安装 \(planned)"
+func orderInstallationPlannedDateSummary(_ days: [OrderInstallationDay]) -> String {
+    guard let date = days.map(\.date).sorted().first else { return "" }
+    return orderInstallationDisplayDate(date)
+}
+
+func orderInstallationQuickSummaries(
+    planned: [OrderInstallationDay],
+    actual: [OrderInstallationDay]
+) -> [String] {
+    var summaries: [String] = []
+    let plannedSummary = orderInstallationPlannedDateSummary(planned)
+    if !plannedSummary.isEmpty {
+        summaries.append("计划安装 \(plannedSummary)")
+    }
+    let actualSummary = orderInstallationDateSummary(actual)
+    if !actualSummary.isEmpty {
+        summaries.append("实际安装 \(actualSummary)")
+    }
+    return summaries
 }
 
 private struct OrderDashboardProgressBar: View {
@@ -1547,8 +1625,13 @@ struct OrderDashboardView: View {
                                     .lineLimit(1)
                                     .help(item.userNote)
                             }
-                            let installation = orderInstallationQuickSummary(item)
-                            if !installation.isEmpty {
+                            ForEach(
+                                orderInstallationQuickSummaries(
+                                    planned: item.plannedInstallationDays,
+                                    actual: item.actualInstallationDays
+                                ),
+                                id: \.self
+                            ) { installation in
                                 Label(installation, systemImage: "calendar")
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
@@ -1987,7 +2070,7 @@ private func orderInstallationPickerDisplayDate(_ value: Date) -> String {
     formatter.calendar = Calendar(identifier: .gregorian)
     formatter.locale = Locale(identifier: "en_US_POSIX")
     formatter.timeZone = .current
-    formatter.dateFormat = "M/d/yyyy"
+    formatter.dateFormat = orderInstallationDisplayDateFormat
     return formatter.string(from: value)
 }
 
@@ -2078,8 +2161,8 @@ private struct OrderAnnotationsEditor: View {
                         }
                     }
 
-                installationRows(title: "计划安装日期", rows: $plannedDays)
-                installationRows(title: "实际安装日期", rows: $actualDays)
+                installationRows(title: "计划安装日期", rows: $plannedDays, allowsMultiple: false)
+                installationRows(title: "实际安装日期", rows: $actualDays, allowsMultiple: true)
 
                 HStack(spacing: 10) {
                     if !status.isEmpty {
@@ -2101,18 +2184,21 @@ private struct OrderAnnotationsEditor: View {
     @ViewBuilder
     private func installationRows(
         title: String,
-        rows: Binding<[OrderInstallationDraft]>
+        rows: Binding<[OrderInstallationDraft]>,
+        allowsMultiple: Bool
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(title).font(.subheadline.weight(.semibold))
                 Spacer(minLength: 0)
-                Button {
-                    rows.wrappedValue.append(OrderInstallationDraft(date: Date(), installer: ""))
-                } label: {
-                    Label("添加日期", systemImage: "plus")
+                if allowsMultiple || rows.wrappedValue.isEmpty {
+                    Button {
+                        rows.wrappedValue.append(OrderInstallationDraft(date: Date(), installer: ""))
+                    } label: {
+                        Label(allowsMultiple ? "添加日期" : "选择开始日期", systemImage: "plus")
+                    }
+                    .buttonStyle(.borderless)
                 }
-                .buttonStyle(.borderless)
             }
             if rows.wrappedValue.isEmpty {
                 Text("未填写")
@@ -2148,7 +2234,11 @@ private struct OrderAnnotationsEditor: View {
                             DatePicker("", selection: $day.date, displayedComponents: [.date])
                                 .labelsHidden()
                                 .datePickerStyle(.graphical)
-                                .padding(12)
+                                .frame(
+                                    width: orderInstallationDatePickerPopoverWidth,
+                                    height: orderInstallationDatePickerPopoverHeight
+                                )
+                                .padding(16)
                         }
 
                         HStack(spacing: 0) {
@@ -2168,10 +2258,11 @@ private struct OrderAnnotationsEditor: View {
                                     }
                                 }
                             } label: {
-                                Image(systemName: "chevron.down")
+                                Text("")
                                     .frame(width: 28, height: 26)
                             }
                             .menuStyle(.borderlessButton)
+                            .accessibilityLabel("选择以前使用过的安装人或安装小组")
                             .help("选择以前使用过的安装人或安装小组")
                         }
                         .background(
@@ -2197,9 +2288,15 @@ private struct OrderAnnotationsEditor: View {
                         installer: $0.installer
                     )
                 }
-                Text("开始：\(orderInstallationDisplayDate(summaries.map(\.date).sorted().first ?? "—"))；结束：\(orderInstallationDisplayDate(summaries.map(\.date).sorted().last ?? "—"))；共 \(Set(summaries.map(\.date)).count) 天")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                if allowsMultiple {
+                    Text("开始：\(orderInstallationDisplayDate(summaries.map(\.date).sorted().first ?? "—"))；结束：\(orderInstallationDisplayDate(summaries.map(\.date).sorted().last ?? "—"))；共 \(Set(summaries.map(\.date)).count) 天")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("开始：\(orderInstallationDisplayDate(summaries.map(\.date).sorted().first ?? "—"))")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
         }
     }
@@ -3011,6 +3108,19 @@ struct PendingCenterSheet: View {
                             }
                         }
                     }
+                    if group.manualOnly {
+                        HStack(spacing: 8) {
+                            Text("这是临时文件夹；忽略后观察一个月，期间发生变化会重新提醒。")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button("忽略此文件夹（观察一个月）") {
+                                model.ignoreServerFolder(group.folderPath)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(model.orderRunning)
+                        }
+                    }
                 }
             }
 
@@ -3031,7 +3141,7 @@ struct PendingCenterSheet: View {
                 Image(systemName: issue.kind == "factory_ownership" ? "person.crop.circle.badge.questionmark" : "exclamationmark.triangle.fill")
                     .foregroundColor(issue.kind == "factory_ownership" ? AppPalette.warning : AppPalette.danger)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(issue.kind == "factory_ownership" ? "订单归属问题" : (issue.kind == "server_missing_report" ? "报表检查" : (issue.message.contains("未映射材料") ? "出库前需要材料映射" : "处理失败")))
+                    Text(issue.kind == "factory_ownership" ? "订单归属问题" : (issue.kind == "server_missing_report" ? "报表检查" : (currentIssueRequiresInventoryMapping(issue) ? "出库前需要材料映射" : "处理失败")))
                         .font(.subheadline.weight(.semibold))
                     Text(issue.message).fixedSize(horizontal: false, vertical: true)
                     if !issue.path.isEmpty {
@@ -3064,11 +3174,7 @@ struct PendingCenterSheet: View {
                     Button("忽略此文件夹（观察一个月）") { model.ignoreServerFolder(issue.path) }
                         .buttonStyle(.borderedProminent)
                         .disabled(model.orderRunning)
-                } else if issue.kind == "temporary_processing" && issue.message.contains("未映射材料") {
-                    Button("打开订单文件映射") { model.requestInventoryMapping(folderPath: issue.path, message: issue.message) }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.orderRunning)
-                } else if issue.kind == "material_mapping" || issue.kind == "hardware_mapping" {
+                } else if currentIssueRequiresInventoryMapping(issue) {
                     Button("处理订单文件映射") { model.requestInventoryMapping(folderPath: issue.path, message: issue.message) }
                         .buttonStyle(.borderedProminent)
                         .disabled(model.orderRunning)
@@ -3668,7 +3774,7 @@ struct CurrentIssuesSheet: View {
                                             Button("确认归属") { model.resolveCurrentIssue(issue, orderID: orderIDs[issue.id] ?? "") }
                                                 .buttonStyle(.borderedProminent)
                                                 .disabled(model.orderRunning || (orderIDs[issue.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                                        } else if issue.kind == "material_mapping" || issue.kind == "hardware_mapping" {
+                                        } else if currentIssueRequiresInventoryMapping(issue) {
                                             Button("处理订单文件映射") { model.requestInventoryMapping(folderPath: issue.path, message: issue.message) }
                                                 .buttonStyle(.borderedProminent)
                                                 .disabled(model.orderRunning)
@@ -3735,52 +3841,62 @@ struct ServerChangesSheet: View {
                     LazyVStack(spacing: 0) {
                         ForEach(groups) { group in
                             let selected = model.selectedServerFolderPaths.contains(group.folderPath)
-                            Button {
-                                model.toggleServerFolderSelection(group.folderPath)
-                            } label: {
-                                HStack(alignment: .top, spacing: 12) {
-                                    Image(systemName: selected ? "checkmark.square.fill" : "square")
-                                        .foregroundColor(selected ? AppPalette.accent : .secondary)
-                                        .font(.system(size: 20, weight: .semibold))
-                                        .frame(width: 22, height: 22)
-                                    VStack(alignment: .leading, spacing: 5) {
-                                        HStack(spacing: 8) {
-                                            Text(group.manualOnly ? "临时订单文件夹" : (group.orderId.isEmpty ? "混单文件夹" : group.orderId))
-                                                .fontWeight(.semibold)
-                                            Text(group.folderName)
+                            HStack(alignment: .top, spacing: 12) {
+                                Button {
+                                    model.toggleServerFolderSelection(group.folderPath)
+                                } label: {
+                                    HStack(alignment: .top, spacing: 12) {
+                                        Image(systemName: selected ? "checkmark.square.fill" : "square")
+                                            .foregroundColor(selected ? AppPalette.accent : .secondary)
+                                            .font(.system(size: 20, weight: .semibold))
+                                            .frame(width: 22, height: 22)
+                                        VStack(alignment: .leading, spacing: 5) {
+                                            HStack(spacing: 8) {
+                                                Text(group.manualOnly ? "临时订单文件夹" : (group.orderId.isEmpty ? "混单文件夹" : group.orderId))
+                                                    .fontWeight(.semibold)
+                                                Text(group.folderName)
+                                                    .font(.caption)
+                                                    .foregroundColor(.secondary)
+                                            }
+                                            Text("包含 \(group.changes.count) 项变化：")
                                                 .font(.caption)
                                                 .foregroundColor(.secondary)
-                                        }
-                                        Text("包含 \(group.changes.count) 项变化：")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                        ForEach(group.changes) { change in
-                                            HStack(alignment: .top, spacing: 6) {
-                                                Image(systemName: changeIcon(change.changeType))
-                                                    .foregroundColor(changeColor(change.changeType))
-                                                    .frame(width: 16)
-                                                VStack(alignment: .leading, spacing: 2) {
-                                                    Text("\(serverChangeTypeName(change.changeType))：\(URL(fileURLWithPath: change.path).lastPathComponent)")
-                                                        .font(.caption)
-                                                    Text(change.path)
-                                                        .font(.caption2)
-                                                        .foregroundColor(.secondary)
-                                                        .lineLimit(1)
+                                            ForEach(group.changes) { change in
+                                                HStack(alignment: .top, spacing: 6) {
+                                                    Image(systemName: changeIcon(change.changeType))
+                                                        .foregroundColor(changeColor(change.changeType))
+                                                        .frame(width: 16)
+                                                    VStack(alignment: .leading, spacing: 2) {
+                                                        Text("\(serverChangeTypeName(change.changeType))：\(URL(fileURLWithPath: change.path).lastPathComponent)")
+                                                            .font(.caption)
+                                                        Text(change.path)
+                                                            .font(.caption2)
+                                                            .foregroundColor(.secondary)
+                                                            .lineLimit(1)
+                                                    }
                                                 }
                                             }
+                                            if group.manualOnly {
+                                                Text("自动处理时将校验文件格式，优先读取 material；缺少时从 Report 生成材料并尝试出库，失败会保留在待处理清单。")
+                                                    .font(.caption)
+                                                    .foregroundColor(.orange)
+                                            }
                                         }
-                                        if group.manualOnly {
-                                            Text("自动处理时将校验文件格式，优先读取 material；缺少时从 Report 生成材料并尝试出库，失败会保留在待处理清单。")
-                                                .font(.caption)
-                                                .foregroundColor(.orange)
-                                        }
+                                        Spacer(minLength: 0)
                                     }
-                                    Spacer(minLength: 0)
+                                    .contentShape(Rectangle())
                                 }
-                                .contentShape(Rectangle())
+                                .buttonStyle(.plain)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                if group.manualOnly {
+                                    Button("忽略此文件夹（观察一个月）") {
+                                        model.ignoreServerFolder(group.folderPath)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(model.orderRunning)
+                                }
                             }
                             .padding(12)
-                            .buttonStyle(.plain)
                             if group.id != groups.last?.id { Divider() }
                         }
                     }
@@ -3835,6 +3951,9 @@ struct ServerWriteConfirmationSheet: View {
             }
         }
     }
+    private var invalidOrderValidations: [ServerWriteOrderPreview] {
+        orders.filter { $0.validationStatus != "正常" }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -3870,6 +3989,35 @@ struct ServerWriteConfirmationSheet: View {
 
             hardwareMappingSection
 
+            if !invalidOrderValidations.isEmpty {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("订单校验未通过")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        AppStatusBadge(text: "禁止确认写入", kind: .danger)
+                    }
+                    Text("请修正 Server 报表后重新读取；本次预览不会把未通过校验的订单写入正式数据库。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    ForEach(invalidOrderValidations) { order in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("订单 \(order.orderID)：\(order.validationStatus.isEmpty ? "待校验" : order.validationStatus)")
+                                .font(.caption.weight(.semibold))
+                            if !order.validationMessage.isEmpty {
+                                Text(order.validationMessage)
+                                    .font(.caption)
+                                    .foregroundColor(AppPalette.danger)
+                            }
+                        }
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(AppPalette.danger.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+
             if orders.isEmpty {
                 ContentUnavailableView("没有可确认的订单材料", systemImage: "exclamationmark.triangle", description: Text("请稍后重新扫描，或检查 Server 材料文件。"))
             } else {
@@ -3900,9 +4048,11 @@ struct ServerWriteConfirmationSheet: View {
             }
 
             HStack {
-                Text(activeHardwareRequirements.isEmpty
-                    ? "确认后写入订单级板材/封边；五金按每个来料加工订单的选择写入或跳过，已出货工厂单不再处理。"
-                    : "请先完成全部五金 SKU 映射或忽略，再确认写入。")
+                Text(!invalidOrderValidations.isEmpty
+                    ? "存在未通过订单校验的预览，修正报表并重新读取后才能确认写入。"
+                    : activeHardwareRequirements.isEmpty
+                        ? "确认后写入订单级板材/封边；五金按每个来料加工订单的选择写入或跳过，已出货工厂单不再处理。"
+                        : "请先完成全部五金 SKU 映射或忽略，再确认写入。")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
@@ -3917,7 +4067,7 @@ struct ServerWriteConfirmationSheet: View {
                     )
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.orderRunning || model.inventoryRunning || orders.isEmpty || model.serverWriteConfirmationFinished || !activeHardwareRequirements.isEmpty)
+                .disabled(model.orderRunning || model.inventoryRunning || orders.isEmpty || model.serverWriteConfirmationFinished || !activeHardwareRequirements.isEmpty || !invalidOrderValidations.isEmpty)
             }
         }
         .padding(20)
@@ -4019,6 +4169,21 @@ struct ServerWriteConfirmationSheet: View {
                     .foregroundColor(.secondary)
             }
 
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("订单校验")
+                    .font(.subheadline.weight(.semibold))
+                AppStatusBadge(
+                    text: order.validationStatus.isEmpty ? "待校验" : order.validationStatus,
+                    kind: order.validationStatus == "正常" ? .success : .danger
+                )
+                Spacer()
+            }
+            if !order.validationMessage.isEmpty {
+                Text(order.validationMessage)
+                    .font(.caption)
+                    .foregroundColor(order.validationStatus == "正常" ? .secondary : AppPalette.danger)
+            }
+
             if order.orderType == "cutToSize" && !order.factories.isEmpty {
                 cutToSizeHardwareChoice(for: order)
             }
@@ -4028,7 +4193,7 @@ struct ServerWriteConfirmationSheet: View {
                     Text("订单材料变化")
                         .font(.subheadline.weight(.semibold))
                         .foregroundColor(.secondary)
-                    ForEach(order.materialChanges) { material in
+                    ForEach(sortedServerWriteMaterialChanges(order.materialChanges)) { material in
                         materialChangeRow(material)
                     }
                 }
@@ -4055,7 +4220,7 @@ struct ServerWriteConfirmationSheet: View {
                                     .foregroundColor(AppPalette.warning)
                             }
                             if !factory.hardware.isEmpty {
-                                VStack(alignment: .leading, spacing: 3) {
+                                VStack(alignment: .leading, spacing: 1) {
                                     Text("五金（按 \(factory.factoryOrder) 写入）")
                                         .font(.caption.weight(.semibold))
                                         .foregroundColor(.secondary)
@@ -4070,6 +4235,7 @@ struct ServerWriteConfirmationSheet: View {
                                             Text("× \(formatQuantity(hardware.quantity)) \(hardware.unit)")
                                                 .font(.caption.monospacedDigit())
                                         }
+                                        .padding(.vertical, 1)
                                     }
                                 }
                                 .padding(.leading, 10)
@@ -4086,6 +4252,7 @@ struct ServerWriteConfirmationSheet: View {
                     Text("五金变化（本次不写入）")
                         .font(.subheadline.weight(.semibold))
                         .foregroundColor(AppPalette.warning)
+                    hardwareChangeHeaderRow()
                     ForEach(order.hardwareChanges) { hardware in
                         hardwareChangeRow(hardware)
                     }
@@ -4210,12 +4377,38 @@ struct ServerWriteConfirmationSheet: View {
     private func hardwareChangeRow(_ hardware: ServerWriteHardwareChange) -> some View {
         HStack(spacing: 10) {
             Text(hardware.factoryOrder).font(.caption.weight(.semibold)).frame(width: 110, alignment: .leading)
+            Text(hardware.productCode.isEmpty ? "—" : hardware.productCode)
+                .font(.caption.monospaced())
+                .frame(width: 90, alignment: .leading)
+                .lineLimit(1)
             Text(hardware.name).frame(maxWidth: .infinity, alignment: .leading).lineLimit(1)
-            Text(hardware.changeType).font(.caption).foregroundColor(AppPalette.warning)
-            Text("\(formatQuantity(hardware.oldQuantity)) → \(formatQuantity(hardware.newQuantity)) \(hardware.unit)")
+            Text(serverHardwareUnitText(hardware.unit))
+                .font(.caption)
+                .foregroundColor(hardware.unit.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .secondary : .primary)
+                .frame(width: 55, alignment: .leading)
+                .lineLimit(1)
+            Text(hardware.changeType)
+                .font(.caption)
+                .foregroundColor(AppPalette.warning)
+                .frame(width: 55, alignment: .leading)
+            Text("\(formatQuantity(hardware.oldQuantity)) → \(formatQuantity(hardware.newQuantity))")
                 .font(.caption.monospacedDigit())
+                .frame(width: 100, alignment: .trailing)
         }
         .padding(.vertical, 5)
+    }
+
+    private func hardwareChangeHeaderRow() -> some View {
+        HStack(spacing: 10) {
+            Text("工厂单号").frame(width: 110, alignment: .leading)
+            Text("SKU").frame(width: 90, alignment: .leading)
+            Text("五金名称").frame(maxWidth: .infinity, alignment: .leading)
+            Text("单位").frame(width: 55, alignment: .leading)
+            Text("变化").frame(width: 55, alignment: .leading)
+            Text("数量").frame(width: 100, alignment: .trailing)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundColor(.secondary)
     }
 
     private func materialPreviewRow(_ material: ServerWriteMaterialPreview) -> some View {
@@ -4250,6 +4443,11 @@ struct ServerWriteConfirmationSheet: View {
         .background(AppPalette.surface)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
+}
+
+func serverHardwareUnitText(_ unit: String) -> String {
+    let value = unit.trimmingCharacters(in: .whitespacesAndNewlines)
+    return value.isEmpty ? "—" : value
 }
 
 private struct ServerWriteSelectionRow: Identifiable {

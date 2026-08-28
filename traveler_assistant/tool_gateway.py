@@ -1,3 +1,11 @@
+"""Typed command boundary between intent routing and business operations.
+
+The gateway is intentionally inside the application rather than an external
+MCP service.  It is the last common checkpoint before a command can generate
+a Traveler or write central facts, so it must not trust an Agent-provided
+approval decision or preview as authorization.
+"""
+
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -42,6 +50,13 @@ def _order_folder(config: Config, order_id: str) -> Path:
 
 
 def execute_local_command(config: Config, command: LocalCommand, approved: bool = False) -> dict:
+    """Validate and execute one typed command through the shared workflow.
+
+    Read-only actions execute immediately.  Write actions first return an
+    ``approval_required`` preview; only a later call with ``approved=True``
+    performs the write.  The manual-hardware path writes central SQLite facts
+    and deliberately does not require an existing Traveler.
+    """
     if command.action == "add_manual_hardware":
         arguments = command.arguments
         preview = preview_manual_hardware(
@@ -69,8 +84,8 @@ def execute_local_command(config: Config, command: LocalCommand, approved: bool 
         return {
             "status": "completed",
             **saved,
-            "updated": str(traveler),
-            "backup": str(backup),
+            "updated": str(traveler) if traveler != Path("") else "",
+            "backup": str(backup) if backup != Path("") else "",
         }
 
     if command.action in WRITE_ACTIONS and not approved:

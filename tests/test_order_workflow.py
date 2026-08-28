@@ -122,7 +122,7 @@ def make_fittings(path: Path, groups: list[tuple[str, float]]):
 def make_rail_fittings(
     path: Path,
     left_quantity: float,
-    right_quantity: float,
+    right_quantity: float | None,
     left_name: str = "Left Rail",
     right_name: str = "Right Rail",
 ):
@@ -134,7 +134,10 @@ def make_rail_fittings(
     header = 6
     for column, value in ((3, "Name"), (5, "Code"), (6, "Size"), (11, "Quantity")):
         ws.cell(header, column).value = value
-    for row, name, quantity in ((7, left_name, left_quantity), (8, right_name, right_quantity)):
+    rows = [(7, left_name, left_quantity)]
+    if right_quantity is not None:
+        rows.append((8, right_name, right_quantity))
+    for row, name, quantity in rows:
         ws.cell(row, 3).value = name
         ws.cell(row, 5).value = "H-Rail"
         ws.cell(row, 9).value = "Piece"
@@ -284,6 +287,158 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertIn("Edge banding--Test Oak", purchase_values)
             self.assertIn("Hinge", purchase_values)
             self.assertNotIn("TB18", purchase_values)
+
+    def test_database_order_traveler_keeps_fifth_and_later_hardware_visible(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(
+                state_dir=root / "state",
+                order_root=root / "generated",
+                template=root / "Work Order Traveler.xlsx",
+            )
+            make_template(config.template)
+            config.prepare_storage()
+
+            from traveler_assistant.order_index import OrderIndexStore
+
+            store = OrderIndexStore(config.workflow_database)
+            store.connection.execute(
+                "insert into orders(order_id, order_type, source_folder, updated_at) values(?,?,?,?)",
+                ("PP0070", "owned", "/server/PP0070", "2026-08-25T10:00:00"),
+            )
+            store.connection.execute(
+                "insert into factory_orders(factory_order, order_id, factory_name, ownership_status, optimized, updated_at) values(?,?,?,?,?,?)",
+                ("F0070", "PP0070", "PP0070-KITCHEN", "已确认", 1, "2026-08-25T10:00:00"),
+            )
+            store.connection.execute(
+                "insert into material_items(order_id, material_type, color, thickness, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?)",
+                ("PP0070", "plywood", "", "18", 1, "pcs", "aicnc", "2026-08-25T10:00:00"),
+            )
+            hardware = [
+                ("M1001", "Hinge"),
+                ("M1002", "H-Rail"),
+                ("M1003", "L-Rail"),
+                ("M1013", "Shelf Holder"),
+                ("M1014", "15寸垃圾桶(TB18用)"),
+                ("M1093", "BLS36"),
+            ]
+            store.connection.executemany(
+                """
+                insert into hardware_items(
+                    order_id, factory_order, scope, product_code, name, spec,
+                    quantity, unit, source_type, updated_at
+                ) values(?,?,?,?,?,?,?,?,?,?)
+                """,
+                [
+                    ("PP0070", "F0070", "factory_order", code, name, "", 1, "pcs/个", "aicnc", "2026-08-25T10:00:00")
+                    for code, name in hardware
+                ],
+            )
+            store.connection.commit()
+            store.close()
+
+            output = generate_database_order_traveler(config, "PP0070")
+            workbook = load_workbook(output, data_only=False)
+            picking = workbook["Picking List"]
+
+            self.assertEqual(
+                [picking.cell(row, 3).value for row in range(6, 12)],
+                [name for _, name in hardware],
+            )
+            self.assertEqual(
+                [picking.cell(row, 7).value for row in range(6, 12)],
+                [1, 1, 1, 1, 1, 1],
+            )
+            self.assertNotIn("A10:I10", {str(merged) for merged in picking.merged_cells.ranges})
+            self.assertIn("A12:I12", {str(merged) for merged in picking.merged_cells.ranges})
+
+            reopened = load_workbook(output, data_only=False)
+            reopened_picking = reopened["Picking List"]
+            self.assertEqual(reopened_picking["C10"].value, "15寸垃圾桶(TB18用)")
+            self.assertEqual(reopened_picking["G10"].value, 1)
+            self.assertEqual(reopened_picking["C11"].value, "BLS36")
+
+    def test_database_order_traveler_writes_manual_hardware_to_accessory_section(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(
+                state_dir=root / "state",
+                order_root=root / "generated",
+                template=root / "Work Order Traveler.xlsx",
+            )
+            make_template(config.template)
+            config.prepare_storage()
+
+            from traveler_assistant.order_index import OrderIndexStore
+
+            store = OrderIndexStore(config.workflow_database)
+            store.connection.execute(
+                "insert into orders(order_id, order_type, source_folder, updated_at) values(?,?,?,?)",
+                ("PP0070", "owned", "/server/PP0070", "2026-08-25T10:00:00"),
+            )
+            store.connection.execute(
+                "insert into factory_orders(factory_order, order_id, factory_name, ownership_status, optimized, updated_at) values(?,?,?,?,?,?)",
+                ("F0070", "PP0070", "PP0070-KITCHEN", "已确认", 1, "2026-08-25T10:00:00"),
+            )
+            store.connection.execute(
+                "insert into material_items(order_id, material_type, color, thickness, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?)",
+                ("PP0070", "plywood", "", "18", 1, "pcs", "aicnc", "2026-08-25T10:00:00"),
+            )
+            store.connection.executemany(
+                """
+                insert into hardware_items(
+                    order_id, factory_order, scope, product_code, name, spec,
+                    quantity, unit, source_type, remarks, updated_at
+                ) values(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                [
+                    ("PP0070", "F0070", "factory_order", "M1001", "Hinge", "", 32, "pcs/个", "aicnc", "", "2026-08-25T10:00:00"),
+                    ("PP0070", "F0070", "factory_order", "M1002", "H-Rail", "", 3, "set/套", "aicnc", "", "2026-08-25T10:00:00"),
+                    ("PP0070", "F0070", "factory_order", "M1003", "L-Rail", "", 7, "set/套", "aicnc", "", "2026-08-25T10:00:00"),
+                    ("PP0070", "F0070", "factory_order", "M1013", "Shelf Holder", "", 48, "pcs/个", "aicnc", "", "2026-08-25T10:00:00"),
+                    ("PP0070", "F0070", "factory_order", "M1014", "15寸垃圾桶(TB18用)", "", 1, "pcs/个", "manual", "TB18", "2026-08-25T10:00:00"),
+                    ("PP0070", "F0070", "factory_order", "M1093", "BLS36", "", 1, "pcs/个", "manual", "", "2026-08-25T10:00:00"),
+                ],
+            )
+            store.connection.commit()
+            store.close()
+
+            output = generate_database_order_traveler(config, "PP0070")
+            workbook = load_workbook(output, data_only=False)
+            picking = workbook["Picking List"]
+
+            self.assertEqual(
+                [picking.cell(row, 3).value for row in range(6, 10)],
+                ["Hinge", "H-Rail", "L-Rail", "Shelf Holder"],
+            )
+            manual_title_row = next(
+                row for row in range(1, picking.max_row + 1)
+                if picking.cell(row, 1).value == "Hardware Accessory五金功能件"
+            )
+            manual_header_row = manual_title_row + 1
+            manual_rows = [
+                row for row in range(manual_header_row + 1, picking.max_row + 1)
+                if isinstance(picking.cell(row, 1).value, (int, float))
+            ]
+            self.assertEqual(
+                [picking.cell(row, 3).value for row in manual_rows[:2]],
+                ["15寸垃圾桶(TB18用)", "BLS36"],
+            )
+            self.assertEqual([picking.cell(row, 2).value for row in manual_rows[:2]], ["M1014", "M1093"])
+            self.assertEqual([picking.cell(row, 7).value for row in manual_rows[:2]], [1, 1])
+            self.assertEqual(picking.cell(manual_rows[0], 9).value, "TB18")
+            fitting_values = [picking.cell(row, 3).value for row in range(6, manual_title_row)]
+            self.assertNotIn("15寸垃圾桶(TB18用)", fitting_values)
+            self.assertNotIn("BLS36", fitting_values)
+
+            purchase_values = [
+                cell.value
+                for row in workbook["Purchase List"].iter_rows()
+                for cell in row
+                if cell.value not in (None, "")
+            ]
+            self.assertIn("15寸垃圾桶(TB18用)", purchase_values)
+            self.assertIn("BLS36", purchase_values)
 
     def test_legacy_traveler_gets_usage_list_and_material_from_picking_list(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -718,6 +873,12 @@ class OrderWorkflowTests(unittest.TestCase):
                 parse_fittings_groups(path)
             self.assertEqual(raised.exception.code, "paired_rail_quantity_mismatch")
 
+            make_rail_fittings(path, 6, None)
+            with self.assertRaises(RuleError) as raised:
+                parse_fittings_groups(path)
+            self.assertEqual(raised.exception.code, "paired_rail_quantity_mismatch")
+            self.assertIn("Right Rail=缺失", str(raised.exception))
+
             make_rail_fittings(
                 path,
                 1,
@@ -729,6 +890,27 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(
                 [(item.name, item.quantity) for item in groups[0][1]],
                 [("Lower Left Rail", 1.0)],
+            )
+
+    def test_equal_rail_pair_preview_consumes_canonical_quantity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            order = root / "PP9999"
+            report = order / "Kitchen" / "Report"
+            report.mkdir(parents=True)
+            make_materials(order / "PP9999 materials.xlsx")
+            make_board(report / "板材清单.xlsx", "F100", "PP9999-KITCHEN")
+            make_rail_fittings(report / "Fittingslist.xlsx", 6, 6)
+
+            preview = preview_order(
+                Config(source_root=root, state_dir=root / "state"),
+                order,
+            )
+
+            fittings = preview.factories[0].fittings
+            self.assertEqual(
+                [(item.name, item.code, item.quantity) for item in fittings],
+                [("H-Rail", "H-RAIL", 6.0)],
             )
 
     def test_single_color_materials_and_integer_validation(self):
@@ -1329,7 +1511,7 @@ class OrderWorkflowTests(unittest.TestCase):
             finally:
                 connection.close()
 
-    def test_add_manual_hardware_previews_backs_up_and_aggregates_same_sku(self):
+    def test_add_manual_hardware_writes_database_and_aggregates_same_sku(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             order = root / "PP9999"
@@ -1338,21 +1520,35 @@ class OrderWorkflowTests(unittest.TestCase):
             make_materials(order / "PP9999 materials.xlsx")
             make_board(report / "板材清单.xlsx", "F100", "PP9999-KITCHEN")
             make_fittings(report / "Fittingslist.xlsx", [("F100", 4)])
-            template = root / "template.xlsx"
-            make_template(template)
             config = Config(
                 source_root=root,
                 order_root=root / "orders",
-                template=template,
                 backup_root=root / "backups",
                 state_dir=root / "state",
             )
+            config.prepare_storage()
             make_product_catalog(config.state_dir / "inventory" / "current-products.xlsx")
-            traveler = generate_order_traveler(config, preview_order(config, order))
+            preview_order(config, order)
+            from traveler_assistant.order_index import OrderIndexStore
+
+            index = OrderIndexStore(config.workflow_database)
+            try:
+                index.connection.execute(
+                    "insert or replace into factory_orders(factory_order, order_id, factory_name, aimes_status, updated_at) values(?,?,?,?,?)",
+                    ("F100", "PP9999", "PP9999-KITCHEN", "active", "2026-08-25T00:00:00"),
+                )
+                index.connection.commit()
+            finally:
+                index.close()
+            # A malformed/legacy Traveler must not affect this database operation.
+            traveler = config.order_root / "PP9999" / "Work Order Traveler(PP9999).xlsx"
+            traveler.parent.mkdir(parents=True)
+            traveler.write_text("legacy traveler placeholder", encoding="utf-8")
 
             preview = preview_manual_hardware(
                 config, "PP9999", "pp9999-kitchen", "m2000", 3, "现场增加"
             )
+            self.assertEqual(preview["factory_order"], "F100")
             self.assertEqual(preview["factory_name"], "PP9999-KITCHEN")
             self.assertEqual(preview["product_name"], "Manual Handle")
             self.assertEqual(preview["spec"], "Black")
@@ -1364,30 +1560,105 @@ class OrderWorkflowTests(unittest.TestCase):
             updated, first_backup, first = add_manual_hardware(
                 config, "PP9999", "PP9999-KITCHEN", "M2000", 3, "现场增加"
             )
-            self.assertEqual(updated, traveler)
-            self.assertTrue(first_backup.is_file())
+            self.assertEqual(updated, Path(""))
+            self.assertEqual(first_backup, Path(""))
             self.assertEqual(first["result"], "added")
+            connection = sqlite3.connect(config.workflow_database)
+            try:
+                connection.execute(
+                    """
+                    insert into hardware_items(
+                        order_id,factory_order,scope,product_code,source_code,name,spec,quantity,unit,
+                        source_type,source_path,remarks,updated_at
+                    ) values(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        "PP9999", "F100", "factory_order", "M2000", "M2000", "Manual Handle", "Black", 1,
+                        "pcs/个", "manual", "", "历史重复", "2026-08-25T00:00:00",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
             _, second_backup, second = add_manual_hardware(
-                config, "PP9999", "PP9999-KITCHEN", "M2000", 2, "补充两个"
+                config, "PP9999", "F100", "M2000", 2, "补充两个"
             )
-            self.assertTrue(second_backup.is_file())
-            self.assertNotEqual(first_backup, second_backup)
+            self.assertEqual(second_backup, Path(""))
             self.assertEqual(second["result"], "increased")
-            self.assertEqual(second["saved_quantity"], 5)
+            self.assertEqual(second["saved_quantity"], 6)
+            self.assertEqual(traveler.read_text(encoding="utf-8"), "legacy traveler placeholder")
 
-            workbook = load_workbook(traveler, data_only=False)
-            picking = workbook["Picking List"]
-            rows = [
-                row for row in range(1, picking.max_row + 1)
-                if picking.cell(row, 2).value == "M2000"
-            ]
-            self.assertEqual(len(rows), 1)
-            row = rows[0]
-            self.assertEqual(picking.cell(row, 3).value, "Manual Handle")
-            self.assertEqual(picking.cell(row, 5).value, "Black")
-            self.assertEqual(picking.cell(row, 7).value, 5)
-            self.assertEqual(picking.cell(row, 9).value, "现场增加；补充两个")
-            self.assertIn("Hinge", [picking.cell(item, 3).value for item in range(1, picking.max_row + 1)])
+            connection = sqlite3.connect(config.workflow_database)
+            try:
+                row = connection.execute(
+                    """
+                    select count(*), factory_order, quantity, remarks
+                    from hardware_items
+                    where order_id=? and source_type='manual' and product_code=?
+                    group by factory_order, quantity, remarks
+                    """,
+                    ("PP9999", "M2000"),
+                ).fetchone()
+                self.assertEqual(row,
+                    (1, "F100", 6.0, "现场增加；历史重复；补充两个"),
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "select factory_order from hardware_items where order_id=? and source_type='manual' and product_code=?",
+                        ("PP9999", "M2000"),
+                    ).fetchone()[0],
+                    "F100",
+                )
+            finally:
+                connection.close()
+
+    def test_manual_hardware_accepts_factory_number_without_traveler(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(
+                order_root=root / "orders",
+                template=root / "template.xlsx",
+                backup_root=root / "backups",
+                state_dir=root / "state",
+            )
+            config.prepare_storage()
+            make_product_catalog(config.state_dir / "inventory" / "current-products.xlsx")
+            from traveler_assistant.order_index import OrderIndexStore
+
+            index = OrderIndexStore(config.workflow_database)
+            connection = index.connection
+            try:
+                connection.execute(
+                    "insert into factory_orders(factory_order, order_id, factory_name, aimes_status, updated_at) values(?,?,?,?,?)",
+                    ("F100", "PP9999", "PP9999-KITCHEN", "active", "2026-08-25T00:00:00"),
+                )
+                connection.commit()
+            finally:
+                index.close()
+
+            preview = preview_manual_hardware(
+                config, "PP9999", "F100", "M2000", 2
+            )
+            self.assertEqual(preview["factory_order"], "F100")
+            self.assertEqual(preview["factory_name"], "PP9999-KITCHEN")
+
+            traveler, backup, saved = add_manual_hardware(
+                config, "PP9999", "PP9999-KITCHEN", "M2000", 2
+            )
+            self.assertEqual(traveler, Path(""))
+            self.assertEqual(backup, Path(""))
+            self.assertTrue(saved["stored_in_database"])
+            connection = sqlite3.connect(config.workflow_database)
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "select factory_order from hardware_items where order_id=? and source_type='manual' and product_code=?",
+                        ("PP9999", "M2000"),
+                    ).fetchone()[0],
+                    "F100",
+                )
+            finally:
+                connection.close()
 
 
 if __name__ == "__main__":

@@ -72,8 +72,11 @@ private struct MacOSUIRegressionTests {
         testOrderDetailMaterialRows()
         testOrderDashboardRules()
         testPendingInventorySourceFolderPath()
+        testPendingMaterialMappingIssueRoute()
         testOrderOutboundFactorySelection()
         testProductionFeedbackAndDashboardProgress()
+        testServerWriteMaterialPreviewOrdering()
+        testServerWriteHardwareChangeLayout()
         testSharedPageHeaderHeight()
         testInventoryActionLayoutRules()
         testProductionOrderPaths()
@@ -247,6 +250,10 @@ private struct MacOSUIRegressionTests {
             contentsOfFile: "macos/OrderDashboardView.swift",
             encoding: .utf8
         )
+        let assistantSource = try! String(
+            contentsOfFile: "macos/TravelerAssistant.swift",
+            encoding: .utf8
+        )
         require(
             dashboardSource.contains("Button(\"详情\")")
                 && dashboardSource.contains("Button(\"订单安排\")")
@@ -367,20 +374,39 @@ private struct MacOSUIRegressionTests {
             OrderInstallationDay(date: "2026-07-11", installer: "安装组 B"),
         ]
         require(
-            orderInstallationDateSummary(installationDays) == "7/8–7/11 · 2天",
+            orderInstallationDateSummary(installationDays) == "2026年7月8日–2026年7月11日 · 2天",
             "非连续安装日期的开始日、结束日或天数摘要错误"
         )
-        require(orderInstallationDisplayDate("2026-07-08") == "7/8", "安装日期显示格式错误")
+        require(
+            orderInstallationQuickSummaries(
+                planned: [OrderInstallationDay(date: "2026-07-08", installer: "安装组 A")],
+                actual: [OrderInstallationDay(date: "2026-07-09", installer: "安装组 B")]
+            ) == ["计划安装 2026年7月8日", "实际安装 2026年7月9日 · 1天"],
+            "订单行必须同时保留计划安装和实际安装摘要，不能用实际日期覆盖计划日期"
+        )
+        require(
+            orderInstallationPlannedDateSummary([
+                OrderInstallationDay(date: "2026-07-08", installer: "安装组 A"),
+                OrderInstallationDay(date: "2026-07-11", installer: "安装组 B"),
+            ]) == "2026年7月8日",
+            "计划安装摘要必须只显示开始日期"
+        )
+        require(orderInstallationDisplayDate("2026-07-08") == "2026年7月8日", "安装日期显示格式错误")
         require(
             dashboardSource.contains(".datePickerStyle(.graphical)")
                 && dashboardSource.contains("orderInstallationPickerDisplayDate")
-                && dashboardSource.contains("datePickerRowID"),
-            "安装日期必须通过按钮弹出日历式年月日选择器"
+                && dashboardSource.contains("datePickerRowID")
+                && dashboardSource.contains("allowsMultiple: false")
+                && dashboardSource.contains("orderInstallationDatePickerPopoverWidth")
+                && dashboardSource.contains("orderInstallationDatePickerPopoverHeight")
+                && dashboardSource.contains("yyyy年M月d日"),
+            "安装日期必须按计划单日期、实际多日期区分，并通过放大的日历式选择器选择"
         )
         require(
             dashboardSource.contains("orderInstallationInstallerSuggestions")
                 && dashboardSource.contains("Menu {")
-                && dashboardSource.contains("TextField(\"安装人/安装小组\""),
+                && dashboardSource.contains("TextField(\"安装人/安装小组\"")
+                && !dashboardSource.contains("Image(systemName: \"chevron.down\")"),
             "安装人输入框必须支持历史下拉选择和直接输入新名称"
         )
         require(
@@ -746,6 +772,48 @@ private struct MacOSUIRegressionTests {
         require(groupedServerRows.count == 2, "Server 待处理变化没有按文件夹分组")
         require(groupedServerRows.allSatisfy { $0.changes.count == 2 || $0.changes.count == 1 }, "Server 文件夹分组没有保留文件变化明细")
         require(groupedServerRows.contains { $0.requiresManualReview }, "缺少报表的混单文件夹没有标记为人工检查")
+        require(
+            dashboardSource.contains("忽略此文件夹（观察一个月）") &&
+                dashboardSource.contains("model.ignoreServerFolder(group.folderPath)"),
+            "普通临时 Server 文件夹没有忽略入口"
+        )
+        require(
+            assistantSource.contains("serverChangesExcludingFolder") &&
+                !assistantSource.contains("self.pendingServerChanges = serverChangePreviews(rows)\n            self.selectedServerFolderPaths.remove(folderPath)"),
+            "忽略 Server 文件夹后不应清空其他待处理项或依赖全量扫描结果"
+        )
+        let ignoredFolder = "/Volumes/server/Optimized Orders/temporary"
+        let retainedServerChanges = serverChangesExcludingFolder(
+            [
+                ServerChangePreview(
+                    id: "temporary",
+                    changeType: "added",
+                    kind: "folder",
+                    orderId: "",
+                    sourceFolder: ignoredFolder,
+                    path: ignoredFolder,
+                    message: "临时文件夹",
+                    manualOnly: true,
+                    eventTime: ""
+                ),
+                ServerChangePreview(
+                    id: "other",
+                    changeType: "added",
+                    kind: "folder",
+                    orderId: "",
+                    sourceFolder: "/Volumes/server/Optimized Orders/other",
+                    path: "/Volumes/server/Optimized Orders/other",
+                    message: "其他文件夹",
+                    manualOnly: true,
+                    eventTime: ""
+                ),
+            ],
+            folderPath: ignoredFolder
+        )
+        require(
+            retainedServerChanges.map(\.id) == ["other"],
+            "忽略一个 Server 文件夹时不应丢失其他待处理文件夹"
+        )
         let completedDisplay = dashboardCurrentOperation(messages: combinedDashboardMessages, isRunning: false)
         require(completedDisplay?.isRunning == false && completedDisplay?.message.state == "warning", "空闲时没有显示最近成功或失败结果")
         require(!dashboardMessageScrollKey(combinedDashboardMessages).isEmpty, "消息变化无法触发自动滚动")
@@ -838,6 +906,38 @@ private struct MacOSUIRegressionTests {
         require(
             inventoryMappingSourceFolderPath(temporaryReport) == "/Volumes/server/temporary-order",
             "临时订单报表路径没有保留临时订单文件夹"
+        )
+    }
+
+    private static func testPendingMaterialMappingIssueRoute() {
+        let materialMappingIssue = CurrentIssue(
+            id: "material_validation:PP0057:/server/PP0057 materials.xlsx",
+            kind: "material_validation",
+            orderId: "PP0057",
+            factoryOrder: "",
+            path: "/Volumes/server/Optimized Orders/pp0057/pp0057 materials.xlsx",
+            message: "material 文件 pp0057 materials.xlsx 校验未通过：订单 PP0057 存在未完成商品 SKU 处理：19.1mm--Muratti 4、Edge banding--Muratti 4；请先设置映射或加入全局忽略清单。",
+            firstSeen: "2026-08-25T08:32:35",
+            lastSeen: "2026-08-25T08:32:35"
+        )
+        require(
+            currentIssueRequiresInventoryMapping(materialMappingIssue),
+            "材料 SKU 校验失败应进入订单文件映射工作台"
+        )
+
+        let malformedWorkbookIssue = CurrentIssue(
+            id: "material_validation:PP0057:/server/PP0057 materials.xlsx",
+            kind: "material_validation",
+            orderId: "PP0057",
+            factoryOrder: "",
+            path: "/Volumes/server/Optimized Orders/pp0057/pp0057 materials.xlsx",
+            message: "material 文件无法读取：工作簿格式不正确。",
+            firstSeen: "2026-08-25T08:32:35",
+            lastSeen: "2026-08-25T08:32:35"
+        )
+        require(
+            !currentIssueRequiresInventoryMapping(malformedWorkbookIssue),
+            "普通 material 文件读取失败不应误显示 SKU 映射入口"
         )
     }
 
@@ -978,8 +1078,17 @@ private struct MacOSUIRegressionTests {
             assistant.contains("static func aggregated(_ changes: [ServerWriteMaterialChange])") &&
                 assistant.contains("Server 材料写入完成") &&
                 assistant.contains("duration: duration") &&
-                !assistant.contains("self.showServerWriteConfirmation = false\n            self.refreshDashboardAfterServerWrite()"),
-            "Server 确认写入没有汇总材料、保留成功提示或记录耗时"
+                !assistant.contains("self.showServerWriteConfirmation = false\n            self.refreshDashboardAfterServerWrite()") &&
+                assistant.contains("待处理中心将在下次手动扫描时更新") &&
+                !assistant.contains("订单列表已刷新；正在刷新待处理中心…\"\n            self.scanDashboardServer(background: true, presentIfNeeded: false)"),
+            "Server 确认写入没有汇总材料、保留成功提示、记录耗时或取消写入后的自动扫描"
+        )
+        require(
+            dashboard.contains("invalidOrderValidations") &&
+                dashboard.contains("订单校验未通过") &&
+                dashboard.contains("禁止确认写入") &&
+                dashboard.contains("!invalidOrderValidations.isEmpty"),
+            "Server 预览没有显示订单校验结果或阻止异常订单确认写入"
         )
     }
 
@@ -1115,6 +1224,29 @@ private struct MacOSUIRegressionTests {
     private static func testOrderOperationDurationFormatting() {
         require(operationDurationText(1.236) == "1.24 秒", "操作用时没有按最多两位小数显示")
         require(operationDurationText(2) == "2.00 秒", "整秒操作用时格式错误")
+    }
+
+    private static func testServerWriteMaterialPreviewOrdering() {
+        let changes = [
+            ServerWriteMaterialChange(id: "edge", changeType: "新增", materialType: "edge", color: "Rosales 3", thickness: "", edge: "", unit: "m", oldQuantity: 0, newQuantity: 185, delta: 185),
+            ServerWriteMaterialChange(id: "panel", changeType: "新增", materialType: "panel", color: "Rosales 3", thickness: "19.1", edge: "", unit: "pcs", oldQuantity: 0, newQuantity: 5, delta: 5),
+            ServerWriteMaterialChange(id: "plywood-5.4", changeType: "新增", materialType: "plywood", color: "", thickness: "5.4", edge: "", unit: "pcs", oldQuantity: 0, newQuantity: 3, delta: 3),
+            ServerWriteMaterialChange(id: "plywood-14.5", changeType: "新增", materialType: "plywood", color: "", thickness: "14.5", edge: "", unit: "pcs", oldQuantity: 0, newQuantity: 1, delta: 1),
+            ServerWriteMaterialChange(id: "plywood-18", changeType: "新增", materialType: "plywood", color: "", thickness: "18", edge: "", unit: "pcs", oldQuantity: 0, newQuantity: 9, delta: 9),
+        ]
+        let ordered = sortedServerWriteMaterialChanges(changes)
+        require(
+            ordered.map { "\($0.materialType)-\($0.thickness)" } == [
+                "plywood-18", "plywood-14.5", "plywood-5.4", "panel-19.1", "edge-"
+            ],
+            "Server 材料预览没有按 18mm、14.5mm、5.4mm、Panel、封边顺序显示"
+        )
+    }
+
+    private static func testServerWriteHardwareChangeLayout() {
+        require(serverHardwareUnitText("Piece") == "Piece", "五金单位已有值时不应被替换")
+        require(serverHardwareUnitText("  ") == "—", "五金单位缺失时应显示占位符")
+        require(serverHardwareUnitText("") == "—", "五金单位为空时应显示占位符")
     }
 
     private static func testProductionOrderPaths() {

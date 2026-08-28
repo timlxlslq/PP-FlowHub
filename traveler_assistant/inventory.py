@@ -1,3 +1,12 @@
+"""Traveler interpretation, product mapping, stock checks, and outbound flow.
+
+The module separates local requirement calculation from browser automation.
+Parsing and mapping can be tested offline; only the final confirmed outbound
+operation crosses into the inventory system.  Central SQLite stores product
+facts, mappings, operation state, and verified results needed to recover the
+workflow after a process or browser failure.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -851,6 +860,7 @@ def build_database_preview(
     shipment_only: bool = False,
 ) -> InventoryPreview:
     """Map persisted SQLite order facts without generating a Traveler file."""
+    _assert_single_server_material_source(config, order_id)
     normalized_order_id, documents, zero_items, _ = database_document_items(
         config, order_id, selected_factory_orders,
         production_batch_number=production_batch_number,
@@ -988,6 +998,46 @@ def build_database_preview(
         ),
         document_kinds=("hardware",) if shipment_only else (),
     )
+
+
+def _assert_single_server_material_source(config: Config, order_id: str) -> None:
+    """Stop inventory preparation when multiple base Server roots are present.
+
+    Recut reports are additive by design.  Two non-recut material workbooks
+    for one order, however, mean that a path migration or stale fixture was
+    not retired; summing them would create a duplicate material outbound.
+    """
+    normalized_order_id = str(order_id or "").strip().upper()
+    if not normalized_order_id:
+        return
+    connection = sqlite3.connect(config.workflow_database)
+    try:
+        paths = [
+            str(row[0] or "")
+            for row in connection.execute(
+                "select distinct source_path from material_items "
+                "where order_id=? and source_type='aihouse' and source_path <> '' "
+                "order by source_path",
+                (normalized_order_id,),
+            ).fetchall()
+        ]
+    finally:
+        connection.close()
+    base_paths = [
+        path for path in paths
+        if not any(
+            part.casefold() == "recut" or part.casefold().endswith("-recut")
+            for part in Path(path).parts[:-1]
+        )
+    ]
+    if len(base_paths) > 1:
+        raise RuleError(
+            "duplicate_material_source",
+            f"订单 {normalized_order_id} 存在多个 Server 材料来源，已停止出库以防重复扣库存："
+            + "；".join(base_paths),
+            order_id=normalized_order_id,
+            source_paths=base_paths,
+        )
 
 
 def build_factory_room_preview(
@@ -2332,6 +2382,13 @@ def build_preview(
     mapping_path: Path,
     selected_document_remarks: Iterable[str] | None = None,
 ) -> InventoryPreview:
+    """Build a read-only outbound preview and collect mapping conflicts.
+
+    A preview resolves Traveler items against the local catalog and mapping
+    rules.  It does not submit an outbound document.  Missing, ignored, or
+    duplicate mappings are returned as visible problems so the caller can
+    block confirmation instead of guessing a product.
+    """
     traveler = parse_traveler(path)
     mappings = InventoryMappings(mapping_path)
     requested_remarks = tuple(
@@ -2789,12 +2846,21 @@ class InventorySyncStore:
             plan = prepared.get(remark)
             if not plan:
                 continue
+            is_production_material_commit = (
+                production_draft is not None
+                and preview.source_type == "database"
+                and _normalize_name(remark) == _normalize_name(preview.traveler.order_id)
+            )
             key = self.key(preview.traveler.order_id, remark)
             self.data.setdefault("records", {})[key] = {
                 "traveler_path": str(preview.traveler.path),
                 "order_id": preview.traveler.order_id,
                 "remark": remark,
-                "kind": plan["kind"],
+                # Production material consumption is an order-level inventory
+                # document, not a factory-order shipment. Keep an explicit
+                # kind so later reconciliation cannot mistake stale factory
+                # links for real shipment evidence.
+                "kind": "production_materials" if is_production_material_commit else plan["kind"],
                 "raw_fingerprint": plan["rawFingerprint"],
                 "mapped_fingerprint": plan["mappedFingerprint"],
                 "document_number": str(result.get("documentNumber", "")),
@@ -2857,10 +2923,23 @@ class InventorySyncStore:
                             factory_order=excluded.factory_order, status=excluded.status,
                             source=excluded.source, issued_at=excluded.issued_at,
                             source_path=excluded.source_path, updated_at=excluded.updated_at""",
-                        (document_number, str(result.get("kind", "")), preview.traveler.order_id,
+                        (
+                            document_number,
+                            "production_materials" if is_production_material_commit else str(result.get("kind", "")),
+                            preview.traveler.order_id,
                          factory[0] if factory else remark, "已出库", "金蝶", str(result.get("syncedAt", "")),
-                         str(preview.traveler.path), datetime.now().isoformat(timespec="seconds")),
+                            str(preview.traveler.path), datetime.now().isoformat(timespec="seconds"),
+                        ),
                     )
+                    if is_production_material_commit:
+                        # A previous runtime or migration may have attached
+                        # this order-level document to factory orders. Make
+                        # the production boundary idempotent and remove such
+                        # stale links before reconciliation sees them.
+                        connection.execute(
+                            "delete from outbound_document_factories where document_number=?",
+                            (document_number,),
+                        )
                     for linked_factory_value in linked_factory_values:
                         ensure_outbound_document_factory_links(
                             connection,
@@ -4099,6 +4178,11 @@ def _check_requirements_stock(config: Config, requirements: list[dict]) -> list[
 
 
 def check_stock(config: Config, traveler_path: Path, include_hardware: bool = False) -> dict:
+    """Compare mapped requirements with stock without writing an outbound.
+
+    This is intentionally a read-only path and does not require the Agent.
+    The real inventory write is a later, separately approved operation.
+    """
     preview = build_preview(traveler_path, bootstrap_product_database(config), config.workflow_database)
     requirements = stock_requirements(preview, include_hardware)
     rows = _check_requirements_stock(config, requirements)
