@@ -17,6 +17,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
@@ -3267,6 +3268,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     config = _config_from_args(args)
     logger = configure_operation_log(config)
+    command_started = time.perf_counter()
     logger.event("backend.command.started", "开始订单工作流操作", details={"action": args.command})
     try:
         if args.command == "create-test-data":
@@ -3611,14 +3613,18 @@ def main(argv: list[str] | None = None) -> int:
                 updated, backup = update_order_traveler(config, preview)
                 result["updated"] = str(updated)
                 result["backup"] = str(backup)
-        logger.event("backend.command.completed", "订单工作流操作完成", details={"action": args.command})
+        logger.event(
+            "backend.command.completed",
+            "订单工作流操作完成",
+            details={"action": args.command, "duration_seconds": round(time.perf_counter() - command_started, 6)},
+        )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except RuleError as exc:
         logger.event(
             "backend.command.failed",
             "订单工作流操作失败",
-            details={"action": args.command, "code": exc.code, "error": str(exc)},
+            details={"action": args.command, "code": exc.code, "error": str(exc), "duration_seconds": round(time.perf_counter() - command_started, 6)},
         )
         print(json.dumps({"fatal": {"code": exc.code, "message": str(exc), **exc.context}}, ensure_ascii=False, indent=2))
         return 2
@@ -3626,7 +3632,12 @@ def main(argv: list[str] | None = None) -> int:
         logger.event(
             "backend.command.failed",
             "订单工作流操作发生未预期错误",
-            details={"action": args.command, "code": "unexpected_excel_error", "error": str(exc)},
+            details={
+                "action": args.command,
+                "code": "unexpected_excel_error",
+                "error": str(exc),
+                "duration_seconds": round(time.perf_counter() - command_started, 6),
+            },
         )
         print(json.dumps({
             "fatal": {

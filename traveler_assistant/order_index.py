@@ -4487,6 +4487,10 @@ def _server_scan_trace(stats: dict[str, int | float], roots: list[str] | None = 
         f"扫描范围：订单文件夹 {stats['order_folder_count']} 个，"
         f"相关 Excel 文件 {stats['related_excel_count']} 个{root_detail}。",
         f"变化统计：新增 {stats['added_count']} 个，修改 {stats['modified_count']} 个，删除 {stats['deleted_count']} 个，改名 {stats.get('renamed_count', 0)} 个。",
+        "阶段耗时："
+        f"读取并比对 Server 文件 {float(stats.get('metadata_scan_seconds', 0)):.2f} 秒；"
+        f"解析并校验变化材料文件 {float(stats.get('material_validation_seconds', 0)):.2f} 秒；"
+        f"写入扫描元数据和快照 {float(stats.get('finalize_seconds', 0)):.2f} 秒。",
     ]
 
 
@@ -4746,8 +4750,12 @@ def scan_server_changes(config: Config) -> dict:
             })
     order_folder_count = sum(item["kind"] == "folder" for item in current.values())
     related_excel_count = sum(item["kind"] != "folder" for item in current.values())
+    metadata_finished = time.perf_counter()
     scan_stats: dict[str, int | float] = {
-        "duration_seconds": round(time.perf_counter() - scan_started, 2),
+        # Keep this distinct from the full scan total below.  The Server scan
+        # also parses changed material workbooks for validation, so reporting
+        # only the metadata traversal as the total was misleading.
+        "metadata_scan_seconds": round(metadata_finished - scan_started, 6),
         "order_folder_count": order_folder_count,
         "related_excel_count": related_excel_count,
         # The current scanner checks known report metadata only after recursively
@@ -4791,6 +4799,7 @@ def scan_server_changes(config: Config) -> dict:
             material_folders.add(folder_path)
     store.commit()
     store.close()
+    validation_started = time.perf_counter()
     _validate_materials_during_server_scan(
         config,
         [Path(path) for path in sorted(material_folders) if Path(path).is_dir()],
@@ -4800,6 +4809,7 @@ def scan_server_changes(config: Config) -> dict:
     current_issues = store.active_issues()
     store.commit()
     store.close()
+    validation_finished = time.perf_counter()
     snapshot_path = ""
     try:
         snapshot_path = str(
@@ -4814,6 +4824,27 @@ def scan_server_changes(config: Config) -> dict:
     except OSError:
         # The next sync can safely fall back to its own read-only traversal.
         snapshot_path = ""
+    completed = time.perf_counter()
+    scan_stats["material_validation_seconds"] = round(validation_finished - validation_started, 6)
+    scan_stats["finalize_seconds"] = round(completed - validation_finished, 6)
+    scan_stats["duration_seconds"] = round(completed - scan_started, 6)
+    timing_stages = [
+        {
+            "stage": "server_metadata",
+            "label": "读取并比对 Server 文件",
+            "duration_seconds": scan_stats["metadata_scan_seconds"],
+        },
+        {
+            "stage": "material_validation",
+            "label": "解析并校验变化材料文件",
+            "duration_seconds": scan_stats["material_validation_seconds"],
+        },
+        {
+            "stage": "scan_finalize",
+            "label": "写入扫描元数据和快照",
+            "duration_seconds": scan_stats["finalize_seconds"],
+        },
+    ]
     return {
         "server": {
             "scanned_at": scanned_at,
@@ -4831,6 +4862,10 @@ def scan_server_changes(config: Config) -> dict:
                 scan_stats,
                 [str(item) for item in _available_server_roots(config)],
             ),
+        },
+        "operation_timing": {
+            "total_seconds": scan_stats["duration_seconds"],
+            "stages": timing_stages,
         }
     }
 
@@ -7184,6 +7219,20 @@ def preview_server_changes(
     """
     if not selected_folders:
         raise ValueError("请先选择要预览的 Server 文件夹")
+    timing_started = time.perf_counter()
+    stage_started = timing_started
+    timing_stages: list[dict[str, object]] = []
+
+    def finish_timing_stage(stage: str, label: str) -> None:
+        nonlocal stage_started
+        now = time.perf_counter()
+        timing_stages.append({
+            "stage": stage,
+            "label": label,
+            "duration_seconds": round(now - stage_started, 6),
+        })
+        stage_started = now
+
     normalized_folders = [folder.expanduser().resolve() for folder in selected_folders]
     _server_folders_for_sync(config, None, selected_folders=normalized_folders)
     memory = sqlite3.connect(":memory:")
@@ -7202,6 +7251,7 @@ def preview_server_changes(
         # the preview never tries to migrate the same file while it is locked.
         from .inventory import bootstrap_product_database
         bootstrap_product_database(stage_config)
+        finish_timing_stage("preview_database", "复制中央数据库到内存预览")
         # The preview intentionally never runs temporary-order outbound or
         # traveler generation. Those are separate user-approved operations.
         sync_order_index(
@@ -7214,6 +7264,7 @@ def preview_server_changes(
             refresh_outbound_statuses=False,
             reconcile_outbound=False,
         )
+        finish_timing_stage("server_parse", "读取、解析并校验 Server 文件")
         material_issues = preview_store.connection.execute(
             "select path, message from active_issues where kind = 'material_validation' and status = 'open' order by path"
         ).fetchall()
@@ -7262,7 +7313,14 @@ def preview_server_changes(
         }
         if not payload["orders"]:
             raise ValueError("Server 文件夹中没有解析出可确认的订单和工厂单")
-        return {"server_write_preview": payload}
+        finish_timing_stage("preview_build", "生成材料、五金和写入差异预览")
+        return {
+            "server_write_preview": payload,
+            "operation_timing": {
+                "total_seconds": round(time.perf_counter() - timing_started, 6),
+                "stages": timing_stages,
+            },
+        }
     finally:
         preview_store.close()
         memory.close()
@@ -7574,6 +7632,7 @@ def _confirm_memory_preview(
     """
     if not confirm_write:
         raise RuleError("write_confirmation_required", "写入 Server 事实需要用户明确确认")
+    timing_started = time.perf_counter()
     records = _memory_preview_records(payload)
     selected_factories = _memory_factory_selection(payload, order_id, factory_order)
     if factory_order and not selected_factories:
@@ -7634,6 +7693,7 @@ def _confirm_memory_preview(
     if not order_rows and not factory_rows and not material_rows:
         raise ValueError("本次预览没有可写入的订单、材料或工厂单")
 
+    validation_finished = time.perf_counter()
     production = OrderIndexStore(config.workflow_database)
     try:
         production.connection.execute("begin")
@@ -7729,6 +7789,8 @@ def _confirm_memory_preview(
     finally:
         production.close()
 
+    write_finished = time.perf_counter()
+
     return {
         "server_write_confirmed": True,
         "server_material_write_confirmed": bool(material_rows),
@@ -7738,6 +7800,21 @@ def _confirm_memory_preview(
         "hardware_count": len(hardware_rows),
         "hardware_skipped_orders": sorted(skipped_orders),
         "database": str(config.workflow_database),
+        "operation_timing": {
+            "total_seconds": round(write_finished - timing_started, 6),
+            "stages": [
+                {
+                    "stage": "validate_preview",
+                    "label": "校验内存预览与五金映射",
+                    "duration_seconds": round(validation_finished - timing_started, 6),
+                },
+                {
+                    "stage": "database_commit",
+                    "label": "写入本地数据库事务",
+                    "duration_seconds": round(write_finished - validation_finished, 6),
+                },
+            ],
+        },
     }
 
 

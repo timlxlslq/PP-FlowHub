@@ -19,20 +19,30 @@ const safePageURL = () => {
     return "";
   }
 };
-const log = message => process.stderr.write(`${JSON.stringify({
+const log = (message, details = {}) => process.stderr.write(`${JSON.stringify({
   event: "progress",
   message: `[+${elapsedSeconds(processStartedAt)}s] ${message}`,
+  elapsed_seconds: Number(elapsedSeconds(processStartedAt)),
   page_url: safePageURL(),
+  ...details,
 })}\n`);
 const timed = async (label, operation) => {
   const startedAt = performance.now();
-  log(`${label}：开始`);
+  log(`${label}：开始`, { stage: label, stage_state: "started" });
   try {
     const result = await operation();
-    log(`${label}：完成，耗时 ${elapsedSeconds(startedAt)} 秒`);
+    log(`${label}：完成，耗时 ${elapsedSeconds(startedAt)} 秒`, {
+      stage: label,
+      stage_state: "completed",
+      stage_duration_seconds: Number(elapsedSeconds(startedAt)),
+    });
     return result;
   } catch (error) {
-    log(`${label}：失败，耗时 ${elapsedSeconds(startedAt)} 秒`);
+    log(`${label}：失败，耗时 ${elapsedSeconds(startedAt)} 秒`, {
+      stage: label,
+      stage_state: "failed",
+      stage_duration_seconds: Number(elapsedSeconds(startedAt)),
+    });
     throw error;
   }
 };

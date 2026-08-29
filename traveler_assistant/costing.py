@@ -129,6 +129,66 @@ def _aggregate_material_rows(rows: list[sqlite3.Row]) -> list[dict]:
     )
 
 
+def _display_cost_lines(lines: list[dict]) -> list[dict]:
+    """Build the compact, business-ordered projection used by the App.
+
+    Raw lines retain their factory-order provenance for the Excel report.  The
+    App does not display factory order, so identical hardware rows are combined
+    there to avoid showing the same SKU more than once.
+    """
+    display_lines: list[dict] = []
+    grouped_hardware: dict[tuple, dict] = {}
+    for line in lines:
+        if line["category"] != "五金":
+            display_lines.append(dict(line))
+            continue
+        key = (
+            str(line["product_code"] or "").upper(),
+            str(line["name"] or ""),
+            str(line["spec"] or ""),
+            str(line["unit"] or ""),
+            line["cost_price"],
+            str(line["missing"] or ""),
+        )
+        item = grouped_hardware.get(key)
+        if item is None:
+            item = dict(line)
+            item["factory_order"] = "五金汇总"
+            grouped_hardware[key] = item
+            display_lines.append(item)
+            continue
+        item["quantity"] += line["quantity"]
+        if item["amount"] is not None and line["amount"] is not None:
+            item["amount"] += line["amount"]
+        else:
+            item["amount"] = None
+
+    material_sku_order = {"M0004": 0, "M0003": 1, "M0002": 2}
+
+    def sort_key(line: dict) -> tuple:
+        category = str(line["category"] or "")
+        product_code = str(line["product_code"] or "").upper()
+        if product_code in material_sku_order:
+            priority = material_sku_order[product_code]
+        elif category == "板材":
+            priority = 3
+        elif category == "封边条":
+            priority = 4
+        elif category == "五金":
+            priority = 5
+        else:
+            priority = 6
+        return (
+            priority,
+            product_code,
+            str(line["name"] or "").casefold(),
+            str(line["spec"] or "").casefold(),
+            str(line["unit"] or "").casefold(),
+        )
+
+    return sorted(display_lines, key=sort_key)
+
+
 def calculate_order_cost(config: Config, order_id: str) -> dict:
     normalized = order_id.strip().upper()
     if not normalized:
@@ -259,7 +319,7 @@ def calculate_order_cost(config: Config, order_id: str) -> dict:
         "known_cost": total,
         "missing_items": missing_items,
         "lines": lines,
-        "factory_lines": list(lines),
+        "factory_lines": _display_cost_lines(lines),
         "factory_totals": sorted(
             factory_totals.values(),
             key=lambda item: (item["factory_order"] != "材料汇总", item["factory_order"]),

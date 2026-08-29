@@ -91,6 +91,7 @@ private struct MacOSUIRegressionTests {
         testOperationLogMaintenance()
         testRunningProgressReusesOperationRow()
         testDashboardInventoryProgressText()
+        testDashboardSeparatesInventoryAndRefreshTiming()
         testInventoryProgressKeepsStageHistory()
         testOrderOperationDurationFormatting()
         print("macOS UI regression tests passed")
@@ -259,6 +260,16 @@ private struct MacOSUIRegressionTests {
                 && dashboardSource.contains("Button(\"订单安排\")")
                 && dashboardSource.contains(".sheet(item: $orderArrangementOrder)"),
             "订单行没有同时提供材料详情和独立订单安排入口"
+        )
+        require(
+            dashboardSource.contains("count: 3")
+                && dashboardSource.contains("LazyVGrid(columns: orderCostSourceColumns, spacing: 0)"),
+            "成本来源没有使用三个等宽列"
+        )
+        require(
+            dashboardSource.contains("Text(\"SKU\").frame(width: 68, alignment: .center)")
+                && dashboardSource.contains("Text(row.productCode.isEmpty ? \"—\" : row.productCode)"),
+            "成本明细没有将 SKU 从商品列拆分为独立列"
         )
         if let rowStart = dashboardSource.range(of: "private func orderRow"),
            let rowEnd = dashboardSource.range(of: "private func prepareSelectedOrder", range: rowStart.upperBound..<dashboardSource.endIndex) {
@@ -684,6 +695,8 @@ private struct MacOSUIRegressionTests {
         require(performanceServer?.operationDetails.contains("扫描范围：订单文件夹 3 个，相关 Excel 文件 8 个（目录：/Volumes/server/Optimized Orders）。") == true, "Server 扫描范围统计没有进入悬停详情")
         require(performanceServer?.operationDetails.contains("变化统计：新增 1 个，修改 2 个，删除 0 个。") == true, "Server 变化数量统计没有进入悬停详情")
         require(dashboardMessageDetailText(performanceServer!).contains("用时 20.20 秒"), "订单消息没有显示总操作用时")
+        require(dashboardMessageDetailText(performanceServer!).contains("扫描 Server："), "Server 阶段耗时没有进入消息列表")
+        require(dashboardMessageDetailText(performanceServer!).contains("更新 Server 订单索引："), "Server 每个阶段耗时没有进入消息列表")
         require(performanceServer?.operationDurations.map(\.label) == ["扫描 Server", "更新 Server 订单索引"], "Server 后台阶段没有完整保留")
         require(performanceServer?.operationDurations.map(\.duration) == [18.485, 1.720], "Server 后台阶段耗时没有完整保留")
         require(dashboardMessageVisibleRowCount == 3, "消息记录框必须一次显示 3 条记录")
@@ -1219,6 +1232,32 @@ private struct MacOSUIRegressionTests {
         require(updated[0].state == "success", "上一阶段完成后应保留为已完成")
         require(updated[1].state == "running", "最新库存阶段应保持执行中")
         require(updated[1].detail.contains("实际耗时"), "库存阶段应显示实际耗时")
+    }
+
+    private static func testDashboardSeparatesInventoryAndRefreshTiming() {
+        let messages = dashboardMessages(
+            syncStatus: "✅ 订单列表已刷新",
+            syncTime: "12:00:02",
+            inventoryStatus: "✅ PP0070 出货已完成",
+            inventoryTime: "12:00:01",
+            aimesStatus: "AIMES 尚未检查",
+            aimesTime: "12:00:00",
+            serverStatus: "Server 尚未扫描",
+            serverTime: "12:00:00",
+            activity: [],
+            durationsBySource: ["inventory": 69.23, "sync": 0.61]
+        )
+        let shipment = messages.first(where: { $0.source == "inventory" })
+        let refresh = messages.first(where: { $0.source == "sync" })
+        require(shipment?.duration == 69.23, "出货耗时被列表刷新覆盖")
+        require(refresh?.duration == 0.61, "订单列表刷新耗时错误")
+        let latest = dashboardCurrentOperation(messages: messages, isRunning: false)
+        require(latest?.message.source == "sync", "最近结果应显示最后完成的列表刷新")
+        require(
+            dashboardMessageSummaryText(latest!.message).contains("订单列表已刷新")
+                && dashboardMessageSummaryText(latest!.message).contains("0.61 秒"),
+            "列表刷新结果不应再冒充出货总耗时"
+        )
     }
 
     private static func testOrderOperationDurationFormatting() {

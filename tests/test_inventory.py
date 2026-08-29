@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import sqlite3
 import subprocess
@@ -60,6 +61,46 @@ from traveler_assistant.inventory import (
     update_catalog_online,
     update_manual_mapping,
 )
+
+
+class _FakeNodeInput:
+    """Minimal writable stdin used by run_jdy's streamed Node-process tests."""
+
+    def __init__(self):
+        self.value = ""
+        self.closed = False
+
+    def write(self, value):
+        self.value += value
+        return len(value)
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeNodeProcess:
+    """Popen-shaped result: stdout is final JSON and stderr is live progress."""
+
+    def __init__(self, result=None, timeout=None):
+        result = result or SimpleNamespace(returncode=0, stdout="", stderr="")
+        self.stdin = _FakeNodeInput()
+        self.stdout = io.StringIO(result.stdout)
+        self.stderr = io.StringIO(result.stderr)
+        self.returncode = result.returncode
+        self._timeout = timeout
+        self.wait_timeout = None
+        self.killed = False
+
+    def wait(self, timeout=None):
+        self.wait_timeout = timeout
+        if self._timeout is not None and timeout is not None:
+            raise self._timeout
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+
+
 from traveler_assistant.order_index import (
     OrderIndexStore,
     _load_outbound_records,
@@ -497,7 +538,7 @@ class InventoryTests(unittest.TestCase):
         self.assertIn("func startDirectOrderShipment", swift)
         self.assertIn('"--production-materials-json"', swift)
         self.assertIn('var arguments = ["outbound", "--order-id", normalizedOrderID, "--shipment-only", "--confirm-save"]', swift)
-        self.assertIn('beginDashboardOperation("sync", label: "库存系统出货")', swift)
+        self.assertIn('beginDashboardOperation("inventory", label: "库存系统出货")', swift)
         self.assertIn("inventoryInactivityTimeoutSeconds", swift)
         self.assertIn("DispatchSource.makeTimerSource", swift)
         self.assertIn("inventoryFailureNeedsVerification", swift)
@@ -1111,14 +1152,18 @@ class InventoryTests(unittest.TestCase):
                  patch("traveler_assistant.inventory._local_setting", return_value="18108100188"), \
                  patch("traveler_assistant.inventory._keychain_password", return_value="secret"), \
                  patch("traveler_assistant.inventory._resolve_jdy_runtime", return_value=(Path("/node"), Path("/modules"))), \
-                 patch("traveler_assistant.inventory.subprocess.run", return_value=browser_result) as run:
+                 patch(
+                     "traveler_assistant.inventory.subprocess.Popen",
+                     return_value=_FakeNodeProcess(browser_result),
+                 ) as popen:
                 result = run_jdy(config, "preflight")
 
-            request = json.loads(run.call_args.kwargs["input"])
+            process = popen.return_value
+            request = json.loads(process.stdin.value)
             self.assertTrue(result["ok"])
             self.assertEqual(request["cdpEndpoint"], "http://127.0.0.1:9333")
             self.assertFalse(request["keepBrowserOpen"])
-            self.assertEqual(run.call_args.kwargs["timeout"], 90)
+            self.assertEqual(process.wait_timeout, 90)
 
     def test_run_jdy_reuses_existing_inventory_page_without_reading_keychain(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1138,10 +1183,13 @@ class InventoryTests(unittest.TestCase):
                      side_effect=AssertionError("已登录页面不应读取钥匙串"),
                  ), \
                  patch("traveler_assistant.inventory._resolve_jdy_runtime", return_value=(Path("/node"), Path("/modules"))), \
-                 patch("traveler_assistant.inventory.subprocess.run", return_value=browser_result) as run:
+                 patch(
+                     "traveler_assistant.inventory.subprocess.Popen",
+                     return_value=_FakeNodeProcess(browser_result),
+                 ) as popen:
                 result = run_jdy(config, "preflight")
 
-            request = json.loads(run.call_args.kwargs["input"])
+            request = json.loads(popen.return_value.stdin.value)
             self.assertTrue(result["ok"])
             self.assertNotIn("password", request)
             self.assertEqual(request["cdpEndpoint"], "http://127.0.0.1:9222")
@@ -1316,7 +1364,10 @@ class InventoryTests(unittest.TestCase):
             with patch("traveler_assistant.inventory._local_setting", return_value="18108100188"), \
                  patch("traveler_assistant.inventory._keychain_password", return_value="secret"), \
                  patch("traveler_assistant.inventory._resolve_jdy_runtime", return_value=(Path("/node"), Path("/modules"))), \
-                 patch("traveler_assistant.inventory.subprocess.run", side_effect=timeout):
+                 patch(
+                     "traveler_assistant.inventory.subprocess.Popen",
+                     return_value=_FakeNodeProcess(timeout=timeout),
+                 ):
                 with self.assertRaises(RuleError) as raised:
                     run_jdy(config, "preflight")
 

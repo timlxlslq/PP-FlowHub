@@ -629,6 +629,8 @@ func dashboardStatusIsInProgress(_ text: String) -> Bool {
 func dashboardMessages(
     syncStatus: String,
     syncTime: String,
+    inventoryStatus: String = "库存操作尚未执行",
+    inventoryTime: String = "",
     aimesStatus: String,
     aimesTime: String,
     serverStatus: String,
@@ -644,6 +646,7 @@ func dashboardMessages(
     // message so its authoritative duration, stages, and warning details are
     // not discarded by the duplicate-detail filter below.
     let statuses = [
+        ("inventory", "库存操作", inventoryStatus, inventoryTime),
         ("aimes", "AIMES", aimesStatus, aimesTime),
         ("sync", "订单数据", syncStatus, syncTime),
         ("server", "Server", serverStatus, serverTime),
@@ -652,7 +655,9 @@ func dashboardMessages(
     var currentStatuses: [DashboardMessage] = []
     for (source, title, rawDetail, time) in statuses {
         let detail = dashboardMessageDetail(rawDetail).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !detail.isEmpty, seenDetails.insert(detail).inserted else { continue }
+        guard !detail.isEmpty,
+              !(source == "inventory" && detail == "库存操作尚未执行"),
+              seenDetails.insert(detail).inserted else { continue }
         currentStatuses.append(DashboardMessage(
             id: "status:\(source)",
             source: source,
@@ -736,7 +741,7 @@ func dashboardMessageDetailText(_ message: DashboardMessage) -> String {
     if let duration = message.duration {
         detail += "（总用时 \(operationDurationText(duration))）"
     }
-    if message.source == "aimes", !message.operationDurations.isEmpty {
+    if !message.operationDurations.isEmpty {
         let stages = message.operationDurations.map {
             "\($0.label)：\(operationDurationText($0.duration))"
         }.joined(separator: "；")
@@ -1394,6 +1399,8 @@ struct OrderDashboardView: View {
         let messages = dashboardMessages(
             syncStatus: model.dashboardSyncStatus,
             syncTime: model.dashboardSyncStatusTime,
+            inventoryStatus: model.dashboardInventoryOperationStatus,
+            inventoryTime: model.dashboardInventoryOperationStatusTime,
             aimesStatus: model.dashboardAimesStatus,
             aimesTime: model.dashboardAimesStatusTime,
             serverStatus: model.dashboardServerStatus,
@@ -1451,7 +1458,7 @@ struct OrderDashboardView: View {
                                             Text(dashboardMessageDetailText(message))
                                                 .font(.callout)
                                                 .foregroundColor(message.state == "failure" ? AppPalette.danger : .primary)
-                                                .lineLimit(message.source == "aimes" ? 2 : 1)
+                                                .lineLimit(message.operationDurations.isEmpty ? 1 : nil)
                                         }
                                         }
                                         .padding(.horizontal, 12)
@@ -3262,6 +3269,10 @@ struct PendingCenterSheet: View {
 
 struct OrderCostSheet: View {
     @ObservedObject var model: AppModel
+    private let orderCostSourceColumns = Array(
+        repeating: GridItem(.flexible(), spacing: 8, alignment: .center),
+        count: 3
+    )
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -3313,22 +3324,20 @@ struct OrderCostSheet: View {
 
                 GroupBox("成本来源") {
                     VStack(spacing: 0) {
-                        HStack {
-                            Text("材料类型").frame(maxWidth: .infinity, alignment: .center)
-                            Text("成本").frame(width: 110, alignment: .center)
-                            Text("状态").frame(width: 90, alignment: .center)
+                        LazyVGrid(columns: orderCostSourceColumns, spacing: 0) {
+                            Text("材料类型")
+                            Text("成本")
+                            Text("状态")
                         }
                         .font(.caption.weight(.semibold)).foregroundColor(.secondary)
                         .padding(.vertical, 7)
                         Divider()
                         ForEach(orderCostSourceTotals) { row in
-                            HStack {
-                                Text(row.factoryOrder).lineLimit(1).frame(maxWidth: .infinity, alignment: .center)
+                            LazyVGrid(columns: orderCostSourceColumns, spacing: 0) {
+                                Text(row.factoryOrder).lineLimit(1)
                                 Text(row.hasMissing ? "待补充" : row.total.formatted(.number.precision(.fractionLength(2))))
-                                    .frame(width: 110, alignment: .center)
                                 Text(row.hasMissing ? "待补充" : "已完成")
                                     .foregroundColor(row.hasMissing ? AppPalette.warning : AppPalette.success)
-                                    .frame(width: 90, alignment: .center)
                             }
                             .padding(.vertical, 7)
                             Divider()
@@ -3373,11 +3382,12 @@ struct OrderCostSheet: View {
     private var costLineHeader: some View {
         HStack(spacing: 8) {
             Text("类别").frame(width: 70, alignment: .center)
+            Text("SKU").frame(width: 68, alignment: .center)
             Text("商品").frame(maxWidth: .infinity, alignment: .center)
-            Text("数量").frame(width: 75, alignment: .center)
-            Text("单位").frame(width: 55, alignment: .center)
-            Text("单价").frame(width: 80, alignment: .center)
-            Text("金额").frame(width: 100, alignment: .center)
+            Text("数量").frame(width: 68, alignment: .center)
+            Text("单位").frame(width: 50, alignment: .center)
+            Text("单价").frame(width: 72, alignment: .center)
+            Text("金额").frame(width: 92, alignment: .center)
         }
         .font(.caption.weight(.semibold)).foregroundColor(.secondary)
         .multilineTextAlignment(.center)
@@ -3388,17 +3398,18 @@ struct OrderCostSheet: View {
         HStack(spacing: 8) {
             Text(row.category)
                 .frame(width: 70, alignment: .center)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(row.name).lineLimit(1)
-                if !row.productCode.isEmpty { Text(row.productCode).font(.caption2).foregroundColor(.secondary) }
-            }
+            Text(row.productCode.isEmpty ? "—" : row.productCode)
+                .foregroundColor(row.productCode.isEmpty ? .secondary : .primary)
+                .lineLimit(1)
+                .frame(width: 68, alignment: .center)
+            Text(row.name).lineLimit(1)
             .frame(maxWidth: .infinity, alignment: .leading)
             Text(row.quantity.formatted())
-                .frame(width: 75, alignment: .center)
+                .frame(width: 68, alignment: .center)
             Text(row.unit)
-                .frame(width: 55, alignment: .center)
+                .frame(width: 50, alignment: .center)
             Text(row.costPrice?.formatted(.number.precision(.fractionLength(2))) ?? "—")
-                .frame(width: 80, alignment: .center)
+                .frame(width: 72, alignment: .center)
             VStack(alignment: .center, spacing: 2) {
                 Text(row.amount?.formatted(.number.precision(.fractionLength(2))) ?? "待补充")
                     .foregroundColor(row.amount == nil ? AppPalette.warning : .primary)
@@ -3409,7 +3420,7 @@ struct OrderCostSheet: View {
                         .lineLimit(1)
                 }
             }
-                .frame(width: 100, alignment: .center)
+                .frame(width: 92, alignment: .center)
         }
         .font(.caption)
         .padding(.vertical, 7)

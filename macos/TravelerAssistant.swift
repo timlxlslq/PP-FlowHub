@@ -1407,6 +1407,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var dashboardOperationDurations: [String: TimeInterval] = [:]
     @Published private(set) var dashboardOperationStageDurations: [String: [DashboardOperationDuration]] = [:]
     private var dashboardOperationStartedAt: [String: DashboardOperationStart] = [:]
+    @Published var dashboardInventoryOperationStatus = "库存操作尚未执行" {
+        didSet { dashboardInventoryOperationStatusTime = dashboardClockTime() }
+    }
     @Published var dashboardSyncStatus = "订单数据尚未同步" {
         didSet { dashboardSyncStatusTime = dashboardClockTime() }
     }
@@ -1418,6 +1421,7 @@ final class AppModel: ObservableObject {
         didSet { dashboardServerStatusTime = dashboardClockTime() }
     }
     @Published private(set) var dashboardSyncStatusTime = dashboardClockTime()
+    @Published private(set) var dashboardInventoryOperationStatusTime = dashboardClockTime()
     @Published private(set) var dashboardAimesStatusTime = dashboardClockTime()
     @Published private(set) var dashboardServerStatusTime = dashboardClockTime()
     @Published var pendingServerChanges: [ServerChangePreview] = []
@@ -1772,6 +1776,24 @@ final class AppModel: ObservableObject {
         return operationID
     }
 
+    private func finishOperationLog(
+        _ operationID: String,
+        name: String,
+        startedAt: Date,
+        exitStatus: Int32
+    ) {
+        let succeeded = exitStatus == 0
+        OperationLogWriter.shared.record(
+            succeeded ? "operation.completed" : "operation.failed",
+            message: succeeded ? "\(name)完成" : "\(name)失败",
+            details: [
+                "exit_status": Int(exitStatus),
+                "duration_seconds": max(0, Date().timeIntervalSince(startedAt)),
+            ],
+            operationID: operationID
+        )
+    }
+
     func environmentForOperation(_ operationID: String) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         for (key, value) in OperationLogWriter.shared.environment(operationID: operationID) {
@@ -2027,6 +2049,49 @@ final class AppModel: ObservableObject {
         dashboardOperationDurations[source] = stages.reduce(0) { $0 + $1.duration }
     }
 
+    /// Preserve the elapsed time the user experienced while also showing the
+    /// backend's non-overlapping business phases.  Process launch, JSON
+    /// transfer, and UI application are deliberately retained as their own
+    /// residual phase instead of being silently lost from the total.
+    private func finishDashboardOperation(
+        _ source: String,
+        backendSeconds: Double,
+        stages: [[String: Any]]
+    ) {
+        guard let start = dashboardOperationStartedAt.removeValue(forKey: source) else { return }
+        let localSeconds = max(0, ProcessInfo.processInfo.systemUptime - start.startedAtUptime)
+        let backendSeconds = max(0, backendSeconds)
+        let total = max(localSeconds, backendSeconds)
+        var displayedStages = dashboardFlatOperationDurations(stages)
+        let covered = displayedStages.reduce(0) { $0 + $1.duration }
+        let backendRemainder = max(0, backendSeconds - covered)
+        if backendRemainder >= 0.005 {
+            displayedStages.append(DashboardOperationDuration(label: "后台准备与收尾", duration: backendRemainder))
+        }
+        let uiRemainder = max(0, total - max(backendSeconds, covered))
+        if uiRemainder >= 0.005 {
+            displayedStages.append(DashboardOperationDuration(label: "启动后台与界面收尾", duration: uiRemainder))
+        }
+        if displayedStages.isEmpty {
+            displayedStages = [DashboardOperationDuration(label: start.label, duration: total)]
+        }
+        dashboardOperationStageDurations[source] = displayedStages
+        dashboardOperationDurations[source] = total
+    }
+
+    private func finishDashboardOperation(_ source: String, using object: [String: Any]) {
+        guard let timing = object["operation_timing"] as? [String: Any],
+              let seconds = (timing["total_seconds"] as? NSNumber)?.doubleValue else {
+            finishDashboardOperation(source)
+            return
+        }
+        finishDashboardOperation(
+            source,
+            backendSeconds: seconds,
+            stages: timing["stages"] as? [[String: Any]] ?? []
+        )
+    }
+
     private func discardDashboardOperationTimer(_ source: String) {
         dashboardOperationStartedAt.removeValue(forKey: source)
     }
@@ -2085,7 +2150,7 @@ final class AppModel: ObservableObject {
         }) { object in
             self.finishDashboardOperation("sync")
             self.applyDashboardObject(object, includeChanges: false)
-            self.dashboardSyncStatus = "✅ 出库完成，订单列表已刷新"
+            self.dashboardSyncStatus = "✅ 订单列表已刷新"
         }
     }
 
@@ -2338,16 +2403,16 @@ final class AppModel: ObservableObject {
             self.dashboardServerStatus = "⚠️ \(businessFriendlyMessage(self.orderError, operation: "扫描 Server"))"
             self.dashboardSyncStatus = self.dashboardServerStatus
         }) { object in
-            self.finishDashboardOperation("server")
+            self.finishDashboardOperation("server", using: object)
             let server = object["server"] as? [String: Any] ?? [:]
             self.applyCurrentIssues(from: object)
             self.applyDashboardOperationTrace(object)
             let rows = server["changes"] as? [[String: Any]] ?? []
             self.pendingServerChanges = serverChangePreviews(rows)
             self.selectedServerFolderPaths.removeAll()
-            // A scan is metadata-only. Never call sync-index here: that would
-            // parse Server workbooks and write production order/factory facts
-            // before the user has confirmed an individual factory order.
+            // A scan never writes production order/factory facts.  It may read
+            // changed material workbooks for validation, but only preview plus
+            // explicit confirmation can write business facts.
             if self.pendingServerChanges.isEmpty {
                 self.closePendingCenterIfEmpty()
                 self.dashboardServerStatus = "✅ Server 扫描完成，没有待处理变化"
@@ -2412,7 +2477,7 @@ final class AppModel: ObservableObject {
             self.dashboardServerStatus = "⚠️ \(businessFriendlyMessage(self.orderError, operation: "预览 Server 变化"))"
             self.dashboardSyncStatus = self.dashboardServerStatus
         }) { object in
-            self.finishDashboardOperation("server")
+            self.finishDashboardOperation("server", using: object)
             self.presentServerWritePreview(object)
         }
     }
@@ -2453,7 +2518,7 @@ final class AppModel: ObservableObject {
                 self.dashboardSyncStatus = self.dashboardServerStatus
             }
         ) { object in
-            self.finishDashboardOperation("server")
+            self.finishDashboardOperation("server", using: object)
             let remainingOrders = self.serverWritePreview?.orders.compactMap { order -> ServerWriteOrderPreview? in
                 guard order.orderID == trimmedOrder else { return order }
                 let remainingFactories = order.factories.filter { $0.factoryOrder != trimmedFactory }
@@ -2526,7 +2591,7 @@ final class AppModel: ObservableObject {
                 self.dashboardSyncStatus = self.dashboardServerStatus
             }
         ) { object in
-            self.finishDashboardOperation("server")
+            self.finishDashboardOperation("server", using: object)
             let orders = (object["orders"] as? [String]) ?? []
             let orderText = orders.isEmpty ? "订单材料" : orders.joined(separator: "、")
             let skipped = (object["hardware_skipped_orders"] as? [String] ?? [])
@@ -3106,7 +3171,7 @@ final class AppModel: ObservableObject {
                 "material_count": materialObjects.count,
             ]
         )
-        beginDashboardOperation("sync", label: "库存系统扣减生产材料")
+        beginDashboardOperation("inventory", label: "库存系统扣减生产材料")
         let operationDetail = "订单 \(orderID) · 工厂单 \(factoryOrders.sorted().joined(separator: "、")) · 材料 \(materialObjects.count) 项"
         let operationStartedAt = Date()
         dashboardActivity.insert(
@@ -3130,7 +3195,7 @@ final class AppModel: ObservableObject {
             arguments += ["--factory-order", factoryOrder]
         }
         runInventory(arguments, onFailure: { reason in
-            self.finishDashboardOperation("sync")
+            self.finishDashboardOperation("inventory")
             let uncertain = inventoryFailureNeedsVerification(reason)
             let resultMessage = uncertain || reason.contains("本地生产完成记录")
                 ? reason
@@ -3145,6 +3210,7 @@ final class AppModel: ObservableObject {
                 ),
                 at: 0
             )
+            self.dashboardInventoryOperationStatus = "❌ \(reason)"
             self.dashboardSyncStatus = "❌ \(reason)"
             completion(ProductionOperationResult(
                 state: uncertain ? .uncertain : .failure,
@@ -3153,7 +3219,7 @@ final class AppModel: ObservableObject {
                 retryAllowed: !uncertain
             ))
         }) { object in
-            self.finishDashboardOperation("sync")
+            self.finishDashboardOperation("inventory")
             let documentNumbers = (object["results"] as? [[String: Any]] ?? [])
                 .compactMap { $0["documentNumber"] as? String }
                 .filter { !$0.isEmpty }
@@ -3170,6 +3236,7 @@ final class AppModel: ObservableObject {
                 ),
                 at: 0
             )
+            self.dashboardInventoryOperationStatus = "✅ \(orderID) 生产出库完成，材料已记录；工厂单仍待出货"
             self.dashboardSyncStatus = "✅ \(orderID) 生产完成，材料出库已记录；工厂单仍待出货"
             self.refreshDashboardOrdersAfterOutbound()
             completion(ProductionOperationResult(
@@ -3188,7 +3255,7 @@ final class AppModel: ObservableObject {
             "点击直接出货",
             details: ["order_id": normalizedOrderID, "factory_orders": factoryOrders]
         )
-        beginDashboardOperation("sync", label: "库存系统出货")
+        beginDashboardOperation("inventory", label: "库存系统出货")
         let operationDetail = "订单 \(normalizedOrderID) · 工厂单 \(factoryOrders.sorted().joined(separator: "、")) · 有五金则出库五金，无五金则只更新状态"
         let operationStartedAt = Date()
         dashboardActivity.insert(
@@ -3201,13 +3268,14 @@ final class AppModel: ObservableObject {
             ),
             at: 0
         )
-        dashboardSyncStatus = "正在库存系统执行出货：\(normalizedOrderID)…"
+        dashboardInventoryOperationStatus = "正在库存系统执行出货：\(normalizedOrderID)…"
+        dashboardSyncStatus = dashboardInventoryOperationStatus
         var arguments = ["outbound", "--order-id", normalizedOrderID, "--shipment-only", "--confirm-save"]
         for factoryOrder in factoryOrders.sorted() {
             arguments += ["--factory-order", factoryOrder]
         }
         runInventory(arguments, onFailure: { reason in
-            self.finishDashboardOperation("sync")
+            self.finishDashboardOperation("inventory")
             let partial = reason.contains("已完成单据已同步")
             self.dashboardActivity.insert(
                 InventoryStep(
@@ -3219,10 +3287,11 @@ final class AppModel: ObservableObject {
                 ),
                 at: 0
             )
+            self.dashboardInventoryOperationStatus = "❌ \(reason)"
             self.dashboardSyncStatus = "❌ \(reason)"
         }) { object in
             if object["status_only"] as? Bool == true {
-                self.finishDashboardOperation("sync")
+                self.finishDashboardOperation("inventory")
                 self.dashboardActivity.insert(
                     InventoryStep(
                         time: dashboardClockTime(),
@@ -3233,11 +3302,12 @@ final class AppModel: ObservableObject {
                     ),
                     at: 0
                 )
+                self.dashboardInventoryOperationStatus = "✅ \(normalizedOrderID) 出货状态已更新"
                 self.dashboardSyncStatus = "✅ \(normalizedOrderID) 出货状态已更新"
                 self.refreshDashboardOrdersAfterOutbound()
                 return
             }
-            self.finishDashboardOperation("sync")
+            self.finishDashboardOperation("inventory")
             let documentNumbers = (object["results"] as? [[String: Any]] ?? [])
                 .compactMap { $0["documentNumber"] as? String }
                 .filter { !$0.isEmpty }
@@ -3252,6 +3322,7 @@ final class AppModel: ObservableObject {
                 ),
                 at: 0
             )
+            self.dashboardInventoryOperationStatus = "✅ \(normalizedOrderID) 出货已完成"
             self.dashboardSyncStatus = "✅ \(normalizedOrderID) 出货已完成"
             self.refreshDashboardOrdersAfterOutbound()
         }
@@ -3801,6 +3872,7 @@ final class AppModel: ObservableObject {
             "库存后台操作",
             details: ["command": "inventory", "argument_count": arguments.count, "write_requested": arguments.contains("--confirm-save")]
         )
+        let operationStartedAt = Date()
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
             let output = Pipe()
@@ -3841,6 +3913,12 @@ final class AppModel: ObservableObject {
                 errors.fileHandleForReading.readabilityHandler = nil
                 let remainder = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
                 DispatchQueue.main.async {
+                    self.finishOperationLog(
+                        operationID,
+                        name: "库存后台操作",
+                        startedAt: operationStartedAt,
+                        exitStatus: process.terminationStatus
+                    )
                     self.inventoryRunning = false
                     if !remainder.isEmpty { self.consumeInventoryLogChunk(remainder + "\n") }
                     if !self.inventoryStderrBuffer.isEmpty {
@@ -3885,6 +3963,12 @@ final class AppModel: ObservableObject {
                 }
             } catch {
                 DispatchQueue.main.async {
+                    self.finishOperationLog(
+                        operationID,
+                        name: "库存后台操作",
+                        startedAt: operationStartedAt,
+                        exitStatus: -1
+                    )
                     self.inventoryRunning = false
                     let reason = businessFriendlyMessage(error.localizedDescription, operation: "启动库存操作")
                     self.inventoryStatus = "❌ \(reason)"
@@ -4051,6 +4135,7 @@ final class AppModel: ObservableObject {
             "订单后台操作",
             details: ["command": "order", "argument_count": arguments.count]
         )
+        let operationStartedAt = Date()
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
             let output = Pipe()
@@ -4079,6 +4164,12 @@ final class AppModel: ObservableObject {
                 errors.fileHandleForReading.readabilityHandler = nil
                 let remainder = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
                 DispatchQueue.main.async {
+                    self.finishOperationLog(
+                        operationID,
+                        name: "订单后台操作",
+                        startedAt: operationStartedAt,
+                        exitStatus: process.terminationStatus
+                    )
                     self.orderRunning = false
                     defer { self.startPendingDashboardOutboundRefreshIfNeeded() }
                     if !remainder.isEmpty { self.consumeOrderLogChunk(remainder + "\n") }
@@ -4116,6 +4207,12 @@ final class AppModel: ObservableObject {
                 }
             } catch {
                 DispatchQueue.main.async {
+                    self.finishOperationLog(
+                        operationID,
+                        name: "订单后台操作",
+                        startedAt: operationStartedAt,
+                        exitStatus: -1
+                    )
                     self.orderRunning = false
                     defer { self.startPendingDashboardOutboundRefreshIfNeeded() }
                     let reason = businessFriendlyMessage(error.localizedDescription, operation: "启动订单操作")

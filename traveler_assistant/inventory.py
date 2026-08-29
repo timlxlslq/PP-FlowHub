@@ -19,6 +19,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from urllib.parse import urlsplit
 from urllib.request import urlopen
@@ -3932,26 +3933,50 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
     for browser_request in browser_requests:
         browser_started = time.perf_counter()
         progress(f"库存系统：开始浏览器操作（第 {len(responses) + 1}/{len(requests)} 个单据）")
-        try:
-            result = subprocess.run(
-                [str(node), str(helper)],
-                input=json.dumps(browser_request, ensure_ascii=False),
-                text=True, capture_output=True, env=env, check=False,
-                # The browser's individual webpage waits are capped at 60s.
-                # Keep the process guard longer so startup plus one 60s page
-                # wait can finish and return its specific diagnostic.
-                timeout=INVENTORY_DOCUMENT_TIMEOUT_SECONDS,
-            )
-        except subprocess.TimeoutExpired as exc:
-            def timeout_text(value: object) -> str:
-                if isinstance(value, bytes):
-                    return value.decode(errors="replace")
-                return str(value or "")
+        stderr_lines: list[str] = []
+        process = subprocess.Popen(
+            [str(node), str(helper)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            bufsize=1,
+        )
 
+        def forward_browser_progress() -> None:
+            assert process.stderr is not None
+            for line in process.stderr:
+                stderr_lines.append(line)
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    event = None
+                if isinstance(event, dict) and event.get("event") == "progress":
+                    log_progress_payload(event)
+                # Forward immediately: SwiftUI reads this pipe while the
+                # browser is still working, instead of replaying every page
+                # transition after the Node helper exits.
+                sys.stderr.write(line)
+                sys.stderr.flush()
+
+        stderr_thread = threading.Thread(target=forward_browser_progress, daemon=True)
+        stderr_thread.start()
+        try:
+            assert process.stdin is not None
+            process.stdin.write(json.dumps(browser_request, ensure_ascii=False))
+            process.stdin.close()
+            # The Node helper writes only its final result to stdout.  stderr
+            # is drained on its own thread above so page progress remains live.
+            process.wait(timeout=INVENTORY_DOCUMENT_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            stderr_thread.join(timeout=1)
+            stdout_text = process.stdout.read() if process.stdout is not None else ""
+            stderr_text = "".join(stderr_lines)
             detail = _jdy_error_detail(
-                "\n".join(
-                    part for part in (timeout_text(exc.stderr), timeout_text(exc.stdout)) if part
-                )
+                "\n".join(part for part in (stderr_text, stdout_text) if part)
             )
             try:
                 partial_numbers = _persist_completed_outbound_results(
@@ -3979,24 +4004,18 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
             raise RuleError(
                 "jdy_timeout",
                 f"{document_label}浏览器操作超过 {INVENTORY_DOCUMENT_TIMEOUT_SECONDS} 秒未完成：{detail}",
-            ) from exc
+            )
+        stderr_thread.join(timeout=1)
+        stdout_text = process.stdout.read() if process.stdout is not None else ""
+        stderr_text = "".join(stderr_lines)
         progress(
             f"库存系统：浏览器操作进程结束（用时 {time.perf_counter() - browser_started:.2f} 秒）"
         )
-        if result.stderr:
-            for line in result.stderr.splitlines():
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(event, dict) and event.get("event") == "progress":
-                    log_progress_payload(event)
-            sys.stderr.write(result.stderr)
-        if result.returncode != 0:
+        if process.returncode != 0:
             partial_numbers = _persist_completed_outbound_results(
                 config, preview, confirm_save, responses
             )
-            detail = _jdy_error_detail(result.stderr)
+            detail = _jdy_error_detail(stderr_text)
             if partial_numbers:
                 detail = (
                     f"{detail}；已完成单据已同步：{'、'.join(partial_numbers)}；"
@@ -4017,7 +4036,7 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                 )
             raise RuleError("jdy_browser", detail)
         try:
-            parsed_result = json.loads(result.stdout)
+            parsed_result = json.loads(stdout_text)
             if not isinstance(parsed_result, dict):
                 raise ValueError("库存系统返回结果不是对象")
             responses.append(parsed_result)
@@ -4262,6 +4281,7 @@ def inventory_main(argv: list[str] | None = None) -> int:
         config.state_dir = args.state_dir
     config.prepare_storage()
     logger = configure_operation_log(config)
+    command_started = time.perf_counter()
     logger.event("backend.command.started", "开始库存系统操作", details={"action": args.action})
     try:
         if args.action == "list":
@@ -4379,14 +4399,18 @@ def inventory_main(argv: list[str] | None = None) -> int:
                 production_materials=production_materials,
                 shipment_only=args.shipment_only,
             )
-        logger.event("backend.command.completed", "库存系统操作完成", details={"action": args.action})
+        logger.event(
+            "backend.command.completed",
+            "库存系统操作完成",
+            details={"action": args.action, "duration_seconds": round(time.perf_counter() - command_started, 6)},
+        )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except RuleError as exc:
         logger.event(
             "backend.command.failed",
             "库存系统操作失败",
-            details={"action": args.action, "code": exc.code, "error": str(exc)},
+            details={"action": args.action, "code": exc.code, "error": str(exc), "duration_seconds": round(time.perf_counter() - command_started, 6)},
         )
         print(json.dumps({"fatal": {"code": exc.code, "message": str(exc), **exc.context}}, ensure_ascii=False, indent=2))
         return 2

@@ -714,6 +714,16 @@ class OrderIndexTests(unittest.TestCase):
             material_path.write_bytes(b"not an Excel workbook")
 
             first_scan = scan_server_changes(config)
+            scan_timing = first_scan["operation_timing"]
+            self.assertAlmostEqual(
+                scan_timing["total_seconds"],
+                sum(stage["duration_seconds"] for stage in scan_timing["stages"]),
+                places=3,
+            )
+            self.assertEqual(
+                [stage["stage"] for stage in scan_timing["stages"]],
+                ["server_metadata", "material_validation", "scan_finalize"],
+            )
             self.assertTrue(any(
                 issue["kind"] == "material_validation"
                 for issue in first_scan["current_issues"]
@@ -734,6 +744,17 @@ class OrderIndexTests(unittest.TestCase):
                     for issue in second_scan["current_issues"]
                 ))
                 preview = preview_server_changes(config, [folder])
+
+            preview_timing = preview["operation_timing"]
+            self.assertAlmostEqual(
+                preview_timing["total_seconds"],
+                sum(stage["duration_seconds"] for stage in preview_timing["stages"]),
+                places=3,
+            )
+            self.assertEqual(
+                [stage["stage"] for stage in preview_timing["stages"]],
+                ["preview_database", "server_parse", "preview_build"],
+            )
 
             self.assertEqual(
                 preview["server_write_preview"]["orders"][0]["order_id"],
