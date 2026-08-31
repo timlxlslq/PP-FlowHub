@@ -20,7 +20,7 @@ class RuntimeStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "workflow.sqlite3"
             connection = __import__("sqlite3").connect(path)
-            connection.execute("pragma user_version = 7")
+            connection.execute("pragma user_version = 8")
             connection.commit()
             connection.close()
             with self.assertRaises(RuntimeError):

@@ -9,6 +9,10 @@ import SwiftUI
 import AppKit
 import Security
 
+extension Notification.Name {
+    static let ppOpenOrderCenter = Notification.Name("com.pacificpride.ppflowhub.open-order-center")
+}
+
 private let inventoryInactivityTimeoutSeconds: TimeInterval = 150
 
 func businessFriendlyMessage(_ raw: String, operation: String) -> String {
@@ -235,6 +239,9 @@ struct OrderDashboardItem: Identifiable {
     let optimizationProgress: String
     let productionProgress: String
     let outboundProgress: String
+    let latestSplitTime: String
+    let optimizationCompletedAt: String
+    let completedAt: String
     let userNote: String
     let plannedInstallationDays: [OrderInstallationDay]
     let actualInstallationDays: [OrderInstallationDay]
@@ -1257,6 +1264,29 @@ func appDisplayTimestamp(_ value: String) -> String {
     value.replacingOccurrences(of: "T", with: " ")
 }
 
+func dashboardBusinessDate(_ value: String) -> Date? {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let iso = ISO8601DateFormatter()
+    iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = iso.date(from: trimmed) { return date }
+    iso.formatOptions = [.withInternetDateTime]
+    if let date = iso.date(from: trimmed) { return date }
+    for format in ["yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd"] {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = format
+        if let date = formatter.date(from: trimmed) { return date }
+    }
+    return nil
+}
+
+func dashboardTimestamp(_ value: String, isInSameMonthAs reference: Date, calendar: Calendar = .current) -> Bool {
+    guard let date = dashboardBusinessDate(value) else { return false }
+    return calendar.isDate(date, equalTo: reference, toGranularity: .month)
+}
+
 func updatingLatestRunningStep(_ steps: [InventoryStep], detail: String) -> [InventoryStep]? {
     guard let index = steps.lastIndex(where: { $0.state == "running" }) else { return nil }
     var updated = steps
@@ -1401,6 +1431,7 @@ final class AppModel: ObservableObject {
     private var pendingDashboardOutboundRefresh = false
     @Published var orderFolders: [OrderFolderItem] = []
     @Published var dashboardOrders: [OrderDashboardItem] = []
+    @Published var requestedOrderCenterOrderID = ""
     @Published var dashboardChanges: [String] = []
     @Published var dashboardActivity: [InventoryStep] = []
     @Published var dashboardOperationDetails: [String: [String]] = [:]
@@ -1660,9 +1691,10 @@ final class AppModel: ObservableObject {
         return formatter
     }()
 
-    func loadSettings() {
+    @discardableResult
+    func loadSettings() -> Bool {
         guard let data = try? Data(contentsOf: settingsURL),
-              let values = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+              let values = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
         if let value = values["initial_date"] as? String, let date = Self.dateFormatter.date(from: value) { initialDate = date }
         sourceRoot = values["server_source_root"] as? String
             ?? values["source_root"] as? String
@@ -1676,6 +1708,7 @@ final class AppModel: ObservableObject {
         jdyUsername = values["jdy_username"] as? String ?? jdyUsername
         aimesUsername = values["aimes_username"] as? String ?? aimesUsername
         operationLogEnabled = values["operation_log_enabled"] as? Bool ?? operationLogEnabled
+        return true
     }
 
     func saveSettings() {
@@ -1805,13 +1838,24 @@ final class AppModel: ObservableObject {
     func saveAllSettings() {
         logUserAction("点击保存全部配置")
         saveSettings()
+        guard settingsStatus.hasPrefix("✅") else { return }
+
+        var passwordResults: [String] = []
         if !jdyPassword.isEmpty {
             saveJdyPassword()
+            passwordResults.append(settingsStatus)
         }
         if !aimesPassword.isEmpty {
             saveAimesPassword()
-        } else if settingsStatus.hasPrefix("✅") {
-            settingsStatus = "✅ 常规设置已保存；未修改钥匙串密码。"
+            passwordResults.append(settingsStatus)
+        }
+
+        if passwordResults.isEmpty {
+            settingsStatus = "✅ 常规设置已保存；钥匙串密码未变更。"
+        } else if passwordResults.contains(where: { $0.hasPrefix("❌") }) {
+            settingsStatus = passwordResults.joined(separator: "  ")
+        } else {
+            settingsStatus = "✅ 常规设置和已填写的钥匙串密码均已保存。"
         }
     }
 
@@ -1872,6 +1916,7 @@ final class AppModel: ObservableObject {
         guard !account.isEmpty else { settingsStatus = "❌ 请先填写 AIMES 用户名。"; return }
         guard !aimesPassword.isEmpty else { settingsStatus = "❌ 请输入 AIMES 密码。"; return }
         saveSettings()
+        guard settingsStatus.hasPrefix("✅") else { return }
         let service = "com.pacificpride.ppflowhub.aimes"
         let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
         SecItemDelete(base as CFDictionary)
@@ -1945,6 +1990,9 @@ final class AppModel: ObservableObject {
                 optimizationProgress: row["optimization_progress"] as? String ?? "—",
                 productionProgress: row["production_progress"] as? String ?? "—",
                 outboundProgress: row["outbound_progress"] as? String ?? "—",
+                latestSplitTime: row["latest_split_time"] as? String ?? "",
+                optimizationCompletedAt: row["optimization_completed_at"] as? String ?? "",
+                completedAt: row["completed_at"] as? String ?? "",
                 userNote: row["user_note"] as? String ?? "",
                 plannedInstallationDays: installationDays("planned"),
                 actualInstallationDays: installationDays("actual"),
@@ -2407,16 +2455,21 @@ final class AppModel: ObservableObject {
             let server = object["server"] as? [String: Any] ?? [:]
             self.applyCurrentIssues(from: object)
             self.applyDashboardOperationTrace(object)
+            self.applyDashboardObject(object, includeChanges: false)
             let rows = server["changes"] as? [[String: Any]] ?? []
+            let scanStats = server["scan_stats"] as? [String: Any] ?? [:]
+            let optimizationRefreshCount = (scanStats["optimization_artifact_refresh_count"] as? NSNumber)?.intValue ?? 0
             self.pendingServerChanges = serverChangePreviews(rows)
             self.selectedServerFolderPaths.removeAll()
-            // A scan never writes production order/factory facts.  It may read
-            // changed material workbooks for validation, but only preview plus
-            // explicit confirmation can write business facts.
+            // Material and factory identity still require preview plus explicit
+            // confirmation. The scan only adds the approved AICNC optimization
+            // evidence whose XML embeds the exact AIMES factory order.
             if self.pendingServerChanges.isEmpty {
                 self.closePendingCenterIfEmpty()
                 self.dashboardServerStatus = "✅ Server 扫描完成，没有待处理变化"
-                self.dashboardSyncStatus = "✅ Server 扫描完成；未写入新的订单或工厂单事实"
+                self.dashboardSyncStatus = optimizationRefreshCount > 0
+                    ? "✅ Server 扫描完成；已刷新 \(optimizationRefreshCount) 个工厂单的优化证据"
+                    : "✅ Server 扫描完成；材料与工厂单身份未写入，优化证据已核对"
             } else {
                 self.dashboardServerStatus = "⚠️ Server 发现 \(self.pendingServerChanges.count) 项待逐单确认变化"
                 self.dashboardSyncStatus = "请在待处理中心预览并逐单确认写入"
@@ -4794,13 +4847,18 @@ enum AppLayout {
     static let sidebarIdealWidth: CGFloat = 250
     static let sidebarMaxWidth: CGFloat = 280
     static let contentMinWidth: CGFloat = 500
-    static let contentPadding: CGFloat = 14
-    static let sectionSpacing: CGFloat = 12
+    static let contentPadding: CGFloat = 20
+    static let pageHorizontalPadding: CGFloat = 28
+    static let pageVerticalPadding: CGFloat = 26
+    static let pageContentMaxWidth: CGFloat = 1460
+    static let sectionSpacing: CGFloat = 14
     static let controlHeight: CGFloat = 44
-    static let actionButtonWidth: CGFloat = 96
+    static let actionButtonWidth: CGFloat = 112
     static let inventoryActionMinWidth: CGFloat = 132
     static let actionSpacing: CGFloat = 10
-    static let cardCornerRadius: CGFloat = 10
+    static let cardCornerRadius: CGFloat = 22
+    static let cardPadding: CGFloat = 20
+    static let cardInnerSpacing: CGFloat = 14
     static let statusHeight: CGFloat = 44
     static let operationRowHeight: CGFloat = 56
     static let operationVisibleRows = 3
@@ -4810,6 +4868,11 @@ enum AppLayout {
     static let todoDeadlineColumnWidth: CGFloat = 270
     static let todoListMaxHeight: CGFloat = 340
     static let todoInputMinHeight: CGFloat = 92
+    static let todoDeadlineDatePickerWidth: CGFloat = 226
+    static let todoDeadlineDatePickerHeight: CGFloat = 30
+    static let todoDeadlineTimeCardWidth: CGFloat = 220
+    static let todoDeadlineTimePickerWidth: CGFloat = 136
+    static let todoDeadlineTimePickerTrailingInset: CGFloat = 4
     static let todoTableHeaderFontSize: CGFloat = 17
     static let todoTableBodyFontSize: CGFloat = 16
     static let materialNameFontSize: CGFloat = 18
@@ -4817,8 +4880,9 @@ enum AppLayout {
     // leading icon, navigation, and action controls never get clipped.
     static let windowMinWidth: CGFloat = 1180
     static let windowMinHeight: CGFloat = 760
-    static let windowIdealWidth: CGFloat = 1760
-    static let windowIdealHeight: CGFloat = 1360
+    // Match the current PP FlowHub workspace size shown in the approved UI.
+    static let windowIdealWidth: CGFloat = 1223
+    static let windowIdealHeight: CGFloat = 768
     static let inventoryOrderContextWidth: CGFloat = 735
 }
 
@@ -4936,7 +5000,9 @@ extension View {
     func appPageFrame() -> some View {
         frame(minHeight: AppLayout.windowMinHeight - AppLayout.topNavHeight, alignment: .top)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .background(AppPalette.background)
+            .groupBoxStyle(AppGlassGroupBoxStyle())
+            .buttonStyle(.glass)
+            .background(LiquidGlassPreviewBackdrop())
     }
 
     func appInputField(maxWidth: CGFloat? = nil) -> some View {
@@ -4959,11 +5025,25 @@ extension View {
     }
 }
 
+struct AppGlassGroupBoxStyle: GroupBoxStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: AppLayout.cardInnerSpacing) {
+            configuration.label
+                .font(.headline)
+                .foregroundStyle(.primary)
+            configuration.content
+        }
+        .padding(AppLayout.cardPadding)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous))
+    }
+}
+
 struct AppSurfaceCard<Content: View>: View {
     let padding: CGFloat
     @ViewBuilder let content: Content
 
-    init(padding: CGFloat = 16, @ViewBuilder content: () -> Content) {
+    init(padding: CGFloat = AppLayout.cardPadding, @ViewBuilder content: () -> Content) {
         self.padding = padding
         self.content = content()
     }
@@ -4971,12 +5051,45 @@ struct AppSurfaceCard<Content: View>: View {
     var body: some View {
         content
             .padding(padding)
-            .background(AppPalette.surface)
-            .clipShape(RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous)
-                    .stroke(AppPalette.separator, lineWidth: 1)
+            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous))
+    }
+}
+
+// Shared light workspace background used by the production pages and sheets.
+// The standalone Liquid Glass design preview has been removed; keeping this
+// background here avoids coupling production UI to a test-only screen.
+struct LiquidGlassPreviewBackdrop: View {
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.91, green: 0.95, blue: 1.0),
+                    Color(red: 0.98, green: 0.95, blue: 0.91),
+                    Color(red: 0.90, green: 0.97, blue: 0.95),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
             )
+
+            Circle()
+                .fill(Color.blue.opacity(0.28))
+                .frame(width: 430, height: 430)
+                .blur(radius: 75)
+                .offset(x: -380, y: -230)
+
+            Circle()
+                .fill(Color.orange.opacity(0.24))
+                .frame(width: 380, height: 380)
+                .blur(radius: 70)
+                .offset(x: 420, y: -120)
+
+            Circle()
+                .fill(Color.green.opacity(0.20))
+                .frame(width: 470, height: 470)
+                .blur(radius: 95)
+                .offset(x: 320, y: 330)
+        }
+        .ignoresSafeArea()
     }
 }
 
@@ -5207,8 +5320,10 @@ struct OrderWorkflowView: View {
                                     }
                                     .padding(9)
                                     .contentShape(Rectangle())
-                                    .background(model.selectedOrderPath == item.id ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .glassEffect(
+                                        model.selectedOrderPath == item.id ? .regular.tint(AppPalette.accent.opacity(0.14)) : .clear,
+                                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    )
                                 }
                                 .buttonStyle(.plain)
                                 .disabled(model.orderRunning)
@@ -5237,7 +5352,7 @@ struct OrderWorkflowView: View {
                             Button("查询材料库存") {
                                 model.checkSelectedOrderStock()
                             }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(.glass)
                             .appActionButton(minWidth: 128)
                             .disabled(model.orderRunning || !model.orderPreviewReady)
                         }
@@ -5560,9 +5675,7 @@ struct OrderWorkflowView: View {
         }
         .padding(11)
         .frame(maxWidth: .infinity, minHeight: 112, maxHeight: 112, alignment: .leading)
-        .background(color.opacity(0.07))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(color.opacity(0.16), lineWidth: 1))
+        .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     private func subsectionTitle(_ title: String, color: Color) -> some View {
@@ -5585,24 +5698,32 @@ struct OrderWorkflowView: View {
 struct SettingsCard<Content: View>: View {
     let title: String
     let symbol: String
+    let padding: CGFloat
     @ViewBuilder let content: Content
 
+    init(
+        title: String,
+        symbol: String,
+        padding: CGFloat = 14,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.symbol = symbol
+        self.padding = padding
+        self.content = content()
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Label(title, systemImage: symbol)
-                .font(.headline)
-                .foregroundColor(.primary)
-            Divider()
-            content
+        AppSurfaceCard(padding: padding) {
+            VStack(alignment: .leading, spacing: 8) {
+                Label(title, systemImage: symbol)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                Divider()
+                content
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(AppPalette.surface)
-        .clipShape(RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous)
-                .stroke(AppPalette.separator, lineWidth: 1)
-        )
     }
 }
 
@@ -5886,7 +6007,7 @@ struct InventoryMappingSheet: View {
                     .appInputField()
                     .onSubmit { model.searchInventoryProducts(query) }
                 Button("搜索") { model.searchInventoryProducts(query) }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .appActionButton(minWidth: 72)
                     .disabled(model.inventoryRunning)
             }
@@ -5986,12 +6107,12 @@ struct PendingInventoryMappingWorkspace: View {
                                 Button("处理映射") {
                                     mappingTarget = PendingInventoryMappingTarget(name: name)
                                 }
-                                .buttonStyle(.borderedProminent)
+                                .buttonStyle(.glassProminent)
                                 .disabled(model.inventoryRunning)
                                 Button("忽略") {
                                     ignoreTarget = PendingInventoryMappingTarget(name: name)
                                 }
-                                .buttonStyle(.bordered)
+                                .buttonStyle(.glass)
                                 .disabled(model.inventoryRunning)
                             }
                             .padding(12)
@@ -6010,7 +6131,7 @@ struct PendingInventoryMappingWorkspace: View {
             }
         }
         .padding(20)
-        .background(AppPalette.background)
+        .background(LiquidGlassPreviewBackdrop())
         .sheet(item: $mappingTarget) { target in
             InventoryMappingSheet(
                 model: model,
@@ -6085,13 +6206,13 @@ struct PendingInventoryIgnoreSheet: View {
                     }
                     dismiss()
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.glassProminent)
                 .disabled(model.inventoryRunning || reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(22)
         .frame(width: 560)
-        .background(AppPalette.background)
+        .background(LiquidGlassPreviewBackdrop())
     }
 }
 
@@ -6177,7 +6298,7 @@ struct InventoryView: View {
                     mappingTravelerName = row.travelerName
                     showInventoryMappingSheet = true
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.glass)
                 .controlSize(.small)
                 .disabled(model.inventoryRunning)
             }
@@ -6225,7 +6346,7 @@ struct InventoryView: View {
                     Button("关闭", systemImage: "xmark") {
                         onClose()
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.glass)
                     .appActionButton(minWidth: 84)
                     .disabled(model.inventoryRunning)
                     .help(model.inventoryRunning ? "库存操作进行中，暂不能关闭" : "关闭出库界面")
@@ -6233,8 +6354,8 @@ struct InventoryView: View {
             }
             .padding(.horizontal, AppLayout.contentPadding)
             .frame(height: 54)
-            .background(AppPalette.surface)
-            .overlay(Divider(), alignment: .bottom)
+            .glassEffect(.regular, in: Rectangle())
+            .overlay(Divider().opacity(0.45), alignment: .bottom)
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 12) {
                     OperationLogCard(
@@ -6281,7 +6402,7 @@ struct InventoryView: View {
                         }
                         InventoryActionGrid(minColumnWidth: 156) {
                             Button(confirmationTitle) { confirmRealSave = true }
-                                .buttonStyle(.borderedProminent)
+                                .buttonStyle(.glassProminent)
                                 .inventoryActionButton(minWidth: 156)
                                 .disabled(model.inventoryRunning || selectedTravelerCount != 1 ||
                                           (!hasMappedOutboundRows && !hasConfirmedNoOutboundRows) ||
@@ -6375,7 +6496,7 @@ struct InventoryView: View {
                         confirmRealSave = false
                         model.openAndFillSelectedInventory()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .tint(AppPalette.danger)
                     .appActionButton(minWidth: 156)
                     .disabled(!acknowledgedRealSave)
@@ -6384,7 +6505,7 @@ struct InventoryView: View {
             }
             .padding(24)
             .frame(width: 560)
-            .background(AppPalette.background)
+            .background(LiquidGlassPreviewBackdrop())
         }
     }
 
@@ -6515,6 +6636,17 @@ struct TodoView: View {
                         .font(.system(size: AppLayout.todoTableHeaderFontSize, weight: .semibold))
                         .frame(height: 42)
                         .background(Color(nsColor: .controlBackgroundColor))
+                        .clipShape(
+                            UnevenRoundedRectangle(
+                                cornerRadii: .init(
+                                    topLeading: AppLayout.cardCornerRadius,
+                                    bottomLeading: 0,
+                                    bottomTrailing: 0,
+                                    topTrailing: AppLayout.cardCornerRadius
+                                ),
+                                style: .continuous
+                            )
+                        )
                         Divider()
 
                         if sortedItems.isEmpty {
@@ -6544,7 +6676,7 @@ struct TodoView: View {
                     Button(selectedItem?.completedAt == nil ? "完成任务" : "恢复任务") {
                         if let selectedItem { model.toggleTodoCompletion(selectedItem) }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .appActionButton()
                     .disabled(selectedItem == nil)
 
@@ -6576,13 +6708,7 @@ struct TodoView: View {
                             Toggle("设置截止时间", isOn: $hasDeadline)
                                 .toggleStyle(.checkbox)
                                 .fixedSize()
-                            DatePicker(
-                                "截止时间",
-                                selection: $newDeadline,
-                                displayedComponents: [.date, .hourAndMinute]
-                            )
-                            .labelsHidden()
-                            .frame(width: 190, height: AppLayout.controlHeight)
+                            TodoDeadlinePickerControl(selection: $newDeadline)
                             .disabled(!hasDeadline)
                             .opacity(hasDeadline ? 1 : 0.45)
                         }
@@ -6606,7 +6732,7 @@ struct TodoView: View {
                                 Label("添加待办事项", systemImage: "plus")
                             }
                             .appActionButton(minWidth: 132)
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.glassProminent)
                             .disabled(newContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
                     }
@@ -6744,6 +6870,62 @@ struct TodoView: View {
     }
 }
 
+func todoDeadlinePickerDisplay(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "zh_CN")
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.dateFormat = "yyyy年M月d日 HH:mm"
+    return formatter.string(from: date)
+}
+
+struct TodoDeadlinePickerControl: View {
+    @Binding var selection: Date
+    @State private var isPresented = false
+
+    var body: some View {
+        Button {
+            isPresented.toggle()
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "calendar")
+                    .foregroundColor(AppPalette.accent)
+                Text(todoDeadlinePickerDisplay(selection))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .frame(
+                width: AppLayout.todoDeadlineDatePickerWidth,
+                height: AppLayout.todoDeadlineDatePickerHeight,
+                alignment: .leading
+            )
+        }
+        .buttonStyle(.glass)
+        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+            VStack(spacing: 10) {
+                AppGlassDatePickerCalendar(selection: $selection)
+                HStack(spacing: 8) {
+                    Label("时间", systemImage: "clock")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundColor(.secondary)
+                    Spacer(minLength: 0)
+                    DatePicker("", selection: $selection, displayedComponents: [.hourAndMinute])
+                        .labelsHidden()
+                        .controlSize(.large)
+                        .frame(width: AppLayout.todoDeadlineTimePickerWidth)
+                }
+                .padding(.leading, 8)
+                .padding(.trailing, AppLayout.todoDeadlineTimePickerTrailingInset)
+                .frame(width: AppLayout.todoDeadlineTimeCardWidth, height: 44)
+                .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .appGlassDatePickerPopoverSurface()
+        }
+        .accessibilityLabel("截止时间")
+        .accessibilityValue(todoDeadlinePickerDisplay(selection))
+    }
+}
+
 struct TodoEditorSheet: View {
     @ObservedObject var model: AppModel
     let item: TodoItem
@@ -6772,11 +6954,7 @@ struct TodoEditorSheet: View {
                 .appInputField()
             Toggle("设置截止时间", isOn: $hasDeadline)
                 .toggleStyle(.checkbox)
-            DatePicker(
-                "截止时间",
-                selection: $deadline,
-                displayedComponents: [.date, .hourAndMinute]
-            )
+            TodoDeadlinePickerControl(selection: $deadline)
             .disabled(!hasDeadline)
             .opacity(hasDeadline ? 1 : 0.45)
             HStack {
@@ -6787,7 +6965,7 @@ struct TodoEditorSheet: View {
                     model.updateTodo(item, content: content, deadline: hasDeadline ? deadline : nil)
                     if model.todoStatus.isEmpty { dismiss() }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.glassProminent)
                 .appActionButton()
                 .disabled(content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -6802,6 +6980,7 @@ struct SettingsView: View {
     @State private var showOperationLog = false
     @State private var showIgnoredHardwareList = false
     @State private var showManualMappingList = false
+    @State private var showInitialDatePicker = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -6816,235 +6995,39 @@ struct SettingsView: View {
                 )
             }
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: AppLayout.sectionSpacing) {
-                    HStack(alignment: .top, spacing: AppLayout.sectionSpacing) {
-                        VStack(alignment: .leading, spacing: AppLayout.sectionSpacing) {
-                            SettingsCard(title: "运行范围", symbol: "slider.horizontal.3") {
-                                VStack(alignment: .leading, spacing: 10) {
-                                    DatePicker("初始扫描日期", selection: $model.initialDate, displayedComponents: .date)
-                                        .appInputField(maxWidth: 300)
-                                    Text("程序只在你手工点击运行后执行。")
-                                        .font(.caption).foregroundColor(.secondary)
-                                }
-                            }
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    runAndFileSettingsCard
+                        .frame(maxWidth: .infinity)
+                    accountSettingsCard
+                        .frame(maxWidth: .infinity)
+                }
+                .frame(height: 238)
 
-                            SettingsCard(title: "文件位置", symbol: "folder") {
-                                VStack(alignment: .leading, spacing: 10) {
-                                    Text("服务器目录").font(.caption).foregroundColor(.secondary)
-                                    TextField("服务器订单目录", text: $model.sourceRoot)
-                                        .textFieldStyle(.roundedBorder).appInputField()
-                                    Text("订单目录").font(.caption).foregroundColor(.secondary)
-                                    TextField("Traveler 保存目录", text: $model.orderRoot)
-                                        .textFieldStyle(.roundedBorder).appInputField()
-                                    Text("Traveler 文件备份目录").font(.caption).foregroundColor(.secondary)
-                                    TextField("Traveler 备份目录", text: $model.backupRoot)
-                                        .textFieldStyle(.roundedBorder).appInputField()
-                                }
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                HStack(alignment: .top, spacing: 12) {
+                    inventorySettingsCard
+                        .frame(maxWidth: .infinity)
+                    maintenanceSettingsCard
+                        .frame(maxWidth: .infinity)
+                }
+                .frame(height: 212)
 
-                        SettingsCard(title: "系统账户", symbol: "lock.shield") {
-                            VStack(alignment: .leading, spacing: 10) {
-                                HStack(alignment: .top, spacing: 12) {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        Text("库存系统").font(.subheadline).fontWeight(.semibold)
-                                        TextField("用户名", text: $model.jdyUsername)
-                                            .textFieldStyle(.roundedBorder)
-                                            .appInputField()
-                                        SecureField("输入新密码", text: $model.jdyPassword)
-                                            .textFieldStyle(.roundedBorder)
-                                            .appInputField()
-                                        Button("更新库存系统钥匙串密码") { model.saveJdyPassword() }
-                                            .buttonStyle(.bordered)
-                                            .appActionButton(minWidth: 0)
-                                            .frame(maxWidth: .infinity)
-                                            .disabled(model.jdyPassword.isEmpty)
-                                        Button("打开库存专用 Chrome") { model.openInventoryChrome() }
-                                            .buttonStyle(.bordered)
-                                            .appActionButton(minWidth: 0)
-                                            .frame(maxWidth: .infinity)
-                                            .disabled(model.inventoryRunning)
-                                        if model.inventoryChromeStatus.hasPrefix("❌") {
-                                            Text(model.inventoryChromeStatus)
-                                                .font(.caption)
-                                                .foregroundColor(.secondary)
-                                                .fixedSize(horizontal: false, vertical: true)
-                                        }
-                                    }
-                                    .frame(maxWidth: .infinity, alignment: .topLeading)
-
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        Text("AIMES").font(.subheadline).fontWeight(.semibold)
-                                        TextField("用户名", text: $model.aimesUsername)
-                                            .textFieldStyle(.roundedBorder).appInputField()
-                                        SecureField("输入新密码", text: $model.aimesPassword)
-                                            .textFieldStyle(.roundedBorder).appInputField()
-                                        Button("保存 AIMES 密码") { model.saveAimesPassword() }
-                                            .buttonStyle(.bordered)
-                                            .appActionButton(minWidth: 0)
-                                            .frame(maxWidth: .infinity)
-                                            .disabled(model.aimesPassword.isEmpty)
-                                    }
-                                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                                }
-                                Button("管理 AIMES 待确认与忽略记录") {
-                                    model.showPendingCenterPrompt = true
-                                }
-                                .buttonStyle(.bordered).appActionButton(minWidth: 176)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-
-                        SettingsCard(title: "库存商品资料与全局忽略", symbol: "shippingbox") {
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text("从库存系统更新商品名称、SKU、规格、类别和单位等资料。")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                VStack(alignment: .leading, spacing: 8) {
-                                    SettingsStatusBanner(status: model.inventoryCatalogStatus)
-                                    HStack(spacing: 10) {
-                                        Spacer(minLength: 0)
-                                        if model.inventoryRunning {
-                                            ProgressView()
-                                                .controlSize(.small)
-                                        }
-                                        Button("更新商品资料") {
-                                            model.updateInventoryCatalog()
-                                        }
-                                        .buttonStyle(.bordered)
-                                        .appActionButton(minWidth: 112)
-                                        .disabled(model.inventoryRunning)
-                                    }
-                                }
-                                Divider()
-                                HStack(alignment: .center, spacing: 10) {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text("材料映射")
-                                            .font(.subheadline)
-                                            .fontWeight(.semibold)
-                                        Text("将订单材料名称对应到商品资料中的启用 SKU。")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                    Spacer(minLength: 0)
-                                    Text("\(model.inventoryManualMappings.count) 项")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    Button("查看") { showManualMappingList = true }
-                                        .buttonStyle(.bordered)
-                                        .appActionButton(minWidth: 72)
-                                }
-                                Divider()
-                                HStack(alignment: .center, spacing: 10) {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text("五金全局忽略列表")
-                                            .font(.subheadline)
-                                            .fontWeight(.semibold)
-                                        Text("列表中的名称或来源编码会对所有订单生效；命中后不写入有效数据库，也不参与出库。")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                    Spacer(minLength: 0)
-                                    Text("\(model.inventoryIgnoredMappings.count) 项")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    Button("查看") { showIgnoredHardwareList = true }
-                                        .buttonStyle(.bordered)
-                                        .appActionButton(minWidth: 72)
-                                }
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                    }
-
-                    SettingsCard(title: "数据库备份", symbol: "externaldrive.badge.timemachine") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("本机数据库备份目录")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Text(model.databaseBackupRoot)
-                                .font(.caption.monospaced())
-                                .textSelection(.enabled)
-                            Text("App 每天首次启动时，在本地订单缓存读取完成后自动备份；只保留最近三天每日备份，以及最近 30 天内每周一份。")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            HStack(spacing: 10) {
-                                if !model.backupStatus.isEmpty {
-                                    Text(model.backupStatus)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .lineLimit(2)
-                                }
-                                Spacer(minLength: 0)
-                                Button("立即备份") { model.performBackup() }
-                                    .buttonStyle(.bordered)
-                                    .appActionButton(minWidth: 96)
-                                    .disabled(model.orderRunning)
-                            }
-                        }
-                    }
-
-                    SettingsCard(title: "操作日志", symbol: "list.bullet.rectangle") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack(alignment: .center, spacing: 12) {
-                                Toggle(
-                                    "记录用户操作和后台执行步骤",
-                                    isOn: Binding(
-                                        get: { model.operationLogEnabled },
-                                        set: { model.setOperationLogEnabled($0) }
-                                    )
-                                )
-                                .toggleStyle(.checkbox)
-                                Spacer(minLength: 0)
-                                Button("查看") {
-                                    model.logUserAction("查看操作日志")
-                                    showOperationLog = true
-                                }
-                                .buttonStyle(.bordered)
-                                .appActionButton(minWidth: 72)
-                            }
-                            Text("用于发生错误时按时间顺序回溯。不会记录密码、用户名、备注、语音原文或网页输入内容。")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Text("文件：\(model.operationLogURL.path)")
-                                .font(.caption.monospaced())
-                                .foregroundColor(.secondary)
-                                .textSelection(.enabled)
-                            Divider()
-                            HStack(alignment: .center, spacing: 12) {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text("日志文件大小")
-                                        .font(.subheadline)
-                                        .fontWeight(.semibold)
-                                    Text(model.operationLogSizeText)
-                                        .font(.caption.monospacedDigit())
-                                        .foregroundColor(.secondary)
-                                }
-                                Spacer(minLength: 0)
-                                Button("清理至近三天") {
-                                    model.trimOperationLog()
-                                }
-                                .buttonStyle(.bordered)
-                                .appActionButton(minWidth: 112)
-                                .disabled(model.orderRunning || model.inventoryRunning || model.assistantRunning)
-                            }
-                        }
-                    }
-
+                AppSurfaceCard(padding: 10) {
                     HStack(spacing: 12) {
-                        SettingsStatusBanner(status: model.settingsStatus)
+                        compactStatus(model.settingsStatus)
                         Spacer(minLength: 0)
                         Button("保存全部配置") { model.saveAllSettings() }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.glassProminent)
                             .appActionButton(minWidth: 132)
+                            .help("保存日期、路径和用户名；密码框有内容时同时更新 macOS 钥匙串。库存规则由各自按钮单独保存。")
                     }
                 }
-                .padding(AppLayout.contentPadding)
-                .frame(maxWidth: 1220)
-                .frame(maxWidth: .infinity, alignment: .top)
+                .frame(height: 56)
             }
+            .padding(.horizontal, AppLayout.contentPadding)
+            .padding(.vertical, 16)
+            .frame(maxWidth: 1220, maxHeight: .infinity, alignment: .top)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
         .appPageFrame()
         .onAppear {
@@ -7060,6 +7043,257 @@ struct SettingsView: View {
         }
         .sheet(isPresented: $showManualMappingList) {
             InventoryManualMappingsSheet(model: model)
+        }
+    }
+
+    private var runAndFileSettingsCard: some View {
+        SettingsCard(title: "运行与文件", symbol: "folder.badge.gearshape") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    settingsRowLabel("初始扫描")
+                    Button {
+                        showInitialDatePicker.toggle()
+                    } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: "calendar")
+                                .foregroundColor(AppPalette.accent)
+                            Text(settingsDateDisplay(model.initialDate))
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 10)
+                        .frame(width: 168, height: 30, alignment: .leading)
+                    }
+                    .buttonStyle(.glass)
+                    .popover(isPresented: $showInitialDatePicker, arrowEdge: .bottom) {
+                        AppGlassDatePickerCalendar(selection: $model.initialDate)
+                            .appGlassDatePickerPopoverSurface()
+                    }
+                    .accessibilityLabel("初始扫描日期")
+                    .accessibilityValue(settingsDateDisplay(model.initialDate))
+                }
+                settingsFieldRow("服务器目录", placeholder: "服务器订单目录", text: $model.sourceRoot)
+                settingsFieldRow("Traveler", placeholder: "Traveler 保存目录", text: $model.orderRoot)
+                settingsFieldRow("文件备份", placeholder: "Traveler 备份目录", text: $model.backupRoot)
+            }
+        }
+    }
+
+    private var accountSettingsCard: some View {
+        SettingsCard(title: "系统账户", symbol: "lock.shield") {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("库存系统").font(.subheadline.weight(.semibold))
+                    SecureField("用户名", text: $model.jdyUsername)
+                        .textFieldStyle(.roundedBorder)
+                        .appInputField()
+                    SecureField("输入新密码", text: $model.jdyPassword)
+                        .textFieldStyle(.roundedBorder)
+                        .appInputField()
+                    HStack(spacing: 8) {
+                        Button("保存密码") { model.saveJdyPassword() }
+                            .appActionButton(minWidth: 0)
+                            .frame(maxWidth: .infinity)
+                            .disabled(model.jdyPassword.isEmpty)
+                        Button("打开 Chrome") { model.openInventoryChrome() }
+                            .appActionButton(minWidth: 0)
+                            .frame(maxWidth: .infinity)
+                            .disabled(model.inventoryRunning)
+                    }
+                    if model.inventoryChromeStatus.hasPrefix("❌") {
+                        Text(model.inventoryChromeStatus)
+                            .font(.caption)
+                            .foregroundColor(AppPalette.danger)
+                            .lineLimit(1)
+                            .help(model.inventoryChromeStatus)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("AIMES").font(.subheadline.weight(.semibold))
+                    SecureField("用户名", text: $model.aimesUsername)
+                        .textFieldStyle(.roundedBorder)
+                        .appInputField()
+                    SecureField("输入新密码", text: $model.aimesPassword)
+                        .textFieldStyle(.roundedBorder)
+                        .appInputField()
+                    HStack(spacing: 8) {
+                        Button("保存密码") { model.saveAimesPassword() }
+                            .appActionButton(minWidth: 0)
+                            .frame(maxWidth: .infinity)
+                            .disabled(model.aimesPassword.isEmpty)
+                        Button("待确认记录") { model.showPendingCenterPrompt = true }
+                            .appActionButton(minWidth: 0)
+                            .frame(maxWidth: .infinity)
+                            .help("管理 AIMES 待确认与忽略记录")
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+        }
+    }
+
+    private var inventorySettingsCard: some View {
+        SettingsCard(title: "库存资料与规则", symbol: "shippingbox") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("商品资料").font(.subheadline.weight(.semibold))
+                        compactStatus(model.inventoryCatalogStatus)
+                    }
+                    Spacer(minLength: 0)
+                    if model.inventoryRunning { ProgressView().controlSize(.small) }
+                    Button("更新商品资料") { model.updateInventoryCatalog() }
+                        .appActionButton(minWidth: 112)
+                        .disabled(model.inventoryRunning)
+                }
+                .frame(minHeight: AppLayout.controlHeight)
+
+                Divider()
+                settingsManagementRow(
+                    "材料映射",
+                    count: model.inventoryManualMappings.count,
+                    help: "将订单材料名称对应到商品资料中的启用 SKU。"
+                ) { showManualMappingList = true }
+                Divider()
+                settingsManagementRow(
+                    "五金全局忽略",
+                    count: model.inventoryIgnoredMappings.count,
+                    help: "命中后不写入有效数据库，也不参与出库。"
+                ) { showIgnoredHardwareList = true }
+            }
+        }
+    }
+
+    private var maintenanceSettingsCard: some View {
+        SettingsCard(title: "备份与日志", symbol: "externaldrive.badge.timemachine") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("数据库备份").font(.subheadline.weight(.semibold))
+                        Text(model.databaseBackupRoot)
+                            .font(.caption.monospaced())
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(model.databaseBackupRoot)
+                        if !model.backupStatus.isEmpty {
+                            Text(model.backupStatus)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    Button("立即备份") { model.performBackup() }
+                        .appActionButton(minWidth: 96)
+                        .disabled(model.orderRunning)
+                        .help("保留最近三天每日备份及最近 30 天内每周一份")
+                }
+                .frame(minHeight: 68)
+
+                Divider()
+
+                HStack(spacing: 10) {
+                    Toggle(
+                        "记录操作日志",
+                        isOn: Binding(
+                            get: { model.operationLogEnabled },
+                            set: { model.setOperationLogEnabled($0) }
+                        )
+                    )
+                    .toggleStyle(.checkbox)
+                    .help("记录后台步骤，不记录密码、用户名、备注、语音原文或网页输入内容")
+                    Spacer(minLength: 0)
+                    Text(model.operationLogSizeText)
+                        .font(.caption.monospacedDigit())
+                        .foregroundColor(.secondary)
+                    Button("查看") {
+                        model.logUserAction("查看操作日志")
+                        showOperationLog = true
+                    }
+                    .appActionButton(minWidth: 72)
+                    Button("清理") { model.trimOperationLog() }
+                        .appActionButton(minWidth: 72)
+                        .disabled(model.orderRunning || model.inventoryRunning || model.assistantRunning)
+                        .help("只保留最近三天操作日志")
+                }
+                .frame(minHeight: AppLayout.controlHeight)
+
+                Text(model.operationLogURL.path)
+                    .font(.caption.monospaced())
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(model.operationLogURL.path)
+            }
+        }
+    }
+
+    private func settingsRowLabel(_ title: String) -> some View {
+        Text(title)
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .frame(width: 88, alignment: .leading)
+    }
+
+    private func settingsDateDisplay(_ value: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy年M月d日"
+        return formatter.string(from: value)
+    }
+
+    private func settingsFieldRow(
+        _ title: String,
+        placeholder: String,
+        text: Binding<String>
+    ) -> some View {
+        HStack(spacing: 10) {
+            settingsRowLabel(title)
+            TextField(placeholder, text: text)
+                .textFieldStyle(.roundedBorder)
+                .appInputField()
+        }
+    }
+
+    private func settingsManagementRow(
+        _ title: String,
+        count: Int,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+            Spacer(minLength: 0)
+            Text("\(count) 项")
+                .font(.caption.monospacedDigit())
+                .foregroundColor(.secondary)
+            Button("查看", action: action)
+                .appActionButton(minWidth: 72)
+        }
+        .frame(minHeight: AppLayout.controlHeight)
+        .help(help)
+    }
+
+    @ViewBuilder
+    private func compactStatus(_ status: String) -> some View {
+        let text = settingsStatusDisplayText(status)
+        if !text.isEmpty {
+            let kind = settingsStatusKind(status)
+            HStack(spacing: 5) {
+                Image(systemName: kind.symbol)
+                Text(text).lineLimit(1)
+            }
+            .font(.caption)
+            .foregroundColor(kind.color)
+            .help(text)
         }
     }
 
@@ -7103,7 +7337,7 @@ struct InventoryIgnoredMappingsSheet: View {
                     }
                     clearEditor()
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.glass)
                 .appActionButton(minWidth: 76)
                 .disabled(model.inventoryRunning || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 if !editingName.isEmpty {
@@ -7198,7 +7432,7 @@ struct InventoryManualMappingsSheet: View {
                     }
                     clearEditor()
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.glass)
                 .appActionButton(minWidth: 76)
                 .disabled(model.inventoryRunning || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
                           productCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -7267,7 +7501,7 @@ struct OperationLogViewerView: View {
                 }
                 Spacer()
                 Button("关闭") { dismiss() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .appActionButton(minWidth: 72)
             }
             Divider()
@@ -7418,9 +7652,7 @@ struct TopNavigationBar: View {
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(AppPalette.warning)
                         .frame(width: AppLayout.headerActionSize, height: AppLayout.headerActionSize)
-                        .background(AppPalette.surface)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppPalette.separator))
+                        .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("有 \(model.pendingCenterItems.count) 个待处理项目")
@@ -7430,17 +7662,15 @@ struct TopNavigationBar: View {
                 Image(systemName: "info.circle")
                     .font(.system(size: 16, weight: .semibold))
                     .frame(width: AppLayout.headerActionSize, height: AppLayout.headerActionSize)
-                    .background(AppPalette.surface)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppPalette.separator))
+                    .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             .buttonStyle(.plain)
             .help("界面设计说明")
         }
         .padding(.horizontal, 24)
         .frame(height: AppLayout.headerHeight)
-        .background(AppPalette.surface.opacity(0.97))
-        .overlay(Divider(), alignment: .bottom)
+        .glassEffect(.regular, in: Rectangle())
+        .overlay(Divider().opacity(0.45), alignment: .bottom)
         .sheet(isPresented: $showDesignNotes) {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
@@ -7455,7 +7685,7 @@ struct TopNavigationBar: View {
             }
             .padding(24)
             .frame(width: 560)
-            .background(AppPalette.background)
+            .background(LiquidGlassPreviewBackdrop())
         }
         .sheet(isPresented: $model.showPendingCenterPrompt) {
             PendingCenterSheet(model: model)
@@ -7491,14 +7721,7 @@ struct TopNavigationBar: View {
                 kind: .warning
             )
         case .settings:
-            Button {
-                model.loadSettings()
-                model.settingsStatus = "已重新载入本机设置。"
-            } label: {
-                Label("重新载入", systemImage: "arrow.clockwise")
-            }
-            .buttonStyle(.bordered)
-            .appActionButton(minWidth: 96)
+            EmptyView()
         }
     }
 
@@ -7555,11 +7778,13 @@ struct TravelerAssistantApp: App {
             }
             .controlSize(.regular)
             .tint(AppPalette.accent)
+            .groupBoxStyle(AppGlassGroupBoxStyle())
+            .buttonStyle(.glass)
             // The approved design is a light workspace with fixed white surfaces.
             // Keep semantic primary/secondary text in the matching light palette;
             // otherwise macOS dark mode produces white text on these white cards.
             .preferredColorScheme(AppPalette.interfaceColorScheme)
-            .background(AppPalette.background)
+            .background(LiquidGlassPreviewBackdrop())
             .frame(
                 minWidth: AppLayout.windowMinWidth,
                 idealWidth: AppLayout.windowIdealWidth,
@@ -7568,6 +7793,9 @@ struct TravelerAssistantApp: App {
             )
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                 model.closeInventoryChromeOnQuit()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .ppOpenOrderCenter)) { _ in
+                selection = .orders
             }
             .alert("今日未完成数据库备份", isPresented: $model.showBackupReminder) {
                 Button("立即备份") { model.performBackup() }

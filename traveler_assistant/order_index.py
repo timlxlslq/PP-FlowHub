@@ -17,6 +17,7 @@ import sqlite3
 import shutil
 import time
 import uuid
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
@@ -49,7 +50,7 @@ AIMES_ORDER_RE = re.compile(r"^(PP\d{4}(?:-\d+)?|CS\d{3})$", re.IGNORECASE)
 FACTORY_RE = re.compile(r"^F\d+$", re.IGNORECASE)
 FACTORY_DATE_RE = re.compile(r"^F(\d{6})\d+$", re.IGNORECASE)
 MINIMUM_PP_NUMBER = 35
-INDEX_SCHEMA_VERSION = 7
+INDEX_SCHEMA_VERSION = 8
 SERVER_FOLDER_IGNORE_WATCH_DAYS = 30
 SERVER_SNAPSHOT_MAX_WORKERS = 4
 SERVER_SCAN_SNAPSHOT_FILENAME = "server-scan-snapshot.json"
@@ -631,7 +632,7 @@ class OrderIndexStore:
             self.connection = connection
         self.connection.set_trace_callback(lambda statement: log_database_statement(self.path, statement))
         version = self.connection.execute("pragma user_version").fetchone()[0]
-        if version not in (0, 1, 2, 3, 4, 5, 6, INDEX_SCHEMA_VERSION):
+        if version not in (0, 1, 2, 3, 4, 5, 6, 7, INDEX_SCHEMA_VERSION):
             self.connection.close()
             raise RuntimeError(f"订单索引数据库版本不受支持：{version}")
         self.connection.executescript(
@@ -815,6 +816,22 @@ class OrderIndexStore:
                 status text not null default 'observed',
                 unique(factory_order, batch_number, source_path)
             );
+            create table if not exists optimization_artifacts(
+                id integer primary key,
+                source_path text not null,
+                order_id text not null default '',
+                factory_order text not null,
+                file_modified_at real not null,
+                file_created_at real not null default 0,
+                completed_at text not null,
+                copied_at text not null default '',
+                first_seen_at text not null,
+                last_seen_at text not null,
+                size integer not null default 0,
+                unique(source_path, file_modified_at, size, factory_order)
+            );
+            create index if not exists idx_optimization_artifacts_factory
+                on optimization_artifacts(order_id, factory_order, completed_at);
             create index if not exists idx_batch_evidence_factory on batch_evidence(factory_order, status);
             create index if not exists idx_factory_order_id on factory_orders(order_id);
             create index if not exists idx_sync_changes_observed on sync_changes(observed_at desc);
@@ -894,11 +911,41 @@ class OrderIndexStore:
             ("aimes_status", "text not null default 'active'"),
             ("aimes_deleted_at", "text not null default ''"),
             ("aimes_last_verified_at", "text not null default ''"),
+            ("optimization_first_completed_at", "text not null default ''"),
+            ("optimization_latest_completed_at", "text not null default ''"),
+            ("optimization_first_seen_at", "text not null default ''"),
+            ("optimization_latest_seen_at", "text not null default ''"),
+            ("optimization_source_path", "text not null default ''"),
+            ("outbound_completed_at", "text not null default ''"),
         ):
             if column not in factory_columns:
                 self.connection.execute(
                     f"alter table factory_orders add column {column} {definition}"
                 )
+        if version < 8 and self.connection.execute(
+            "select 1 from sqlite_master where type='table' and name='outbound_documents'"
+        ).fetchone() and self.connection.execute(
+            "select 1 from sqlite_master where type='table' and name='outbound_document_factories'"
+        ).fetchone():
+            # Existing outbound rows already carry the inventory-system issue
+            # time. Backfill once so the dashboard's monthly completion count
+            # is based on the last factory shipment, not a later index refresh.
+            self.connection.execute(
+                """
+                update factory_orders
+                set outbound_completed_at = coalesce((
+                    select max(coalesce(nullif(od.issued_at, ''), od.updated_at))
+                    from outbound_document_factories odf
+                    join outbound_documents od
+                      on od.document_number = odf.document_number
+                    where odf.order_id = factory_orders.order_id
+                      and odf.factory_order = factory_orders.factory_order
+                      and od.status = '已出库'
+                ), '')
+                where outbound_status = '已出库'
+                  and outbound_completed_at = ''
+                """
+            )
         self.connection.execute("update orders set stage = '已设计' where stage = '待拆单'")
         # Current issues are created by the config-aware sync path below.  Do
         # not reconstruct them from every unresolved factory row while merely
@@ -2043,7 +2090,16 @@ class OrderIndexStore:
                 "installer": installation_row[3],
             })
         factories = self.connection.execute(
-            "select factory_order, order_id, factory_name, sales_order_name, split_time, name_source, source_folder, report_state, ownership_status, has_hardware, optimized, outbound_status, outbound_document, outbound_mode, outbound_fingerprint, updated_at from factory_orders where aimes_status = 'active' order by factory_order"
+            """select factory_order, order_id, factory_name, sales_order_name,
+                      split_time, name_source, source_folder, report_state,
+                      ownership_status, has_hardware, optimized, outbound_status,
+                      outbound_document, outbound_mode, outbound_fingerprint, updated_at,
+                      optimization_first_completed_at, optimization_latest_completed_at,
+                      optimization_first_seen_at, optimization_latest_seen_at,
+                      optimization_source_path, outbound_completed_at
+               from factory_orders
+               where aimes_status = 'active'
+               order by factory_order"""
         ).fetchall()
         produced_rows = self.connection.execute(
             """select f.order_id, f.factory_order
@@ -2076,6 +2132,12 @@ class OrderIndexStore:
                 "outbound_mode": row[13],
                 "outbound_fingerprint": row[14],
                 "updated_at": row[15],
+                "optimization_first_completed_at": row[16],
+                "optimization_latest_completed_at": row[17],
+                "optimization_first_seen_at": row[18],
+                "optimization_latest_seen_at": row[19],
+                "optimization_source_path": row[20],
+                "outbound_completed_at": row[21],
                 "produced": (str(row[1]).upper(), str(row[0]).upper()) in produced_keys,
             })
         result = []
@@ -2114,6 +2176,16 @@ class OrderIndexStore:
             optimized = sum(1 for item in children if item["optimized"] and item["ownership_status"] == "已确认")
             produced = sum(1 for item in children if item["produced"] and item["ownership_status"] == "已确认")
             shipped = sum(1 for item in children if item["outbound_status"] == "已出库")
+            optimization_completed_at = (
+                max((item["optimization_latest_completed_at"] for item in children), default="")
+                if expected and optimized == expected
+                else ""
+            )
+            completed_at = (
+                max((item["outbound_completed_at"] for item in children), default="")
+                if expected and shipped == expected
+                else ""
+            )
             if is_temporary:
                 stage = "数据异常" if row[4] == "数据异常" else "待人工处理"
             elif row[4] == "数据异常" or unresolved:
@@ -2171,6 +2243,8 @@ class OrderIndexStore:
                 "stage": stage,
                 "material_status": row[6],
                 "latest_split_time": latest_split_time,
+                "optimization_completed_at": optimization_completed_at,
+                "completed_at": completed_at,
                 "factory_count": expected,
                 "optimized_count": optimized,
                 "produced_count": produced,
@@ -2343,6 +2417,38 @@ def _optimization_artifacts(folder: Path) -> list[Path]:
     except OSError:
         return []
     return sorted(result)
+
+
+def _optimization_result_artifacts(folder: Path) -> list[Path]:
+    """Return AICNC nesting results that carry exact factory-order identity."""
+    return [path for path in _optimization_artifacts(folder) if path.name.casefold() == "nesting_result.xml"]
+
+
+def _optimization_result_artifacts_checked(folder: Path) -> tuple[list[Path], bool]:
+    """Return result files plus whether the Server traversal completed."""
+    result: list[Path] = []
+    try:
+        for path in folder.rglob("nesting_result.xml"):
+            if path.is_file() and "optimize file" in {part.casefold() for part in path.parts}:
+                result.append(path)
+    except OSError:
+        return sorted(result), False
+    return sorted(result), True
+
+
+def _optimization_factory_orders(path: Path) -> set[str]:
+    """Read factory order ids embedded by AICNC without loading the XML at once."""
+    factory_orders: set[str] = set()
+    for _, element in ET.iterparse(path, events=("start",)):
+        factory_order = str(element.attrib.get("OrderID", "")).upper().strip()
+        if FACTORY_RE.fullmatch(factory_order):
+            factory_orders.add(factory_order)
+        element.clear()
+    return factory_orders
+
+
+def _file_timestamp(value: float) -> str:
+    return datetime.fromtimestamp(value).isoformat(timespec="seconds") if value else ""
 
 
 def _canonical_source_folder(source_root: Path, folder_name: str) -> Path:
@@ -2592,30 +2698,142 @@ def _refresh_cached_optimization_artifacts(
     store: OrderIndexStore,
     validation_rows: list[tuple[str, str]],
 ) -> int:
-    """Refresh only newly visible optimization outputs without Excel parsing."""
+    """Persist exact AICNC optimization evidence and refresh factory state.
+
+    ``nesting_result.xml`` embeds the AIMES factory order in ``OrderID``.
+    Its modification time is the AICNC generation time; filesystem birth time
+    is only the later copy-to-Server time.  Keeping both plus first-seen time
+    prevents an index refresh timestamp from masquerading as a business event.
+    """
     refreshed = 0
     for order_id, source_folder in validation_rows:
-        factory_orders = [
-            row[0]
+        folder = Path(source_folder)
+        if not folder.is_dir():
+            continue
+        active_factory_orders = {
+            str(row[0]).upper()
             for row in store.connection.execute(
                 """
                 select factory_order
                 from factory_orders
-                where order_id = ? and aimes_status = 'active' and ownership_status = '已确认' and optimized = 0
+                where order_id = ? and aimes_status = 'active' and ownership_status = '已确认'
                 """,
                 (order_id,),
             ).fetchall()
-        ]
-        if not factory_orders or not _optimization_artifacts(Path(source_folder)):
+        }
+        if not active_factory_orders:
             continue
-        for factory_order in factory_orders:
+        observed_at = _now()
+        artifacts, scan_complete = _optimization_result_artifacts_checked(folder)
+        for artifact in artifacts:
+            try:
+                file_stat = artifact.stat()
+            except OSError:
+                scan_complete = False
+                continue
+            modified_at = float(file_stat.st_mtime)
+            created_at = float(getattr(file_stat, "st_birthtime", 0) or 0)
+            cached_factory_orders = {
+                str(row[0]).upper()
+                for row in store.connection.execute(
+                    """
+                    select factory_order from optimization_artifacts
+                    where source_path=? and file_modified_at=? and size=?
+                    """,
+                    (str(artifact), modified_at, int(file_stat.st_size)),
+                ).fetchall()
+            }
+            if cached_factory_orders:
+                artifact_factory_orders = cached_factory_orders
+                store.connection.execute(
+                    """
+                    update optimization_artifacts set last_seen_at=?
+                    where source_path=? and file_modified_at=? and size=?
+                    """,
+                    (observed_at, str(artifact), modified_at, int(file_stat.st_size)),
+                )
+            else:
+                try:
+                    artifact_factory_orders = _optimization_factory_orders(artifact)
+                except (OSError, ET.ParseError):
+                    scan_complete = False
+                    continue
+            for factory_order in sorted(artifact_factory_orders):
+                store.connection.execute(
+                    """
+                    insert into optimization_artifacts(
+                        source_path, order_id, factory_order, file_modified_at,
+                        file_created_at, completed_at, copied_at, first_seen_at,
+                        last_seen_at, size
+                    ) values(?,?,?,?,?,?,?,?,?,?)
+                    on conflict(source_path, file_modified_at, size, factory_order)
+                    do update set last_seen_at=excluded.last_seen_at
+                    """,
+                    (
+                        str(artifact), order_id, factory_order, modified_at,
+                        created_at, _file_timestamp(modified_at),
+                        _file_timestamp(created_at), observed_at, observed_at,
+                        int(file_stat.st_size),
+                    ),
+                )
+        # A complete readable scan may correct the historical blanket status.
+        # Previously observed evidence remains durable even if an old Server
+        # file is later archived, while a newly added AIMES factory starts at 0.
+        if not scan_complete:
+            continue
+        for factory_order in sorted(active_factory_orders):
+            evidence = store.connection.execute(
+                """
+                select min(completed_at), max(completed_at), min(first_seen_at),
+                       max(last_seen_at)
+                from optimization_artifacts
+                where order_id=? and factory_order=?
+                """,
+                (order_id, factory_order),
+            ).fetchone()
+            latest_source = store.connection.execute(
+                """
+                select source_path
+                from optimization_artifacts
+                where order_id=? and factory_order=?
+                order by completed_at desc, id desc limit 1
+                """,
+                (order_id, factory_order),
+            ).fetchone()
+            optimized = bool(evidence and evidence[1])
+            current = store.connection.execute(
+                """
+                select optimized, optimization_first_completed_at,
+                       optimization_latest_completed_at, optimization_first_seen_at,
+                       optimization_latest_seen_at, optimization_source_path
+                from factory_orders where factory_order=?
+                """,
+                (factory_order,),
+            ).fetchone()
+            desired = (
+                int(optimized),
+                str(evidence[0] or "") if evidence else "",
+                str(evidence[1] or "") if evidence else "",
+                str(evidence[2] or "") if evidence else "",
+                str(evidence[3] or "") if evidence else "",
+                str(latest_source[0]) if latest_source else "",
+            )
+            if current == desired:
+                continue
             store.connection.execute(
                 """
-                update factory_orders
-                set optimized = 1, report_state = '已发现', updated_at = ?
-                where factory_order = ? and order_id = ?
+                update factory_orders set
+                    optimized=?,
+                    optimization_first_completed_at=?,
+                    optimization_latest_completed_at=?,
+                    optimization_first_seen_at=?,
+                    optimization_latest_seen_at=?,
+                    optimization_source_path=?,
+                    report_state=case when ? then '已发现' else report_state end,
+                    updated_at=?
+                where factory_order=? and order_id=?
                 """,
-                (_now(), factory_order, order_id),
+                desired + (int(optimized), observed_at, factory_order, order_id),
             )
             refreshed += 1
     return refreshed
@@ -2998,7 +3216,8 @@ def reconcile_outbound_statuses(
     rows = store.connection.execute(
         """
         select factory_order, order_id, factory_name, sales_order_name,
-               outbound_status, outbound_document, outbound_mode, outbound_fingerprint
+               outbound_status, outbound_document, outbound_mode, outbound_fingerprint,
+               outbound_completed_at
         from factory_orders
         where order_id <> '' and aimes_status = 'active'
         """
@@ -3013,6 +3232,7 @@ def reconcile_outbound_statuses(
             "outbound_document": row[5],
             "outbound_mode": row[6],
             "outbound_fingerprint": row[7],
+            "outbound_completed_at": row[8],
         }
         for row in rows
     ]
@@ -3066,16 +3286,30 @@ def reconcile_outbound_statuses(
                 (str(factory.get("outbound_document", "")).strip(),),
             )
         desired_status = status
+        matched_times = [
+            str(record.get("synced_at", "")).strip()
+            for record in records
+            if str(record.get("document_number", "")).strip() == matched_document
+            and str(record.get("synced_at", "")).strip()
+        ]
+        desired_completed_at = (
+            max(matched_times)
+            if desired_status == "已出库" and matched_times
+            else factory["outbound_completed_at"]
+            if desired_status == "已出库"
+            else ""
+        )
         if (
             factory["outbound_status"] == desired_status
             and factory["outbound_document"] == matched_document
+            and factory["outbound_completed_at"] == desired_completed_at
         ):
             continue
         store.connection.execute(
             """
             update factory_orders
             set outbound_status = ?, outbound_document = ?, outbound_mode = ?,
-                outbound_fingerprint = ?, updated_at = ?
+                outbound_fingerprint = ?, outbound_completed_at = ?, updated_at = ?
             where factory_order = ?
             """,
             (
@@ -3083,6 +3317,7 @@ def reconcile_outbound_statuses(
                 matched_document,
                 "" if stale_production_status else "inventory" if matched_document else factory["outbound_mode"],
                 "" if matched_document or stale_production_status else factory["outbound_fingerprint"],
+                desired_completed_at,
                 _now(),
                 factory["factory_order"],
             ),
@@ -4562,7 +4797,9 @@ def scan_server_changes(config: Config) -> dict:
     """Compare Server metadata without advancing the processed baseline.
 
     The scan may clean stale pending state for folders excluded by the configured
-    baseline; it never marks currently visible files as processed.
+    baseline; it never marks currently visible material/report files as processed.
+    AICNC ``nesting_result.xml`` is a separately approved, read-only status
+    source, so the scan may persist its exact factory-order optimization evidence.
     """
     scanned_at = _now()
     scan_started = time.perf_counter()
@@ -4805,11 +5042,30 @@ def scan_server_changes(config: Config) -> dict:
         [Path(path) for path in sorted(material_folders) if Path(path).is_dir()],
         scanned_at,
     )
+    validation_finished = time.perf_counter()
     store = OrderIndexStore(config.workflow_database)
+    optimization_started = time.perf_counter()
+    optimization_rows = store.connection.execute(
+        """
+        select distinct orders.order_id, orders.source_folder
+        from orders
+        join factory_orders on factory_orders.order_id = orders.order_id
+        where orders.source_folder <> ''
+          and factory_orders.aimes_status = 'active'
+          and exists (
+              select 1 from factory_orders pending
+              where pending.order_id = orders.order_id
+                and pending.aimes_status = 'active'
+                and pending.outbound_status <> '已出库'
+          )
+        """
+    ).fetchall()
+    optimization_refreshed = _refresh_cached_optimization_artifacts(store, optimization_rows)
     current_issues = store.active_issues()
+    orders = store.summaries()
     store.commit()
     store.close()
-    validation_finished = time.perf_counter()
+    optimization_finished = time.perf_counter()
     snapshot_path = ""
     try:
         snapshot_path = str(
@@ -4826,7 +5082,9 @@ def scan_server_changes(config: Config) -> dict:
         snapshot_path = ""
     completed = time.perf_counter()
     scan_stats["material_validation_seconds"] = round(validation_finished - validation_started, 6)
-    scan_stats["finalize_seconds"] = round(completed - validation_finished, 6)
+    scan_stats["optimization_evidence_seconds"] = round(optimization_finished - optimization_started, 6)
+    scan_stats["optimization_artifact_refresh_count"] = optimization_refreshed
+    scan_stats["finalize_seconds"] = round(completed - optimization_finished, 6)
     scan_stats["duration_seconds"] = round(completed - scan_started, 6)
     timing_stages = [
         {
@@ -4840,11 +5098,19 @@ def scan_server_changes(config: Config) -> dict:
             "duration_seconds": scan_stats["material_validation_seconds"],
         },
         {
+            "stage": "optimization_evidence",
+            "label": "读取 AICNC 优化证据",
+            "duration_seconds": scan_stats["optimization_evidence_seconds"],
+        },
+        {
             "stage": "scan_finalize",
             "label": "写入扫描元数据和快照",
             "duration_seconds": scan_stats["finalize_seconds"],
         },
     ]
+    scan_stats["duration_seconds"] = round(
+        sum(float(stage["duration_seconds"]) for stage in timing_stages), 6
+    )
     return {
         "server": {
             "scanned_at": scanned_at,
@@ -4857,6 +5123,7 @@ def scan_server_changes(config: Config) -> dict:
             "snapshot_path": snapshot_path,
         },
         "current_issues": current_issues,
+        "orders": orders,
         "operation_trace": {
             "server": _server_scan_trace(
                 scan_stats,
@@ -6212,7 +6479,7 @@ def sync_order_index(
             )
             for factory_order in factory_ids:
                 store.connection.execute(
-                    "update factory_orders set optimized = 1, report_state = '已发现', updated_at = ? where factory_order = ? and order_id = ?",
+                    "update factory_orders set report_state = '已发现', updated_at = ? where factory_order = ? and order_id = ?",
                     (_now(), factory_order, order_id),
                 )
         except Exception as exc:
@@ -6224,17 +6491,12 @@ def sync_order_index(
                     (order_id,),
                 ).fetchall()
             }
-            optimization_outputs = _optimization_artifacts(Path(source_folder))
+            optimization_outputs = _optimization_result_artifacts(Path(source_folder))
             if order_id.upper().startswith("CS") and indexed_factory_ids and optimization_outputs:
                 # Some CUT TO SIZE exports contain only the production reports
                 # and CNC nesting output, without a generated material workbook.
                 # The optimization artifact is sufficient for the optimization
                 # column; keep material validation visibly pending.
-                for factory_order in indexed_factory_ids:
-                    store.connection.execute(
-                        "update factory_orders set optimized = 1, report_state = '已发现', updated_at = ? where factory_order = ? and order_id = ?",
-                        (_now(), factory_order, order_id),
-                    )
                 store.connection.execute(
                     "update orders set validation_status = ?, validation_message = ?, material_status = ?, updated_at = ? where order_id = ?",
                     (
@@ -7443,7 +7705,7 @@ def _memory_preview_records(payload: dict) -> dict[str, list[dict]]:
 
 
 def _memory_factory_selection(payload: dict, order_id: str = "", factory_order: str = "") -> list[tuple[str, str]]:
-    selected: list[tuple[str, str]] = []
+    selected: set[tuple[str, str]] = set()
     wanted_order = str(order_id or "").strip().upper()
     wanted_factory = str(factory_order or "").strip().upper()
     for order in payload.get("orders", []):
@@ -7457,8 +7719,22 @@ def _memory_factory_selection(payload: dict, order_id: str = "", factory_order: 
                 continue
             current_factory = str(factory.get("factory_order", "")).strip().upper()
             if current_factory and (not wanted_factory or current_factory == wanted_factory):
-                selected.append((current_factory, current_order))
-    return selected
+                selected.add((current_factory, current_order))
+    # A factory with a new fittings source must remain selectable even when
+    # its identity fields are otherwise unchanged and therefore omitted from
+    # the visual "factory changes" list. This also keeps mapping validation
+    # from being bypassed when optimization state is derived only from AICNC
+    # evidence rather than a successful report preview.
+    for group in payload.get("hardware_source_items", []):
+        if not isinstance(group, dict):
+            continue
+        current_order = str(group.get("order_id", "")).strip().upper()
+        current_factory = str(group.get("factory_order", "")).strip().upper()
+        if wanted_order and current_order != wanted_order:
+            continue
+        if current_factory and current_order and (not wanted_factory or current_factory == wanted_factory):
+            selected.add((current_factory, current_order))
+    return sorted(selected)
 
 
 def _server_preview_order_validation_errors(

@@ -7,7 +7,7 @@ BINARY="/tmp/pp-flowhub-ui-tests"
 TEST_STATE_DIR="$(mktemp -d /tmp/pp-flowhub-ui-state.XXXXXX)"
 trap 'rm -rf "$TEST_STATE_DIR"' EXIT
 export PP_FLOWHUB_STATE_DIR="$TEST_STATE_DIR"
-DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-26.0}"
 TARGET_ARCH="${TRAVELER_ARCH:-$(uname -m)}"
 mkdir -p "$CACHE"
 /usr/bin/xcrun --sdk macosx swiftc \

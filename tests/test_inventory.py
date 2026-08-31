@@ -605,8 +605,8 @@ class InventoryTests(unittest.TestCase):
         )[0]
         self.assertNotIn("Traveler 材料名称", settings)
         self.assertNotIn("设置材料映射", settings)
-        self.assertIn("库存商品资料与全局忽略", settings)
-        self.assertIn('Button("查看") { showIgnoredHardwareList = true }', settings)
+        self.assertIn("库存资料与规则", settings)
+        self.assertIn("showIgnoredHardwareList = true", settings)
         self.assertIn("struct InventoryIgnoredMappingsSheet", swift)
 
     def test_database_outbound_status_changes_when_persisted_order_data_changes(self):
@@ -788,7 +788,10 @@ class InventoryTests(unittest.TestCase):
         self.assertNotIn("togglePreviewRow(row.id)", source)
         self.assertNotIn("点击记录行即可整行选中；按住 Command 可多选", source)
         self.assertIn(".frame(maxWidth: .infinity)\n        .frame(height: AppLayout.operationLogHeight)", source)
-        self.assertIn("HStack(spacing: 8) {\n                    Button(\"取消\")", source)
+        self.assertRegex(
+            source,
+            r'HStack\(spacing: 8\)\s*\{\s*Button\("取消"\)\s*\{\s*confirmRealSave = false\s*\}',
+        )
         self.assertIn("ScrollView(.vertical)", source)
         self.assertIn("inventoryWriteBlocked", source)
         self.assertIn("inventoryWriteCompleted", source)
@@ -824,10 +827,10 @@ class InventoryTests(unittest.TestCase):
         selected_branch = choice.split("if skipped {", 1)[1].split("} else {", 1)[0]
         unselected_branch = choice.split("} else {", 1)[1].split("            if skipped {", 1)[0]
         self.assertIn('Button("本次不写入五金")', selected_branch)
-        self.assertIn(".buttonStyle(.borderedProminent)", selected_branch)
+        self.assertIn(".buttonStyle(.glassProminent)", selected_branch)
         self.assertIn(".tint(AppPalette.warning)", selected_branch)
         self.assertIn('Button("本次写入五金")', unselected_branch)
-        self.assertIn(".buttonStyle(.borderedProminent)", unselected_branch)
+        self.assertIn(".buttonStyle(.glassProminent)", unselected_branch)
         self.assertIn(".tint(AppPalette.success)", unselected_branch)
 
     def test_inventory_chrome_success_result_has_no_hidden_login_prompt(self):

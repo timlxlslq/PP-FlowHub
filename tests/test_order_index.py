@@ -722,7 +722,7 @@ class OrderIndexTests(unittest.TestCase):
             )
             self.assertEqual(
                 [stage["stage"] for stage in scan_timing["stages"]],
-                ["server_metadata", "material_validation", "scan_finalize"],
+                ["server_metadata", "material_validation", "optimization_evidence", "scan_finalize"],
             )
             self.assertTrue(any(
                 issue["kind"] == "material_validation"
@@ -1285,7 +1285,7 @@ class OrderIndexTests(unittest.TestCase):
             store.close()
             self.assertEqual({str(item) for item in folders}, {str(owned), str(cut_to_size)})
 
-    def test_successful_cut_to_size_preview_marks_indexed_factory_optimized(self):
+    def test_successful_cut_to_size_preview_does_not_claim_optimization_without_aicnc_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = Config(state_dir=root / "state", source_root=root / "server" / "Optimized Orders")
@@ -1306,8 +1306,8 @@ class OrderIndexTests(unittest.TestCase):
                 result = sync_order_index(config)
 
             self.assertEqual(result["orders"][0]["order_id"], "CS005")
-            self.assertEqual(result["orders"][0]["optimized_count"], 1)
-            self.assertEqual(result["orders"][0]["stage"], "已优化")
+            self.assertEqual(result["orders"][0]["optimized_count"], 0)
+            self.assertEqual(result["orders"][0]["stage"], "已拆单待优化")
 
     def test_cut_to_size_optimization_artifact_marks_status_when_material_is_absent(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1315,11 +1315,11 @@ class OrderIndexTests(unittest.TestCase):
             config = Config(state_dir=root / "state", source_root=root / "server" / "Optimized Orders")
             folder = config.source_root.parent / "CUT TO SIZE" / "CS005"
             report = folder / "Report" / "pp-板材清单.xlsx"
-            artifact = folder / "New Nesting" / "Optimize file" / "Optimize file.xml"
+            artifact = folder / "New Nesting" / "Optimize file" / "layout file" / "nesting_result.xml"
             report.parent.mkdir(parents=True)
             artifact.parent.mkdir(parents=True)
             report.write_bytes(b"placeholder")
-            artifact.write_text("<optimized />", encoding="utf-8")
+            artifact.write_text('<Nesting><BoardControl OrderID="F100" /></Nesting>', encoding="utf-8")
             aimes_row = {
                 "factory_order": "F100",
                 "factory_name": "CS005-KITCHEN",
@@ -1336,6 +1336,99 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(order["optimized_count"], 1)
             self.assertEqual(order["validation_status"], "待校验")
             self.assertEqual(order["material_status"], "待校验")
+            self.assertTrue(order["optimization_completed_at"])
+            self.assertEqual(order["factories"][0]["optimization_source_path"], str(artifact))
+
+    def test_order_is_optimized_only_after_every_active_factory_has_aicnc_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state", source_root=root / "server" / "Optimized Orders")
+            folder = config.source_root / "PP0099"
+            first = folder / "Kitchen" / "Optimize file" / "layout file" / "nesting_result.xml"
+            first.parent.mkdir(parents=True)
+            first.write_text('<Nesting><BoardControl OrderID="F100" /></Nesting>', encoding="utf-8")
+            rows = [
+                {"factory_order": "F100", "factory_name": "PP0099-KITCHEN", "sales_order_name": "PP0099", "split_time": "2026-08-10T08:30:00"},
+                {"factory_order": "F200", "factory_name": "PP0099-VANITY", "sales_order_name": "PP0099", "split_time": "2026-08-11T08:30:00"},
+            ]
+            preview = SimpleNamespace(factories=[])
+            with patch("traveler_assistant.order_index.load_aimes_order_cache", return_value=rows), \
+                 patch("traveler_assistant.order_workflow.preview_order", return_value=preview):
+                partial = sync_order_index(config)
+            self.assertEqual(partial["orders"][0]["stage"], "部分优化")
+            self.assertEqual(partial["orders"][0]["optimized_count"], 1)
+
+            second = folder / "Vanity" / "Optimize file" / "layout file" / "nesting_result.xml"
+            second.parent.mkdir(parents=True)
+            second.write_text('<Nesting><BoardControl OrderID="F200" /></Nesting>', encoding="utf-8")
+            with patch("traveler_assistant.order_index.load_aimes_order_cache", return_value=rows), \
+                 patch("traveler_assistant.order_workflow.preview_order", return_value=preview):
+                complete = sync_order_index(config)
+            self.assertEqual(complete["orders"][0]["stage"], "已优化")
+            self.assertEqual(complete["orders"][0]["optimized_count"], 2)
+            self.assertTrue(complete["orders"][0]["optimization_completed_at"])
+
+            original_mtime = first.stat().st_mtime
+            first.write_text(
+                '<Nesting><BoardControl OrderID="F100" /><BoardControl OrderID="F100" /></Nesting>',
+                encoding="utf-8",
+            )
+            os.utime(first, (original_mtime + 60, original_mtime + 60))
+            with patch("traveler_assistant.order_index.load_aimes_order_cache", return_value=rows), \
+                 patch("traveler_assistant.order_workflow.preview_order", return_value=preview):
+                refreshed = sync_order_index(config)
+            f100 = next(item for item in refreshed["orders"][0]["factories"] if item["factory_order"] == "F100")
+            self.assertNotEqual(
+                f100["optimization_first_completed_at"],
+                f100["optimization_latest_completed_at"],
+            )
+            evidence_connection = sqlite3.connect(config.workflow_database)
+            evidence = evidence_connection.execute(
+                "select count(*) from optimization_artifacts where factory_order='F100'"
+            ).fetchone()[0]
+            evidence_connection.close()
+            self.assertEqual(evidence, 2)
+
+            rows.append({"factory_order": "F300", "factory_name": "PP0099-OFFICE", "sales_order_name": "PP0099", "split_time": "2026-08-12T08:30:00"})
+            with patch("traveler_assistant.order_index.load_aimes_order_cache", return_value=rows), \
+                 patch("traveler_assistant.order_workflow.preview_order", return_value=preview):
+                expanded = sync_order_index(config)
+            self.assertEqual(expanded["orders"][0]["stage"], "部分优化")
+            self.assertEqual(expanded["orders"][0]["optimized_count"], 2)
+
+    def test_visible_server_scan_refreshes_aicnc_evidence_and_returns_updated_orders(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state", source_root=root / "server" / "Optimized Orders")
+            config.prepare_storage()
+            folder = config.source_root / "PP0099"
+            artifact = folder / "Kitchen" / "Optimize file" / "layout file" / "nesting_result.xml"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_text('<Nesting><BoardControl OrderID="F100" /></Nesting>', encoding="utf-8")
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_order("PP0099", source_folder=str(folder), validation_status="正常")
+            store.upsert_factory(
+                "F100",
+                order_id="PP0099",
+                factory_name="PP0099-KITCHEN",
+                sales_order_name="PP0099",
+                split_time="2026-08-10T08:30:00",
+                name_source="AIMES",
+                ownership_status="已确认",
+            )
+            store.commit()
+            store.close()
+
+            result = scan_server_changes(config)
+
+            order = next(item for item in result["orders"] if item["order_id"] == "PP0099")
+            self.assertEqual(order["stage"], "已优化")
+            self.assertEqual(order["optimized_count"], 1)
+            self.assertEqual(result["server"]["scan_stats"]["optimization_artifact_refresh_count"], 1)
+            self.assertEqual(
+                [stage["stage"] for stage in result["operation_timing"]["stages"]],
+                ["server_metadata", "material_validation", "optimization_evidence", "scan_finalize"],
+            )
 
     def test_exact_standard_order_folder_wins_over_mixed_factory_report_folder(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1439,7 +1532,7 @@ class OrderIndexTests(unittest.TestCase):
                 self.assertEqual(second["index_stats"]["reused_report_count"], 1)
                 self.assertEqual(second["index_stats"]["parsed_report_count"], 0)
                 self.assertEqual(second["index_stats"]["validated_order_count"], 0)
-                self.assertEqual(second["orders"][0]["optimized_count"], 1)
+                self.assertEqual(second["orders"][0]["optimized_count"], 0)
 
                 report.write_bytes(b"changed")
                 third = sync_order_index(config)
@@ -2477,7 +2570,7 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(row["stage"], "数据异常")
         self.assertEqual(stored_stage, "已设计")
         self.assertEqual(row["validation_message"], "未找到 material 文件。请补充后重新扫描 Server。")
-        self.assertEqual(version, 7)
+        self.assertEqual(version, 8)
 
     def test_schema_migration_resolves_legacy_warning_from_unique_order_folder(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -2622,6 +2715,7 @@ class OrderIndexTests(unittest.TestCase):
                 "remark": "CS005",
                 "status": "已出库",
                 "document_number": "QTCK20260815001",
+                "synced_at": "2026-08-15T16:20:00",
             }]
             with patch("traveler_assistant.order_index._load_outbound_records", return_value=records):
                 store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
@@ -2630,13 +2724,14 @@ class OrderIndexTests(unittest.TestCase):
                 listed = list_order_index(config)
 
             self.assertEqual(listed["orders"][0]["stage"], "已出货")
+            self.assertEqual(listed["orders"][0]["completed_at"], "2026-08-15T16:20:00")
             reopened = OrderIndexStore(config.state_dir / "order-index.sqlite3")
             row = reopened.connection.execute(
-                "select outbound_status, outbound_document from factory_orders where factory_order = ?",
+                "select outbound_status, outbound_document, outbound_completed_at from factory_orders where factory_order = ?",
                 ("F2608120222",),
             ).fetchone()
             reopened.close()
-            self.assertEqual(row, ("已出库", "QTCK20260815001"))
+            self.assertEqual(row, ("已出库", "QTCK20260815001", "2026-08-15T16:20:00"))
 
     def test_fully_shipped_order_is_completed_even_if_optimization_evidence_is_missing(self):
         with tempfile.TemporaryDirectory() as temp:

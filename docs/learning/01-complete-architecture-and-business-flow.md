@@ -21,7 +21,7 @@ SwiftUI 页面
 
 | 路径 | 职责 |
 |---|---|
-| `macos/PPFlowHub.swift` | AppModel、顶部导航、生产文件、出库、待办、设置页面及 Process 调用 |
+| `macos/TravelerAssistant.swift` | App 入口、AppModel、顶部导航、生产文件、出库、待办、设置页面及 Process 调用 |
 | `macos/AssistantView.swift` | 助手页面、语音输入、命令预览和库存比较展示 |
 | `scripts/pp-flowhub` | 设置 `PYTHONPATH`，选择 Python，分发 `assistant/order/inventory` 子命令 |
 | `traveler_assistant/command_router.py` | 常用中文/英文命令的零 Token 本地解析 |
@@ -74,7 +74,7 @@ HSplitView 右侧订单详情区不使用固定最小宽度，而是使用 minWi
 4. 非 `PP####`、`PP####-#`、`CS###` 的目录按临时任务处理：建立时间在扫描基准时间（当前为 `CS003 PP0047` 的建立时间 `2026-07-25T11:00:25-07:00`）之后的一段时间内，或从未写入 `source_files`，才自动进入扫描；业务报表递归查找 `Fittingslist`、`板材清单` 和 `material` 文件。
 5. 被筛选跳过的标准订单不会触发历史问题自动关闭；`active_issues` 只有在对应文件夹确实被本次扫描后，才会按本次结果更新。
 
-`scan-server` 只读取文件夹和业务 Excel 的轻量元数据；`sync-index` 才解析候选报表并写入 `order-index.sqlite3`。
+`scan-server` 先比较文件夹和业务 Excel 的元数据，并读取发生变化或仍有校验问题的 material 内容；它不会把普通 material/Report 当作已经确认的正式业务事实，也不会推进这些文件的已处理基线。用户选择文件夹后，`preview-server-changes` 在内存数据库中解析并演算；只有显式确认流程才把材料和五金事实写入中央 `workflow.sqlite3`。扫描阶段可持久化来源中带有精确工厂单身份的 AICNC 优化证据。
 
 ### 4.2 预览订单
 
@@ -107,7 +107,7 @@ AIMES 缓存更新：设置页按钮调用 `order refresh-aimes`，后端通过 
 
 1. 生成/更新按钮先进入 `tool_gateway` 的 `approval_required` 分支，只返回预览。
 2. 用户确认后，`generate_order_traveler()` 或 `update_order_traveler()` 读取模板并写入临时文件。
-3. `_write_picking_list()` 为每个 `FactoryPreview` 写入工厂单名称和五金明细；材料和封边写入 Usage List。
+3. `_prepare_picking_list()` 为每个 `FactoryPreview` 写入工厂单名称和五金明细；材料和封边通过 `_fill_usage_list()` 等函数写入 Usage List。
 4. 保存前重新打开校验，更新操作先备份旧文件，再原子替换目标文件。
 5. 返回 `created/updated`、备份路径和业务摘要。
 
@@ -119,7 +119,7 @@ AIMES 只补工厂单名称，不参与板材/封边数量计算。
 
 ## 6. 出库流程
 
-1. `loadInventory()` 启动 `inventory list-names`，`list_travelers()` 只读取 Traveler 文件夹和文件名，返回 `InventoryTraveler`。
+1. `loadInventory()` 启动 `inventory list-names`，`list_traveler_names()` 只读取 Traveler 文件夹、文件名、mtime 和已有同步状态，返回 `InventoryTraveler`；点击文件后才读取工作簿内容。
 2. 用户点击左侧 Traveler 时，`previewSelectedInventory()` 清空旧操作记录并串行调用 `inventory preview --traveler`。
 3. `parse_traveler()` 读取 Usage List、Picking List 和工厂单名称；`order_stock_requirements()` 形成材料与五金需求。
 4. `InventoryMappings` 读取本地商品映射；缺失映射会显示“未映射”，阻止写入。

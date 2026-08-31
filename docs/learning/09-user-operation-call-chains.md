@@ -1,0 +1,726 @@
+# PP FlowHub 用户操作与业务调用链全解
+
+本文回答一个固定问题：**用户在 App 里做了一件事后，代码从哪里开始、传入什么、下一步调用谁、最终读写什么？**
+
+文档依据 2026-08-30 当前源码整理。函数级全集请配合以下自动生成文档：
+
+- `05-file-map.md`：每个文件的中文职责。
+- `06-python-symbol-reference.md`：全部一方 Python 类型、函数和方法。
+- `07-swift-symbol-reference.md`：全部 App 类型、函数、方法和重要计算属性。
+- `08-support-test-symbol-reference.md`：全部测试、脚本和工具过程。
+
+## 1. 先理解三种证据
+
+本文明确区分：
+
+- **已确认事实**：当前源码中存在直接调用、参数、分支或测试契约。
+- **静态分析结果**：生成器能看到直接调用，但动态类型、闭包和条件分支可能使运行路径不同。
+- **运行时结果**：只有真实命令、操作日志、SQLite、Excel 或外部系统返回才能证明本次操作实际执行到哪一步。
+
+因此，“函数 A 的源码里调用了函数 B”不等于每次都调用 B；必须继续看分支条件和本次输入。
+
+## 2. 全项目统一入口
+
+### 2.1 App 到业务引擎的主链
+
+```text
+用户点击/输入
+  → macos/*.swift 的 View 按钮或 onAppear
+  → macos/TravelerAssistant.swift: AppModel 某个操作函数
+  → AppModel.runOrder / runInventory，或 AssistantView.executeAssistantTask
+  → scripts/pp-flowhub
+  → traveler_assistant/order_workflow.py: main
+       或 traveler_assistant/inventory.py: inventory_main
+       或 traveler_assistant/assistant_cli.py: main
+  → 对应 Python 业务函数
+  → workflow.sqlite3 / Excel / Server / AIMES / 金蝶云库存
+  → stdout 最终 JSON + stderr 逐步 progress JSONL
+  → Swift 解析并更新 @Published 页面状态
+```
+
+### 2.2 三个进程入口的参数合同
+
+| App 入口 | 子进程参数 | Python 入口 | 标准输出 | 标准错误 |
+| --- | --- | --- | --- | --- |
+| `AppModel.runOrder(arguments,input,...)` | `pp-flowhub order <arguments>`；可把内存预览 JSON 写到 stdin | `order_workflow.main(argv)` | 最终结果对象；失败为 `fatal` | `progress` 事件和诊断 |
+| `AppModel.runInventory(arguments,...)` | `pp-flowhub inventory <arguments>` | `inventory.inventory_main(argv)` | 最终结果对象；失败为 `fatal` | 浏览器实时页面动作、阶段进度和诊断 |
+| `executeAssistantTask(task,approved)` | `pp-flowhub assistant <text> [--approve]` | `assistant_cli.main(argv)` | `status/result_type/preview/error/token_usage` | 助手后台诊断 |
+
+三个入口都通过 `scripts/pp-flowhub` 完成同一件事：选择打包版或虚拟环境 Python，设置 `PYTHONPATH`，再以 `python -m` 启动模块。Shell 脚本本身不包含业务规则。
+
+### 2.3 统一运行参数从哪里来
+
+1. Swift `AppModel` 默认保存 `sourceRoot`、`orderRoot`、`backupRoot`、初始日期和账号名。
+2. `AppModel.loadSettings()` 从 `~/Documents/pp-flowhub/data/settings.json` 读取本机配置。
+3. `runOrder()` / `runInventory()` 通过 `environmentForOperation(operationID)` 传递当前操作编号与运行环境。
+4. Python `Config.load_settings()` 再读取同一设置文件；CLI 显式参数优先覆盖设置。
+5. `Config.prepare_storage()` 建立本机状态目录并连接/迁移中央 `workflow.sqlite3`。
+
+密码边界：设置 JSON 只保存用户名；AIMES 和库存密码通过 macOS Keychain 读取，不能把明文密码写进日志或文档。
+
+## 3. App 启动、页面与本地状态
+
+### 3.1 App 启动
+
+入口：`macos/TravelerAssistant.swift: TravelerAssistantApp`。
+
+调用链：
+
+```text
+TravelerAssistantApp 创建 @StateObject AppModel
+  → AppModel.init()
+      → loadSettings()
+      → OperationLogWriter.setEnabled(operationLogEnabled)
+      → OperationLogWriter.record("app.started", ...)
+      → loadTodoItems()
+      → loadAssistantUsage()
+  → WindowGroup 根据 AppSection 显示 AssistantView / OrderDashboardView / TodoView / SettingsView
+```
+
+输入：无显式业务参数；读取本机设置和待办文件。
+
+副作用：记录 App 启动日志。启动本身不会自动写 Server、AIMES 或库存系统。订单看板出现后，`OrderDashboardView.onAppear` 才调用 `startOrderDashboard()`。
+
+### 3.2 设置保存
+
+入口：设置页按钮 → `AppModel.saveAllSettings()` / `saveSettings()`。
+
+主要输入：
+
+- `initialDate`
+- `sourceRoot`
+- `orderRoot`
+- `backupRoot`
+- `jdyUsername`
+- `aimesUsername`
+- `operationLogEnabled`
+- 两套密码输入（分别走 Keychain）
+
+调用链：
+
+```text
+SettingsView 按钮
+  → AppModel.saveAllSettings()
+      → saveSettings()
+          → JSONSerialization.data(...)
+          → Data.write(settingsURL, .atomic)
+      → saveJdyPassword() / saveAimesPassword()
+          → macOS Security/Keychain 命令
+```
+
+输出：页面 `settingsStatus`。设置文件写入是原子替换；密码不进入 JSON。
+
+### 3.3 待办新增、修改、完成与删除
+
+入口分别是 `addTodo(content,deadline)`、`updateTodo(item,content,deadline)`、`toggleTodoCompletion(item)`、`deleteTodo(item)`。
+
+共同下一跳：`saveTodoItems()` → `JSONEncoder.encode(todoItems)` → 原子写入 `data/todo-items.json`。
+
+业务规则：空内容不保存；完成状态通过 `completedAt` 是否为空表示；日期按 ISO 8601 编解码。
+
+### 3.4 操作日志
+
+App 侧入口：`OperationLogWriter.record()`；Python 侧入口：`configure_operation_log()` → `OperationLogger.event()`。
+
+写入位置：`data/operation-log.jsonl`。每一行是独立 JSON，使用同一 `operation_id` 关联 Swift、Python 和浏览器阶段。
+
+`OperationLog.swift` 和 `operation_log.py` 都执行敏感键/文本脱敏。关闭日志只影响后续普通记录；关闭动作本身使用强制记录留下审计事实。
+
+### 3.5 数据库备份
+
+入口：设置页“立即备份”或订单看板启动后的每日检查。
+
+```text
+AppModel.performBackup()
+  → runOrder(["backup-now"])
+  → scripts/pp-flowhub order backup-now
+  → order_workflow.main()
+  → backup.perform_backup(config)
+      → database.ensure_schema(...)
+      → SQLite backup 到临时文件
+      → 计算 fingerprint
+      → os.replace() 原子落盘
+      → _apply_retention()
+```
+
+输入：`Config.workflow_database`、`Config.database_backup_root` 和当前日期。
+
+输出：备份路径、指纹和状态。`backup_status()` 只检查最近成功证据；`perform_backup()` 才实际写文件。
+
+## 4. 助手命令
+
+### 4.1 从文字/语音到结构化动作
+
+入口：`AssistantView` 的执行按钮或语音完成回调 → `AppModel.runAssistantCommand(approved:false)`。
+
+输入：`assistantInput` 文本。语音文本先通过 `canonicalSpeechCommand(text)` 把“P P 三十五”等表达规范化为订单号。
+
+```text
+runAssistantCommand(false)
+  → 把 AssistantTaskItem 加入队列
+  → processNextAssistantTask()
+  → executeAssistantTask(task,false)
+  → Process: pp-flowhub assistant <task.text>
+  → assistant_cli.main(argv)
+      → command_router.parse_local_command(text)
+      → 若返回 None：RuntimeStore.learned_command(normalized_text)
+      → 仍未命中：agent_runner.route_with_agent(text)
+      → tool_gateway.execute_local_command(config,command,approved=false)
+```
+
+本地解析器输入是原始文本，输出 `LocalCommand(action, arguments, requires_approval)`；它不读写业务系统。Agent 只负责理解模糊意图，最终动作仍必须进入 Gateway。
+
+### 4.2 Gateway 的读写边界
+
+`tool_gateway.execute_local_command(config,command,approved)` 支持：
+
+| action | 关键参数 | 下一跳 | 是否写入 |
+| --- | --- | --- | --- |
+| `list_orders` | 无 | `order_workflow.list_order_folders(config)` | 否 |
+| `preview_order` | `order_id` | `_order_folder()` → `preview_order()` → `preview_payload()` | 预览解析可持久化已验证中央事实；不生成 Traveler |
+| `check_inventory_stock` | `order_id` | `inventory.check_database_stock()` | 只读库存查询，不出库 |
+| `generate_traveler` | `order_id` | 首次只返回预览；批准后 `generate_order_traveler()` | 是，生成 Excel |
+| `update_traveler` | `order_id` | 首次只返回预览；批准后 `update_order_traveler()` | 是，备份并更新 Excel |
+| `add_manual_hardware` | `order_id/factory_name/product_code/quantity/remarks` | `preview_manual_hardware()`；批准后 `add_manual_hardware()` | 是，写中央 SQLite，存在 Traveler 时同步更新 |
+
+第二次确认入口：`runAssistantCommand(approved:true)` → 相同任务文本加 `--approve` → Gateway 重新解析和校验，不能把第一次预览当作永久授权。
+
+## 5. 订单看板启动链
+
+入口：`OrderDashboardView.onAppear` → `AppModel.startOrderDashboard()`。
+
+```text
+startOrderDashboard()
+  → loadOrderDashboardCache()
+      → beginDashboardOperation("sync", "读取本地订单缓存")
+      → runOrder(["list-index"])
+      → order_workflow.main(command="list-index")
+      → order_index.list_order_index(config)
+      → OrderIndexStore.summaries()/active_issues()/...
+  → applyDashboardObject(local cache)
+  → runDailyBackupAfterLocalCache()
+      → order backup-status
+      → 必要时 order backup-now
+  → syncDashboardAimes(force:false, scanServerAfter:true)
+      → AIMES 完成或失败后 scanDashboardServer(background:true)
+```
+
+已确认边界：本地 `list-index` 只负责尽快显示已有事实；它不应伪装成 AIMES 或 Server 的最新结果。AIMES 与 Server 是后续两个独立阶段，分别记录耗时。
+
+## 6. AIMES 同步
+
+### 6.1 App 参数
+
+- 自动启动检查：`syncDashboardAimes(force:false)` → `sync-aimes --aimes-if-needed`。
+- 用户点击再次获取：`syncDashboardAimes(force:true)` → `sync-aimes --refresh-aimes`。
+
+### 6.2 Python 调用链
+
+```text
+order_workflow.main(command="sync-aimes")
+  → order_index.sync_aimes_index(config, force, if_needed)
+      → reconcile_outbound_statuses(config, store)
+      → load_aimes_order_cache(config)
+      → 判断今天是否已成功同步
+      → core.refresh_aimes_recent_orders(...)
+          或 refresh_aimes_recent_orders_and_verify(...)
+          → tools/aimes_lookup.mjs
+          → Playwright/AIMES 页面
+      → _partition_aimes_rows(...)
+      → _persist_valid_aimes_mapping(...)
+      → OrderIndexStore.upsert_order()/upsert_aimes_factory()
+      → _verify_missing_aimes_factories(...)
+      → OrderIndexStore.record_run()/commit()
+```
+
+输入：`force`、`if_needed`、AIMES 用户名、Keychain 密码、批量上限和当前缓存。
+
+输出：`orders`、`aimes` 状态、warnings、ignored/assigned 列表、stage durations 和 operation trace。
+
+关键边界：`sync_aimes_index()` 只刷新 AIMES 身份，不扫描 Server。格式异常行作为警告跳过；失败时可以返回缓存，但缓存不能表述成刚刚在线验证成功。
+
+## 7. Server 扫描、预览与确认
+
+### 7.1 扫描变化
+
+入口：用户点击“扫描 Server”或 AIMES 启动链结束 → `scanDashboardServer(background)`。
+
+```text
+scanDashboardServer()
+  → runOrder(["scan-server"])
+  → order_workflow.main(command="scan-server")
+  → order_index.scan_server_changes(config)
+      → _clear_stale_server_pending_state(...)
+      → _server_snapshot(config,store)
+      → 比较 source_files 基线与当前目录/文件元数据
+      → _validate_materials_during_server_scan(changed folders)
+      → 刷新可精确识别的 AICNC optimization evidence
+      → 返回 changes / active issues / scan_stats / stage durations
+```
+
+输入：设置中的 Server 根目录、AIMES 当前工厂单范围、已出库状态、上次处理基线和忽略规则。
+
+写入边界：扫描不会把普通 material/Report 当作已确认生产事实，也不会推进它们的已处理基线；它可以清理失效待处理状态，并持久化来源中含精确工厂单身份的优化证据。对变化 material 的校验会读取内容，但不等同于用户确认写入。
+
+### 7.2 选择文件夹并生成内存预览
+
+入口：待处理中心“预览并逐单确认” → `processPendingServerChanges()`。
+
+输入：选中的 `folderPath[]`，默认 `include_hardware=true`。
+
+```text
+processPendingServerChanges()
+  → runOrder(["preview-server-changes", "--include-hardware", "true",
+              "--server-folder", folder1, ...])
+  → order_workflow.main()
+  → order_index.preview_server_changes(config, selected_folders, include_hardware)
+      → 复制 workflow.sqlite3 到 sqlite3 :memory:
+      → inventory.bootstrap_product_database(stage_config)
+      → sync_order_index(stage_config, selected_folders=..., validate_selected_orders=true)
+      → _server_preview_payload(...)
+      → _refresh_server_preview_hardware(...)
+      → 返回 server_write_preview + operation_timing
+  → AppModel.presentServerWritePreview(object)
+```
+
+已确认边界：正式数据库不会被预览污染。预览对象只保存在当前 App 内存；重新启动 App 后应重新预览。
+
+### 7.3 确认一个工厂单
+
+入口：`confirmServerWrite(orderID,factoryOrder)`。
+
+输入：内存 `preview.payload`、人工确认的 `orderID`、`factoryOrder`、`--confirm-write`。
+
+```text
+confirmServerWrite(...)
+  → 把 payload 写入 runOrder(..., input: stdin JSON)
+  → order confirm-server-preview-memory --order-id ... --factory-order ... --confirm-write
+  → order_workflow.main() 读取 sys.stdin
+  → order_index.confirm_server_preview_memory(...)
+  → _confirm_memory_preview(...)
+      → 重新校验 payload、订单/工厂单身份和写入授权
+      → 把确认事实写入 workflow.sqlite3
+  → App 从预览中移除已确认工厂单
+  → 全部完成后 refreshDashboardAfterServerWrite()
+  → order list-index（仅本地刷新）
+```
+
+### 7.4 确认订单级材料和工厂单五金
+
+入口：`confirmServerMaterialPreview(skipHardwareOrderIDs)`。
+
+参数：stdin 内存预览、`--confirm-write`，以及零个或多个 `--skip-hardware-order <order_id>`。
+
+下一跳：`confirm_server_material_preview_memory()` → `_confirm_memory_preview()`。写入订单级板材/封边与对应工厂单五金；来料加工订单可在本次确认中显式跳过五金。
+
+### 7.5 忽略一个 Server 文件夹
+
+入口：`ignoreServerFolder(folderPath)`。
+
+```text
+ignoreServerFolder(path)
+  → order ignore-server-folder --folder <path>
+  → order_index.ignore_server_folder(config,Path(path))
+      → 读取该文件夹当前 fingerprint/观察期状态
+      → OrderIndexStore.set_ignored_server_folder(...)
+      → commit()
+      → 返回最新 issues
+  → Swift serverChangesExcludingFolder(pending, path)
+```
+
+只从当前 UI 移除被点击的文件夹；其余待处理文件夹保留。观察期内 fingerprint 改变会重新提醒，期满后按持久忽略规则处理。
+
+## 8. 待处理中心与人工归属
+
+待处理中心由 `buildPendingCenterItems(serverChanges,currentIssues,aimesReviews)` 合并三个独立来源。
+
+常见入口：
+
+| UI 动作 | CLI | Python 下一跳 | 写入 |
+| --- | --- | --- | --- |
+| 自动处理当前问题 | `order auto-resolve-issue --issue-key` | `auto_resolve_current_issue()` | 视问题类型更新 SQLite |
+| 人工确认订单归属 | `order resolve-issue --issue-key [--order-id]` | `resolve_current_issue()` | 是 |
+| 忽略 AIMES 记录 | `order ignore-aimes --ignore-key ...` | `ignore_aimes_factories()` | 是 |
+| 恢复 AIMES 忽略 | `order restore-aimes-ignore --ignore-key ...` | `restore_aimes_factories()` | 是 |
+| 把 AIMES 工厂单指派给订单 | `order assign-aimes-order --ignore-key X --order-id Y` | `assign_aimes_factory_order()` | 是 |
+| 撤销 AIMES 指派 | `order restore-aimes-assignment --ignore-key X` | `restore_aimes_order_assignment()` | 是 |
+
+所有人工身份写入都以当前 `issue_key/ignore_key` 为定位证据；不能只凭页面显示文本猜测数据库行。
+
+## 9. 订单详情、安装安排和成本
+
+### 9.1 读取订单详情
+
+入口：点击看板订单 → `loadOrderDetailFromDatabase(item)`。
+
+参数：`item.orderId`。
+
+```text
+loadOrderDetailFromDatabase(item)
+  → order detail --order-id <id>
+  → order_workflow.main()
+  → order_details.order_detail(config,order_id)
+      → 查询 workflow.sqlite3 的订单、工厂单、material_items、hardware_items 等事实
+      → _panel_products_by_name()/产品图片映射
+  → Swift applyOrderPreview(...) 组装详情页模型
+```
+
+这里读取的是中央事实，不重新解析 Server 文件，也不把 Traveler 当事实源。
+
+### 9.2 保存备注和安装日期
+
+入口：`saveOrderAnnotations(orderID,userNote,plannedDays,actualDays)`。
+
+输入：订单号、备注、计划安装日数组、实际安装日数组；每个日期项包含 `date` 和 `installer`。
+
+下一跳：`order save-order-annotations` → `order_index.save_order_annotations()` → `OrderIndexStore.save_order_annotations()` → SQLite commit → 返回更新后的 `list_order_index()` payload。
+
+### 9.3 计算与导出成本
+
+入口：`calculateSelectedOrderCost(export)`。
+
+```text
+export=false → order cost --order-id
+export=true  → order cost-export --order-id
+  → order_workflow.main()
+  → costing.calculate_order_cost(config,order_id)
+      → 读取中央材料/五金事实
+      → ProductDatabase / cost_price
+      → _aggregate_material_rows()
+      → _display_cost_lines()（仅展示排序/聚合投影）
+  → export 时继续 export_order_cost()
+      → _excel_row() / _style_rows()
+      → 保存并返回 export_path
+```
+
+原始成本 `lines` 和 App 展示用 `factory_lines` 是不同合同；不要为了 UI 排序改乱 Excel 需要的原始明细。
+
+## 10. 生产流程
+
+### 10.1 生产预览
+
+入口：`loadProductionPreview(orderID,factoryOrders)`。
+
+CLI 参数：`order production-preview --order-id <id> --factory-orders-json '[...]'`。
+
+下一跳：`production.production_preview(config,order_id,factory_orders)` → `_selected_factory_rows()`、`_order_material_rows()`、`cumulative_production_materials()` → 返回每个材料的总量、已消耗量和剩余量。
+
+### 10.2 准备生产批次
+
+入口：`prepareProduction(orderID,factoryOrders,materials,onResult)`。
+
+输入：工厂单数组；材料数组只传 `{key,quantity}`。下一跳：`order prepare-production` → `production.prepare_production()` → 校验工厂单、数量、剩余量并创建 prepared batch，返回 `batch_number`。
+
+准备成功不等于库存已扣，也不等于生产已完成。
+
+### 10.3 确认生产并扣减库存
+
+入口：`startDirectProduction(orderID,factoryOrders,materials,batchNumber)`。
+
+```text
+startDirectProduction(...)
+  → inventory outbound --order-id ... --production-batch ...
+      --production-materials-json [...] --factory-order ... --confirm-save
+  → inventory_main()
+  → inventory.run_jdy(action="outbound", production_materials=...)
+      → production.cumulative_production_materials(...)
+      → build_database_preview(...)
+      → InventoryOperationJournal.prepare(kind="production", ...)
+      → tools/jdy_inventory.mjs（逐单打开、填写、保存）
+      → _persist_single_outbound_result()（每个已确认单据立即落本地）
+      → InventorySyncStore.save_success(..., production_draft=...)
+      → production.record_completed_production()/相关数据库事务
+      → reconcile_outbound_statuses(config)
+  → Swift 刷新本地订单列表
+```
+
+外部保存成功和本地生产记录成功是两个证据。若外部结果不确定，Journal 标记 `verification_required`，后续重试必须先查历史，避免重复出库。
+
+## 11. 出货流程
+
+入口：订单看板“直接出货” → `startDirectOrderShipment(orderID,factoryOrders)`。
+
+参数：订单号、选择的工厂单；CLI 增加 `--shipment-only --confirm-save`。
+
+```text
+startDirectOrderShipment(...)
+  → inventory_main(action="outbound")
+  → run_jdy(..., shipment_only=true)
+      → build_database_preview(order_id, selected_factory_orders, shipment_only=true)
+      → assert_shipment_allowed(config,order_id,factory_orders)
+      → 无五金：mark_no_hardware_outbound()，只更新状态
+      → 有五金：InventoryOperationJournal.prepare(kind="shipment")
+      → jdy_inventory.mjs 逐单保存
+      → _persist_single_outbound_result()
+      → InventorySyncStore.save_success()
+      → reconcile_outbound_statuses()
+      → record_standard_outbound_baseline()
+  → refreshDashboardOrdersAfterOutbound()
+  → order list-index
+```
+
+`shipment-only` 不再扣订单材料；生产材料应在生产流程中处理。无五金工厂单不会创建空库存单，但会保存明确的本地出货状态事实。
+
+## 12. 库存页、商品目录和映射
+
+### 12.1 轻量加载 Traveler 列表
+
+入口：`loadInventory()` → `inventory list-names` → `list_traveler_names(config)`。
+
+只枚举符合名称规则的 Traveler 路径、mtime 和已有同步状态，不立即打开所有 Excel。点击文件后才调用预览。
+
+### 12.2 Traveler 库存预览
+
+入口：`previewSelectedInventory()`。
+
+参数：选择的 Traveler 路径数组和可选 `document_remark`。每个文件串行调用：
+
+```text
+inventory preview --traveler <path>
+  → build_preview(traveler_path, product_database, workflow_database)
+      → parse_traveler(path)
+      → order_stock_requirements()/stock_requirements()
+      → InventoryMappings
+      → match_item()/resolve_inventory_items()
+      → InventoryPreview.payload()
+```
+
+预览不会写库存系统。缺失或歧义映射使 `ready=false`，必须先处理后才能出库。
+
+### 12.3 数据库订单预览
+
+入口：`previewOrderInventory(orderID,factoryOrderNames,factoryOrders,productionBatchNumber,shipmentOnly)`。
+
+下一跳：`inventory order-preview` → `build_database_preview()`。材料、五金和出库范围直接来自 `workflow.sqlite3`；Traveler 不是这个路径的事实来源。
+
+### 12.4 商品目录更新
+
+入口：`updateInventoryCatalog()` → `inventory update-products`。
+
+```text
+inventory.update_catalog_online(config)
+  → run_jdy(config,"exportProducts",download_path)
+  → tools/jdy_inventory.mjs 导出商品 Excel
+  → ProductCatalog(download)
+  → _catalog_change_summary(old,new)
+  → import_catalog(config,download)
+      → 校验临时 Excel
+      → _replace_product_database(...)
+      → os.replace() 安装当前目录
+```
+
+### 12.5 打开库存专用 Chrome
+
+入口：`openInventoryChrome()` → `inventory open-chrome` → `open_inventory_chrome(config)`。
+
+参数来自 CDP endpoint、专用 profile 路径和 Chrome 可执行文件。已存在合格登录页面时复用；存在登录页时等待用户完成登录；否则启动带专用 `--user-data-dir` 和远程调试端口的 Chrome。
+
+### 12.6 人工映射和全局忽略
+
+| 动作 | CLI | Python 函数 | 事实表/结果 |
+| --- | --- | --- | --- |
+| 搜索商品 | `search-products --query` | `search_inventory_products()` | 只读商品库 |
+| 新增映射 | `set-mapping --item-name --product-code` | `save_manual_mapping()` | `inventory_resolution_rules` |
+| 修改映射 | `update-mapping --old-name --item-name --product-code` | `update_manual_mapping()` | 同上 |
+| 删除映射 | `remove-mapping --item-name` | `remove_manual_mapping()` | 同上 |
+| 加入忽略 | `ignore-item --item-name [--reason]` | `set_ignored_mapping(...,True)` | 同上，rule_type=ignore |
+| 修改忽略 | `update-ignore --old-name --name --ignored true` | `update_ignored_mapping()` | 同上 |
+| 恢复忽略 | `unignore-item --item-name` | `set_ignored_mapping(...,False)` | 删除忽略规则 |
+
+映射是业务事实，不应靠模糊名称自动写入。所有保存操作都在成功后重新预览当前对象。
+
+## 13. 生产文件与 Traveler
+
+### 13.1 列出源订单文件夹
+
+入口：`loadOrderFolders()` → `order list --source-root <path>` → `list_order_folders(config)` → `resolve_source_root()`。
+
+输入源根目录由页面的 owned/cut-to-size 选择决定。输出包括订单号、路径和修改时间。
+
+### 13.2 预览源订单
+
+入口：`previewOrderFolder(item)` → `order preview-related --folder <path>`。
+
+```text
+preview_related_orders(config,folder)
+  → related_order_ids(folder)
+  → 对每个 order_id 调 preview_order(config,folder,order_id)
+      → 选择/校验 material 文件
+      → parse_order_materials()/parse_material_room_rows()
+      → _choose_fittings() → core.parse_fittings_groups()
+      → _factory_names() → 板材清单/缓存/AIMES fallback
+      → _normalize_fittings()
+      → resolve_inventory_items()
+      → persist_preview() 写入已验证中央事实
+  → preview_payload()
+```
+
+关键参数：`folder`、可选 `order_id`、`include_hardware`、临时订单身份。返回材料、封边、工厂单、五金、warnings 和已有 Traveler 路径。
+
+### 13.3 自动生成缺失 material
+
+入口：`generateMissingMaterial()` → `order generate-material --folder --order-id` → `generate_material_from_reports()` → 写入新 material 工作簿 → `_record_generated_material_baseline()` 保存生成证据 → 重新预览订单。
+
+### 13.4 从中央数据库生成 Traveler
+
+入口：`generateSelectedOrder()` → `order generate-db --order-id`。
+
+```text
+generate_database_order_traveler(config,order_id)
+  → 从 workflow.sqlite3 读取材料、五金、工厂单
+  → 组装 OrderPreview/FactoryPreview
+  → generate_order_traveler(config,preview)
+      → 复制模板到临时工作簿
+      → _prepare_picking_list()
+      → _prepare_purchase_list()
+      → _fill_usage_list()/相关写入函数
+      → 保存临时文件并重新打开校验
+      → 原子替换目标
+```
+
+### 13.5 更新旧 Traveler
+
+入口：CLI `order update --folder` 或助手 `update_traveler`。
+
+`update_order_traveler()` 会先解析当前源事实、备份旧 Traveler、补齐/恢复模板工作表、保留允许保留的人工五金，再原子替换。备份成功、工作簿保存成功和重新打开校验成功分别是不同证据。
+
+### 13.6 人工五金
+
+入口：`order add-hardware` 或助手 `add_manual_hardware`。
+
+参数：`order_id`、完整 `factory_name`、`product_code`、正数 `quantity`、可选 `remarks`。第一次 `preview_manual_hardware()` 只返回预览；`--confirm-write` 后 `add_manual_hardware()` 写中央 SQLite，并在存在 Traveler 时备份、同步 Excel。
+
+## 14. 全部 Order CLI 命令对照
+
+以下表覆盖 `order_workflow.main()` 当前 `choices`。它用于定位入口，不替代上面的业务解释。
+
+| command | 必要/关键参数 | 直接分发函数 | 读写性质 |
+| --- | --- | --- | --- |
+| `list` | `--source-root` 可选 | `list_order_folders()` | 只读目录 |
+| `list-index` | 无 | `order_index.list_order_index()` | 只读中央事实（会执行必要 schema 准备） |
+| `detail` | `--order-id` | `order_details.order_detail()` | 只读 |
+| `cost` | `--order-id` | `costing.calculate_order_cost()` | 只读 |
+| `cost-export` | `--order-id` | `costing.export_order_cost()` | 写 Excel |
+| `backup-status` | 无 | `backup.backup_status()` | 检查 |
+| `backup-now` | 无 | `backup.perform_backup()` | 写备份 |
+| `sync-index` | refresh/full/snapshot 选项 | `order_index.sync_order_index()` | 按参数同步 SQLite |
+| `process-server-changes` | `--server-folder*`、`--include-hardware` | `process_server_changes()` | 兼容处理路径，会写事实 |
+| `process-server-folder` | `--folder` | `process_server_folder()` | 解析并写事实 |
+| `preview-server-changes` | `--server-folder*` | `preview_server_changes()` | 内存预览 |
+| `confirm-server-preview` | token/order/factory | `confirm_server_preview()` | `--confirm-write` 后写入 |
+| `confirm-server-material-preview` | token | `confirm_server_material_preview()` | `--confirm-write` 后写入 |
+| `confirm-server-preview-memory` | stdin/order/factory | `confirm_server_preview_memory()` | `--confirm-write` 后写入 |
+| `confirm-server-material-preview-memory` | stdin/skip list | `confirm_server_material_preview_memory()` | `--confirm-write` 后写入 |
+| `sync-aimes` | `--refresh-aimes` 或 `--aimes-if-needed` | `sync_aimes_index()` | 读取 AIMES并写身份事实 |
+| `scan-server` | 无 | `scan_server_changes()` | 发现变化；普通报表不确认写入 |
+| `ignore-server-folder` | `--folder` | `ignore_server_folder()` | 写忽略事实 |
+| `ignore-aimes` | `--ignore-key*` | `ignore_aimes_factories()` | 写 |
+| `restore-aimes-ignore` | `--ignore-key*` | `restore_aimes_factories()` | 写 |
+| `assign-aimes-order` | 单个 key + order | `assign_aimes_factory_order()` | 写 |
+| `restore-aimes-assignment` | 单个 key | `restore_aimes_order_assignment()` | 写 |
+| `auto-resolve-issue` | `--issue-key` | `auto_resolve_current_issue()` | 视问题写入 |
+| `resolve-issue` | `--issue-key` | `resolve_current_issue()` | 写 |
+| `save-order-annotations` | order/note/date JSON | `save_order_annotations()` | 写 |
+| `production-preview` | order/factory JSON | `production_preview()` | 只读 |
+| `prepare-production` | order/factory/material JSON | `prepare_production()` | 写 prepared batch |
+| `migrate-production-state` | 无 | `migrate_legacy_production_state()` | 数据迁移 |
+| `preview` | `--folder` | `preview_order()` + `preview_payload()` | 解析并持久化已验证事实 |
+| `preview-related` | `--folder` | `preview_related_orders()` | 同上，按关联订单拆分 |
+| `refresh-aimes` | 无 | `sync_aimes_index(force=True)` | 在线同步身份 |
+| `stock-check` | `--folder` | `inventory.check_order_stock()` | 外部库存只读 |
+| `set-ignore` | `--name* --ignored` | `order_workflow.set_ignored()` | 写全局忽略规则 |
+| `generate` | `--folder` | `generate_order_traveler()` | 写 Excel |
+| `generate-db` | `--order-id` | `generate_database_order_traveler()` | 写 Excel |
+| `temporary` | `--folder` | `generate_temporary_traveler()` | 写临时 Excel |
+| `generate-material` | folder/order | `generate_material_from_reports()` | 写 Excel和基线 |
+| `generate-material-from-travelers` | folder/order | `generate_material_from_travelers()` | 先预览，确认后写 |
+| `update` | `--folder` | `update_order_traveler()` | 备份并写 Excel |
+| `update-related` | `--folder` | `update_related_orders()` | 多订单写 Excel |
+| `add-hardware` | order/factory/code/quantity | `preview_manual_hardware()` / `add_manual_hardware()` | 确认后写 |
+| `add-factory` | order/factory/name | `add_manual_factory()` | 写身份事实 |
+| `assign-material` | folder/order/material file | `save_material_assignment()` | 写选择事实 |
+| `create-test-data` | `--target-root` | `test_data.create_local_test_source()` | 仅写测试目录 |
+
+## 15. 全部 Inventory CLI 命令对照
+
+| action | 必要/关键参数 | 直接分发函数 | 读写性质 |
+| --- | --- | --- | --- |
+| `list` | `--include-history` 可选 | `list_travelers()` | 打开 Traveler 读取 |
+| `list-names` | 无 | `list_traveler_names()` | 只枚举文件名/mtime |
+| `preview` | `--traveler` | `build_preview()` | 只读预览 |
+| `order-preview` | `--order-id`、factory/batch 选项 | `build_database_preview()` | 只读预览 |
+| `get-outbound-scope` | order/factory | `outbound_scope_decisions()` | 只读 |
+| `set-outbound-scope` | order/type/requirement | `set_outbound_scope()` | 写范围决定 |
+| `import-products` | `--source` | `import_catalog()` | 写本地商品库 |
+| `update-products` | 无 | `update_catalog_online()` | 读外部、写本地商品库 |
+| `open-chrome` | 无 | `open_inventory_chrome()` | 启动专用 Chrome |
+| `close-chrome` | 无 | `close_inventory_chrome()` | 关闭专用 Chrome |
+| `preflight` | 无 | `run_jdy("preflight")` | 外部只读/登录检查 |
+| `stock-check` | traveler/hardware 选项 | `check_stock()` | 外部只读库存 |
+| `repair-hardware` | 无 | `repair_hardware_inventory_codes()` | 修复中央 SKU 事实 |
+| `find-outbound` | `--order-name` | `run_jdy("findOutbound")` | 查询外部历史 |
+| `reconcile-folder` | `--folder` | `reconcile_folder_status()` | 对账并更新本地状态 |
+| `search-products` | `--query` | `search_inventory_products()` | 只读商品库 |
+| `set-mapping` | item/code | `save_manual_mapping()` | 写映射 |
+| `update-mapping` | old/item/code | `update_manual_mapping()` | 写映射 |
+| `remove-mapping` | item | `remove_manual_mapping()` | 删除映射 |
+| `list-mappings` | 无 | `list_inventory_mappings()` | 只读 |
+| `update-ignore` | old/name/ignored/reason | `update_ignored_mapping()` | 写忽略规则 |
+| `ignore-item` | item/reason | `set_ignored_mapping(...,True)` | 写忽略规则 |
+| `unignore-item` | item | `set_ignored_mapping(...,False)` | 删除忽略规则 |
+| `outbound` | order 或 traveler；确认时 `--confirm-save` | `run_jdy("outbound",...)` | 外部和本地写入 |
+
+## 16. 如何沿调用链自己调试
+
+针对一个具体操作，建议固定做六步：
+
+1. 在 App 页面找到按钮绑定的 Swift 函数。
+2. 看该函数传给 `runOrder` / `runInventory` 的**完整 arguments 数组**。
+3. 在 `order_workflow.main()` 或 `inventory_main()` 找对应 command/action 分支。
+4. 跳到分支调用的业务函数，先读输入校验、返回结构和副作用，再读私有辅助函数。
+5. 用同一参数直接运行 `./scripts/pp-flowhub ...`，只在安全的只读命令上这样做；写操作要保留预览/确认边界。
+6. 用相同 `operation_id` 对照 `operation-log.jsonl`、SQLite 行、Excel 或外部单据号，确认本次真实执行结果。
+
+不要只看页面最终一句状态，也不要只看一个函数名就推断整条链已经执行。
+
+## 17. 推荐学习顺序
+
+### 第一阶段：一周内建立全局地图
+
+1. 读 `00-architecture-overview.md` 和本文第 1～5 节。
+2. 在 App 里只观察一次订单看板启动，画出“本地缓存 → 备份 → AIMES → Server”的四段时间线。
+3. 对照 `TravelerAssistant.swift: runOrder()` 和 `order_workflow.py: main()`，理解跨进程 JSON 合同。
+
+### 第二阶段：按业务场景跟读
+
+建议顺序：订单详情 → Server 预览/确认 → 生产 → 出货 → Traveler。每次只跟一条链，并为每个函数记五件事：输入、返回、事实源、副作用、不变量。
+
+### 第三阶段：从测试反推规则
+
+在 `08-support-test-symbol-reference.md` 搜索目标函数名，再读对应测试。测试名称通常比实现代码更接近业务语言，并能告诉你哪些边界不允许破坏。
+
+### 第四阶段：做低风险练习
+
+1. 只修改一个纯展示字段，并更新对应 Swift 契约测试。
+2. 给一个只读 Python 函数新增返回字段，并更新 CLI 测试。
+3. 在隔离临时目录中修改 Traveler 模板写入逻辑，验证工作表、合并单元格和重新打开结果。
+4. 最后再接触 Server 确认、生产完成或库存出库等真实写入路径。
+
+## 18. 文档维护规则
+
+代码变化后运行：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 tools/generate_code_reference.py
+```
+
+生成器负责文件和符号全集；本文必须人工维护，因为业务意图、审批边界和动态调用不能仅靠静态扫描可靠推断。新增用户可见操作时，应同时补充：
+
+- Swift 页面入口和传参；
+- CLI command/action；
+- Python 业务入口与下一跳；
+- 读取事实源；
+- 写入副作用；
+- 返回合同；
+- 失败或不确定结果的恢复方式；
+- 对应测试。

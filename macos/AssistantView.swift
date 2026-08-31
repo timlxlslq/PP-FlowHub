@@ -679,62 +679,51 @@ extension AppModel {
 
 }
 
+private enum AssistantDashboardTypography {
+    static let metricLabel: CGFloat = 15
+    static let metricValue: CGFloat = 40
+    static let operationLabel: CGFloat = 15
+    static let operationTitle: CGFloat = 20
+    static let operationDetail: CGFloat = 14
+    static let boardTitle: CGFloat = 28
+    static let boardSubtitle: CGFloat = 15
+    static let orderID: CGFloat = 20
+    static let stageTitle: CGFloat = 14
+    static let stageValue: CGFloat = 13
+    static let orderIdentityText = Color(red: 0.08, green: 0.36, blue: 0.20)
+}
+
 struct AssistantView: View {
     @ObservedObject var model: AppModel
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @StateObject private var speech = SpeechInputController()
     @StateObject private var pushToTalkShortcut = PushToTalkShortcutMonitor()
     @State private var showCommandHints = false
     @State private var commandHintsCloseTask: Task<Void, Never>?
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 14) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("今日工作台").font(.title3).fontWeight(.semibold)
-                    Text(Date.now.formatted(.dateTime.year().month().day()) + " · 生产工作流概览")
-                        .font(.caption).foregroundColor(.secondary)
-                }
-                Spacer()
-                AppStatusBadge(text: "本地优先", kind: .success)
-                AppStatusBadge(
-                    text: model.assistantRunning ? "任务执行中" : "队列就绪",
-                    kind: model.assistantRunning ? .info : .neutral
-                )
-            }
-            .padding(.horizontal, 28)
-            .frame(height: 0)
-            .hidden()
-
-            ScrollView {
-                VStack(spacing: 24) {
-                    OrderDashboardMetricsView(model: model)
-
-                    HStack(alignment: .top, spacing: 16) {
-                        VStack(spacing: 16) {
-                            commandCard
-                            workspaceCard
-                        }
-                        .frame(maxWidth: .infinity)
-
-                        VStack(spacing: 14) {
-                            approvalCard
-                            queueCard
-                            usageCard
-                        }
-                        .frame(width: 320)
+        VStack(spacing: 18) {
+            commandStrip
+            orderStatusBoard
+            if showsAssistantWorkspace {
+                HStack(alignment: .top, spacing: 16) {
+                    workspaceCard.frame(maxWidth: .infinity)
+                    if model.assistantPendingApproval {
+                        approvalCard.frame(width: 320)
                     }
                 }
-                .padding(.horizontal, 28)
-                .padding(.vertical, 20)
-                .frame(maxWidth: 1500)
-                .frame(maxWidth: .infinity)
             }
         }
+        .padding(.horizontal, AppLayout.pageHorizontalPadding)
+        .padding(.vertical, AppLayout.pageVerticalPadding)
+        .frame(maxWidth: AppLayout.pageContentMaxWidth)
+        .frame(maxWidth: .infinity, alignment: .top)
         .appPageFrame()
         .onChange(of: speech.transcript) { _, value in
             if !value.isEmpty { model.assistantInput = canonicalSpeechCommand(value) }
         }
         .onAppear {
+            model.startOrderDashboard()
             pushToTalkShortcut.install(
                 onPress: { speech.beginPushToTalk() },
                 onRelease: { finishPushToTalk() }
@@ -745,6 +734,396 @@ struct AssistantView: View {
             pushToTalkShortcut.uninstall()
             speech.stop()
         }
+    }
+
+    private var commandStrip: some View {
+        AppSurfaceCard(padding: 0) {
+            VStack(spacing: 0) {
+                HStack(spacing: 12) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(AppPalette.accent)
+                        .frame(width: 38, height: 38)
+                        .background(AppPalette.accent.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    TextField("说或输入：查找订单、查询库存、生成 Traveler…", text: $model.assistantInput)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 16))
+                        .padding(.horizontal, 14)
+                        .frame(height: 46)
+                        .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .onSubmit { model.runAssistantCommand() }
+                        .onHover { hovering in
+                            if hovering { showCommandHintPopover() }
+                            else { scheduleCommandHintClose() }
+                        }
+                        .popover(isPresented: $showCommandHints, arrowEdge: .bottom) {
+                            AssistantCommandHintsContent()
+                                .onHover { hovering in
+                                    if hovering { showCommandHintPopover() }
+                                    else { scheduleCommandHintClose() }
+                                }
+                        }
+                    Image(systemName: speech.isHolding ? "waveform.circle.fill" : "mic.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(speech.isHolding ? AppPalette.danger : AppPalette.accent)
+                        .frame(width: 46, height: 46)
+                        .background(AppPalette.accent.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { _ in speech.beginPushToTalk() }
+                                .onEnded { _ in finishPushToTalk() }
+                        )
+                        .help("按住说话，松开执行（⌥Space）")
+                    Button("执行") { model.runAssistantCommand() }
+                        .buttonStyle(.glassProminent)
+                        .appActionButton(minWidth: 88)
+                        .disabled(model.assistantInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    AppStatusBadge(
+                        text: model.assistantRunning ? "执行中" : "本地优先",
+                        kind: model.assistantRunning ? .info : .success
+                    )
+                }
+                .padding(16)
+
+                Divider()
+
+                currentOperationSummary
+                    .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
+                    .padding(.horizontal, 22)
+                    .padding(.vertical, 12)
+            }
+        }
+    }
+
+    private var orderStatusBoard: some View {
+        AppSurfaceCard(padding: 0) {
+            VStack(spacing: 0) {
+                HStack(spacing: 0) {
+                    assistantMetric("总订单数", value: effectiveOrders.count, symbol: "square.stack.3d.up", color: .primary)
+                    Divider().frame(height: 66)
+                    assistantMetric("本月已完成", value: monthlyCompletedCount, symbol: "checkmark.circle", color: AppPalette.success)
+                    Divider().frame(height: 66)
+                    assistantMetric("正在进行", value: ongoingOrders.count, symbol: "waveform.path.ecg", color: AppPalette.accent)
+                }
+                .padding(.vertical, 10)
+
+                Divider()
+
+                Group {
+                    if ongoingOrders.isEmpty {
+                        VStack(spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 30))
+                                .foregroundColor(AppPalette.success)
+                            Text("当前没有进行中的订单")
+                                .font(.system(size: 18, weight: .semibold))
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 170)
+                    } else {
+                        ScrollView(.vertical) {
+                            LazyVStack(spacing: 12) {
+                                ForEach(ongoingOrders) { item in
+                                    assistantOrderCard(item)
+                                }
+                            }
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 16)
+                        }
+                        .frame(maxHeight: 360)
+                        .scrollIndicators(.automatic)
+                    }
+                }
+            }
+        }
+    }
+
+    private func assistantMetric(_ title: String, value: Int, symbol: String, color: Color) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundColor(color)
+                .frame(width: 17, height: 18)
+                .padding(.top, 1)
+            VStack(alignment: .center, spacing: 5) {
+                Text(title)
+                    .font(.system(size: AssistantDashboardTypography.metricLabel, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                Text("\(value)")
+                    .font(.system(size: AssistantDashboardTypography.metricValue, weight: .semibold, design: .rounded).monospacedDigit())
+                    .foregroundColor(color)
+            }
+        }
+        .frame(width: 140, height: 92, alignment: .leading)
+        .padding(.horizontal, 16)
+    }
+
+    private var currentOperationSummary: some View {
+        let operation = currentAssistantOperation
+        return HStack(spacing: 12) {
+            Image(systemName: operation.running ? "arrow.triangle.2.circlepath.circle.fill" : "pause.circle.fill")
+                .font(.system(size: 23))
+                .foregroundColor(operation.running ? AppPalette.accent : .secondary)
+                .symbolEffect(.rotate, options: .repeating, isActive: operation.running)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("当前操作")
+                    .font(.system(size: AssistantDashboardTypography.operationLabel, weight: .medium))
+                    .foregroundColor(.secondary)
+                Text(operation.title)
+                    .font(.system(size: AssistantDashboardTypography.operationTitle, weight: .semibold))
+                    .lineLimit(1)
+                if !operation.detail.isEmpty {
+                    Text(operation.detail)
+                        .font(.system(size: AssistantDashboardTypography.operationDetail))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                if operation.running {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .tint(AppPalette.accent)
+                        .frame(maxWidth: 260)
+                }
+            }
+        }
+    }
+
+    private func assistantOrderCard(_ item: OrderDashboardItem) -> some View {
+        OrderDashboardClickContainer(
+            onSingleClick: {},
+            onDoubleClick: { openOrderCenter(item.orderId) }
+        ) {
+            HStack(alignment: .center, spacing: 6) {
+                ZStack {
+                    Text(item.orderId)
+                        .font(.system(size: AssistantDashboardTypography.orderID, weight: .semibold, design: .rounded))
+                        .foregroundColor(AssistantDashboardTypography.orderIdentityText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.82)
+                        .padding(.horizontal, 34)
+                    HStack {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(AssistantDashboardTypography.orderIdentityText.opacity(0.82))
+                            .accessibilityHidden(true)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 12)
+                }
+                .frame(width: 172, height: 42, alignment: .center)
+                .background(AppPalette.success.opacity(0.10), in: Capsule())
+                .glassEffect(.regular.tint(AppPalette.success.opacity(0.12)), in: Capsule())
+                .padding(.leading, 10)
+                assistantProgressRail(item)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .glassEffect(.clear, in: RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func assistantProgressRail(_ item: OrderDashboardItem) -> some View {
+        let stages: [(String, Bool, String, Color, String)] = [
+            ("拆单", item.factoryCount > 0, item.factoryCount > 0 ? "\(item.factoryCount)/\(item.factoryCount)" : "—", Color.indigo, "rectangle.split.3x1"),
+            ("优化", item.optimizedCount == item.factoryCount, assistantProgressValue(item.optimizationProgress), AppPalette.accent, "wand.and.stars"),
+            ("生产", item.producedCount == item.factoryCount, assistantProgressValue(item.productionProgress), AppPalette.cyan, "gearshape.2"),
+            ("出货", item.shippedCount == item.factoryCount, assistantProgressValue(item.outboundProgress), AppPalette.accent, "shippingbox.fill"),
+        ]
+        let currentIndex = stages.firstIndex(where: { !$0.1 }) ?? stages.count - 1
+        let activeConnectorIndex = !stages[currentIndex].1 && currentIndex > 0 ? currentIndex - 1 : nil
+        return ZStack(alignment: .topLeading) {
+            GeometryReader { geometry in
+                let columnWidth = geometry.size.width / CGFloat(stages.count)
+                ForEach(0..<(stages.count - 1), id: \.self) { index in
+                    let connector = Path { path in
+                        let centerY: CGFloat = 41
+                        let startX = columnWidth * (CGFloat(index) + 0.5) + 20
+                        let endX = columnWidth * (CGFloat(index + 1) + 0.5) - 20
+                        path.move(to: CGPoint(x: startX, y: centerY))
+                        path.addLine(to: CGPoint(x: endX, y: centerY))
+                    }
+                    connector.stroke(
+                        stages[index].1 && stages[index + 1].1 ? AppPalette.success : AppPalette.separator,
+                        style: StrokeStyle(lineWidth: 4, lineCap: .round)
+                    )
+                    if activeConnectorIndex == index {
+                        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: accessibilityReduceMotion)) { context in
+                            let elapsed = context.date.timeIntervalSinceReferenceDate
+                            let dashPhase = accessibilityReduceMotion
+                                ? CGFloat.zero
+                                : -CGFloat(elapsed.truncatingRemainder(dividingBy: 1.2) / 1.2) * 28
+                            connector.stroke(
+                                LinearGradient(
+                                    colors: [AppPalette.success.opacity(0.86), stages[currentIndex].3.opacity(0.92)],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                ),
+                                style: StrokeStyle(
+                                    lineWidth: 3,
+                                    lineCap: .round,
+                                    dash: [7, 7],
+                                    dashPhase: dashPhase
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+            GlassEffectContainer(spacing: 20) {
+                HStack(spacing: 0) {
+                    ForEach(Array(stages.enumerated()), id: \.offset) { index, stage in
+                        VStack(spacing: 0) {
+                            Text(stage.0)
+                                .font(.system(size: AssistantDashboardTypography.stageTitle, weight: .semibold))
+                                .frame(height: 18)
+                            assistantStageIcon(
+                                completed: stage.1,
+                                current: index == currentIndex && !stage.1,
+                                color: stage.3,
+                                symbol: stage.4
+                            )
+                            .padding(.top, 4)
+                            Text(stage.2)
+                                .font(.system(size: AssistantDashboardTypography.stageValue).monospacedDigit())
+                                .foregroundColor(.secondary)
+                                .padding(.top, 3)
+                                .frame(width: 54, height: 19, alignment: .center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("\(stage.0) \(stage.2)")
+                    }
+                }
+            }
+        }
+    }
+
+    private func assistantStageIcon(
+        completed: Bool,
+        current: Bool,
+        color: Color,
+        symbol: String
+    ) -> some View {
+        let iconColor = completed ? AppPalette.success : color
+        return ZStack {
+            Circle()
+                .fill(completed ? AppPalette.success.opacity(0.08) : (current ? color.opacity(0.06) : Color.white.opacity(0.10)))
+            Image(systemName: completed ? "checkmark" : symbol)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 18, height: 18)
+                .foregroundStyle(completed || current ? iconColor : Color.secondary.opacity(0.62))
+                .contentTransition(.symbolEffect(.replace))
+        }
+        .frame(width: 38, height: 38)
+        .glassEffect(
+            completed
+                ? .regular.tint(AppPalette.success.opacity(0.20))
+                : (current ? .regular.tint(color.opacity(0.17)) : .clear),
+            in: Circle()
+        )
+        .overlay {
+            Circle()
+                .stroke(
+                    completed || current ? iconColor.opacity(0.92) : AppPalette.separator.opacity(0.85),
+                    lineWidth: current ? 2.5 : 2
+                )
+        }
+        .shadow(
+            color: completed || current ? iconColor.opacity(0.13) : Color.clear,
+            radius: 5,
+            y: 2
+        )
+    }
+
+    private func assistantProgressValue(_ value: String) -> String {
+        value.replacingOccurrences(of: " ", with: "")
+    }
+
+    private var ongoingOrders: [OrderDashboardItem] {
+        effectiveOrders
+            .filter { $0.stage != "已出货" }
+            .sorted { ($0.latestSplitTime, $0.orderId) > ($1.latestSplitTime, $1.orderId) }
+    }
+
+    private var monthlyCompletedCount: Int {
+        effectiveOrders.filter {
+            $0.stage == "已出货" && dashboardTimestamp($0.completedAt, isInSameMonthAs: Date.now)
+        }.count
+    }
+
+    private var effectiveOrders: [OrderDashboardItem] {
+        model.dashboardOrders.filter { $0.orderType != "temporary" && $0.stage != "数据异常" }
+    }
+
+    private var showsAssistantWorkspace: Bool {
+        model.assistantRunning || model.assistantPendingApproval ||
+            model.assistantOutput != "输入或说出一条指令。" ||
+            !model.assistantStockRows.isEmpty || model.assistantOrderPreview != nil ||
+            !model.assistantOrderList.isEmpty
+    }
+
+    private var currentAssistantOperation: (title: String, detail: String, running: Bool) {
+        if model.assistantRunning {
+            return (displayedTask?.text ?? "正在执行助手命令", displayedTask?.status ?? "", true)
+        }
+        if model.inventoryRunning {
+            return ("正在处理库存系统", model.dashboardInventoryOperationStatus, true)
+        }
+        if model.orderRunning || dashboardStatusIsInProgress(model.dashboardSyncStatus) {
+            return ("正在刷新订单数据", model.dashboardSyncStatus, true)
+        }
+        return ("当前无正在进行的操作", "", false)
+    }
+
+    private func assistantStageSummary(_ item: OrderDashboardItem) -> String {
+        switch item.stage {
+        case "已拆单待优化": return "拆单完成，等待 AICNC 优化"
+        case "部分优化": return "仍有 \(max(0, item.factoryCount - item.optimizedCount)) 个工厂单待优化"
+        case "已优化": return "全部工厂单优化完成，等待生产"
+        case "部分生产": return "正在生产"
+        case "已生产": return "生产完成，等待安排出货"
+        case "部分出货", "部分生产，部分出货": return "正在分批出货"
+        case "待确认": return "工厂单归属等待确认"
+        case "数据异常": return item.validationMessage.isEmpty ? "订单数据需要检查" : item.validationMessage
+        default: return item.stage
+        }
+    }
+
+    private func assistantOrderDates(_ item: OrderDashboardItem) -> String {
+        var values: [String] = []
+        if !item.latestSplitTime.isEmpty {
+            values.append("最近拆单 \(assistantDate(item.latestSplitTime))")
+        }
+        if !item.optimizationCompletedAt.isEmpty {
+            values.append("完成优化 \(assistantDate(item.optimizationCompletedAt))")
+        }
+        return values.isEmpty ? "业务时间待同步" : values.joined(separator: "  ·  ")
+    }
+
+    private func assistantDate(_ value: String) -> String {
+        guard let date = dashboardBusinessDate(value) else { return appDisplayTimestamp(value) }
+        return date.formatted(.dateTime.month().day().hour().minute())
+    }
+
+    private func assistantStageKind(_ stage: String) -> AppStatusBadge.Kind {
+        switch stage {
+        case "数据异常": return .danger
+        case "待确认", "部分优化": return .warning
+        case "已生产", "已优化": return .success
+        default: return .info
+        }
+    }
+
+    private func openOrderCenter(_ orderID: String?) {
+        model.requestedOrderCenterOrderID = orderID ?? ""
+        NotificationCenter.default.post(name: .ppOpenOrderCenter, object: nil)
     }
 
     private var commandCard: some View {
@@ -782,8 +1161,7 @@ struct AssistantView: View {
                     Image(systemName: speech.isHolding ? "waveform.circle.fill" : "mic.fill")
                         .foregroundColor(speech.isHolding ? AppPalette.danger : AppPalette.accent)
                         .frame(width: 44, height: 44)
-                        .background(AppPalette.accent.opacity(0.10))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                         .contentShape(Rectangle())
                         .gesture(
                             DragGesture(minimumDistance: 0)
@@ -792,7 +1170,7 @@ struct AssistantView: View {
                         )
                         .help("按住说话，松开执行（⌥Space）")
                     Button("执行") { model.runAssistantCommand() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.glassProminent)
                         .appActionButton(minWidth: 88)
                         .disabled(model.assistantInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
@@ -894,7 +1272,7 @@ struct AssistantView: View {
                         }
                         .appActionButton(minWidth: 72)
                         Button("确认执行") { model.runAssistantCommand(approved: true) }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.glassProminent)
                             .appActionButton()
                     }
                 } else {

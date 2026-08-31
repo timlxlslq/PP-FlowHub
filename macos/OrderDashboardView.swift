@@ -26,15 +26,190 @@ let orderDashboardMetricSpacing: CGFloat = 10
 let orderDashboardFactoryColumnWidths: [CGFloat] = [150, 220, 110, 110, 120, 170]
 let orderDashboardFactorySelectionColumnWidth: CGFloat = 54
 let orderDashboardOperationColumnWidth: CGFloat = 136
+let orderDashboardFactoryCountColumnWidth: CGFloat = 90
+let orderDashboardUpdatedAtColumnWidth: CGFloat = 176
 let dashboardMessageVisibleRowCount = 3
 let dashboardMessageRowHeight: CGFloat = 74
 let dashboardMessageViewportHeight = CGFloat(dashboardMessageVisibleRowCount) * dashboardMessageRowHeight
 let dashboardMessageHoverDelay: TimeInterval = 1.0
 let dashboardMessageHoverCloseGrace: TimeInterval = 0.8
 let panelMaterialHoverDelay: TimeInterval = 1.0
-let orderInstallationDatePickerPopoverWidth: CGFloat = 320
-let orderInstallationDatePickerPopoverHeight: CGFloat = 300
+let orderInstallationDateButtonWidth: CGFloat = 184
 let orderInstallationDisplayDateFormat = "yyyy年M月d日"
+
+struct AppGlassDatePickerCalendar: View {
+    @Binding var selection: Date
+    @State private var displayedMonth: Date
+    let compact: Bool
+
+    private let weekdays = ["日", "一", "二", "三", "四", "五", "六"]
+
+    init(selection: Binding<Date>, compact: Bool = false) {
+        _selection = selection
+        _displayedMonth = State(initialValue: selection.wrappedValue)
+        self.compact = compact
+    }
+
+    private var daySize: CGFloat { compact ? 30 : 34 }
+    private var gridSpacing: CGFloat { compact ? 4 : 6 }
+    private var columns: [GridItem] {
+        Array(repeating: GridItem(.fixed(daySize), spacing: gridSpacing), count: 7)
+    }
+
+    private var calendar: Calendar {
+        var value = Calendar(identifier: .gregorian)
+        value.locale = Locale(identifier: "zh_CN")
+        value.timeZone = .current
+        value.firstWeekday = 1
+        return value
+    }
+
+    private var gridDates: [Date] {
+        guard let month = calendar.dateInterval(of: .month, for: displayedMonth) else { return [] }
+        let firstDay = calendar.startOfDay(for: month.start)
+        let leadingDays = (calendar.component(.weekday, from: firstDay) - calendar.firstWeekday + 7) % 7
+        guard let gridStart = calendar.date(byAdding: .day, value: -leadingDays, to: firstDay) else { return [] }
+        return (0..<42).compactMap { offset in
+            calendar.date(byAdding: .day, value: offset, to: gridStart)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: compact ? 10 : 13) {
+            HStack(spacing: 10) {
+                Text(appGlassDatePickerMonthTitle(displayedMonth))
+                    .font(.system(size: 20, weight: .semibold, design: .rounded))
+                Spacer(minLength: 12)
+                monthButton(symbol: "chevron.left", delta: -1, label: "上个月")
+                Button {
+                    displayedMonth = Date()
+                } label: {
+                    Circle()
+                        .fill(AppPalette.accent.opacity(0.82))
+                        .frame(width: 9, height: 9)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .help("回到本月")
+                .accessibilityLabel("回到本月")
+                monthButton(symbol: "chevron.right", delta: 1, label: "下个月")
+            }
+
+            LazyVGrid(columns: columns, spacing: gridSpacing) {
+                ForEach(weekdays, id: \.self) { weekday in
+                    Text(weekday)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: daySize, height: compact ? 20 : 24)
+                }
+
+                ForEach(gridDates, id: \.self) { date in
+                    dayButton(date)
+                }
+            }
+        }
+        .padding(compact ? 12 : 18)
+        .frame(width: compact ? 278 : 316)
+        .glassEffect(
+            .regular.tint(Color.white.opacity(0.12)),
+            in: RoundedRectangle(cornerRadius: 24, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Color.white.opacity(0.38), lineWidth: 1)
+        }
+        .onAppear { displayedMonth = selection }
+    }
+
+    private func monthButton(symbol: String, delta: Int, label: String) -> some View {
+        Button {
+            if let nextMonth = calendar.date(byAdding: .month, value: delta, to: displayedMonth) {
+                displayedMonth = nextMonth
+            }
+        } label: {
+            Image(systemName: symbol)
+                .font(.caption.weight(.bold))
+                .frame(width: 28, height: 28)
+                .glassEffect(.clear, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .help(label)
+        .accessibilityLabel(label)
+    }
+
+    private func dayButton(_ date: Date) -> some View {
+        let isSelected = calendar.isDate(date, inSameDayAs: selection)
+        let isToday = calendar.isDateInToday(date)
+        let isDisplayedMonth = calendar.isDate(date, equalTo: displayedMonth, toGranularity: .month)
+
+        return Button {
+            selection = appGlassDatePickerDate(date, preservingTimeFrom: selection, calendar: calendar)
+            if !isDisplayedMonth { displayedMonth = date }
+        } label: {
+            ZStack {
+                if isSelected {
+                    Circle()
+                        .fill(AppPalette.accent.opacity(0.90))
+                        .glassEffect(.regular.tint(AppPalette.accent.opacity(0.28)), in: Circle())
+                } else if isToday {
+                    Circle()
+                        .stroke(AppPalette.accent.opacity(0.72), lineWidth: 1.5)
+                }
+                Text("\(calendar.component(.day, from: date))")
+                    .font(.system(size: 14, weight: isSelected ? .semibold : .regular, design: .rounded))
+                    .foregroundStyle(
+                        isSelected
+                            ? Color.white
+                            : (isDisplayedMonth ? Color.primary : Color.secondary.opacity(0.48))
+                    )
+            }
+            .frame(width: daySize, height: daySize)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(appGlassDatePickerDisplayDate(date))
+        .accessibilityLabel(appGlassDatePickerDisplayDate(date))
+        .accessibilityValue(isSelected ? "已选择" : "")
+    }
+}
+
+func appGlassDatePickerDate(_ date: Date, preservingTimeFrom original: Date, calendar: Calendar) -> Date {
+    let dateParts = calendar.dateComponents([.year, .month, .day], from: date)
+    let timeParts = calendar.dateComponents([.hour, .minute, .second, .nanosecond], from: original)
+    var combined = DateComponents()
+    combined.timeZone = calendar.timeZone
+    combined.year = dateParts.year
+    combined.month = dateParts.month
+    combined.day = dateParts.day
+    combined.hour = timeParts.hour
+    combined.minute = timeParts.minute
+    combined.second = timeParts.second
+    combined.nanosecond = timeParts.nanosecond
+    return calendar.date(from: combined) ?? date
+}
+
+private func appGlassDatePickerDisplayDate(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "zh_CN")
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.dateFormat = "yyyy年M月d日"
+    return formatter.string(from: date)
+}
+
+private func appGlassDatePickerMonthTitle(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "zh_CN")
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.dateFormat = "yyyy年M月"
+    return formatter.string(from: date)
+}
+
+extension View {
+    func appGlassDatePickerPopoverSurface() -> some View {
+        padding(10)
+            .presentationBackground(.clear)
+    }
+}
 
 func currentIssueRequiresInventoryMapping(_ issue: CurrentIssue) -> Bool {
     if issue.kind == "material_mapping" || issue.kind == "hardware_mapping" {
@@ -1215,7 +1390,13 @@ struct OrderDashboardView: View {
         dashboardSections
             .padding(AppLayout.contentPadding)
         .appPageFrame()
-        .onAppear { model.startOrderDashboard() }
+        .onAppear {
+            model.startOrderDashboard()
+            openRequestedOrderIfAvailable()
+        }
+        .onChange(of: model.dashboardOrders.map(\.id)) { _, _ in
+            openRequestedOrderIfAvailable()
+        }
         .sheet(item: $detailOrder) { item in
             OrderDashboardDetailPage(
                 model: model,
@@ -1315,18 +1496,31 @@ struct OrderDashboardView: View {
             }
             .padding(.horizontal, 10)
             .frame(width: 360, height: AppLayout.controlHeight)
-            .background(AppPalette.surface)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppPalette.separator))
+            .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-            Picker("状态", selection: $statusFilter) {
-                Text("未完成订单").tag("未完成订单")
+            Menu {
+                Button("未完成订单") { statusFilter = "未完成订单" }
                 ForEach(orderDashboardStatuses, id: \.self) { status in
-                    Text(status).tag(status)
+                    Button(status) { statusFilter = status }
                 }
+            } label: {
+                HStack(spacing: 7) {
+                    Text(statusFilter)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundColor(.secondary)
+                }
+                .font(.callout.weight(.medium))
+                .padding(.horizontal, 11)
+                .frame(width: 130, height: AppLayout.controlHeight, alignment: .leading)
+                .background(AppPalette.subtleSurface)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
-            .labelsHidden()
-            .frame(width: 130, height: AppLayout.controlHeight)
+            .menuStyle(.borderlessButton)
+            .accessibilityLabel("状态")
+            .help("按订单状态筛选")
 
             Spacer(minLength: 0)
             Button {
@@ -1497,7 +1691,7 @@ struct OrderDashboardView: View {
             }
             .padding(.horizontal, 12)
             .frame(height: 44)
-            .background(AppPalette.subtleSurface)
+            .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         } else {
             HStack(spacing: 10) {
                 Image(systemName: "pause.circle.fill").foregroundColor(.secondary)
@@ -1506,7 +1700,7 @@ struct OrderDashboardView: View {
             }
             .padding(.horizontal, 12)
             .frame(height: 44)
-            .background(AppPalette.subtleSurface)
+            .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
     }
 
@@ -1571,17 +1765,21 @@ struct OrderDashboardView: View {
                             }
                             .frame(maxWidth: .infinity, minHeight: 220)
                         } else {
-                            ForEach(filteredOrders) { item in
-                                orderRow(item)
-                                if item.id != filteredOrders.last?.id { Divider() }
+                            ForEach(Array(filteredOrders.enumerated()), id: \.element.id) { index, item in
+                                let isLastRow = index == filteredOrders.count - 1
+                                orderRow(item, isLastRow: isLastRow)
+                                if !isLastRow { Divider() }
                             }
                         }
                     }
                 }
                 .frame(maxHeight: .infinity)
             }
+            .clipShape(RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous))
         }
         .frame(maxHeight: .infinity)
+        .clipShape(RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous))
+        .mask(RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous))
     }
 
     private var orderTableHeader: some View {
@@ -1590,11 +1788,13 @@ struct OrderDashboardView: View {
             tableHeader("订单")
             tableHeader("状态")
             tableHeader("工厂单")
+                .frame(width: orderDashboardFactoryCountColumnWidth)
             tableHeader("材料")
             tableHeader("优化进度")
             tableHeader("生产进度")
             tableHeader("出货进度")
             tableHeader("更新时间")
+                .frame(width: orderDashboardUpdatedAtColumnWidth)
             tableHeader("操作")
                 .frame(width: orderDashboardOperationColumnWidth)
         }
@@ -1602,13 +1802,33 @@ struct OrderDashboardView: View {
         .foregroundColor(.secondary)
         .padding(.vertical, 11)
         .background(AppPalette.subtleSurface)
+        .clipShape(
+            UnevenRoundedRectangle(
+                cornerRadii: .init(
+                    topLeading: AppLayout.cardCornerRadius,
+                    bottomLeading: 0,
+                    bottomTrailing: 0,
+                    topTrailing: AppLayout.cardCornerRadius
+                ),
+                style: .continuous
+            )
+        )
     }
 
-    private func orderRow(_ item: OrderDashboardItem) -> some View {
+    private func orderRow(_ item: OrderDashboardItem, isLastRow: Bool = false) -> some View {
         let isExpanded = expandedOrderID == item.orderId
         let isSelected = model.selectedOrderId.caseInsensitiveCompare(item.orderId) == .orderedSame
             && model.selectedOrderPath == item.sourceFolder
         let status = item.stage
+        let rowShape = UnevenRoundedRectangle(
+            cornerRadii: .init(
+                topLeading: 0,
+                bottomLeading: isLastRow && !isExpanded ? AppLayout.cardCornerRadius : 0,
+                bottomTrailing: isLastRow && !isExpanded ? AppLayout.cardCornerRadius : 0,
+                topTrailing: 0
+            ),
+            style: .continuous
+        )
         return VStack(spacing: 0) {
             HStack(spacing: 0) {
                 OrderDashboardClickContainer(
@@ -1657,6 +1877,7 @@ struct OrderDashboardView: View {
                         Text(item.factoryCount > 0 ? "\(item.factoryCount)" : "—")
                             .fontWeight(.semibold)
                     }
+                    .frame(width: orderDashboardFactoryCountColumnWidth)
                     tableCell {
                         VStack(spacing: 4) {
                             Text(item.materialStatus)
@@ -1703,6 +1924,7 @@ struct OrderDashboardView: View {
                     tableCell {
                         Text(item.modifiedAt.isEmpty ? "—" : appDisplayTimestamp(item.modifiedAt)).lineLimit(1)
                     }
+                    .frame(width: orderDashboardUpdatedAtColumnWidth)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 11)
@@ -1723,14 +1945,15 @@ struct OrderDashboardView: View {
                         }
                         .buttonStyle(.borderless)
                         .foregroundColor(AppPalette.accent)
-                        .help("打开订单备注与安装安排")
+                        .help("打开订单说明和安装日期")
                     }
                 }
                 .frame(width: orderDashboardOperationColumnWidth)
                 .padding(.vertical, 11)
             }
             .background(isSelected ? AppPalette.accent.opacity(0.045) : AppPalette.surface)
-            .contentShape(Rectangle())
+            .clipShape(rowShape)
+            .contentShape(rowShape)
 
             if isExpanded {
                 OrderDashboardDetailCard(
@@ -1777,6 +2000,18 @@ struct OrderDashboardView: View {
     private func openOrderDetail(_ item: OrderDashboardItem) {
         prepareSelectedOrder(item)
         detailOrder = item
+    }
+
+    private func openRequestedOrderIfAvailable() {
+        let orderID = model.requestedOrderCenterOrderID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !orderID.isEmpty,
+              let item = model.dashboardOrders.first(where: {
+                  $0.orderId.caseInsensitiveCompare(orderID) == .orderedSame
+              }) else { return }
+        model.requestedOrderCenterOrderID = ""
+        searchText = item.orderId
+        statusFilter = item.stage == "已出货" ? "已出货" : "未完成订单"
+        openOrderDetail(item)
     }
 
     private func tableHeader(_ title: String) -> some View {
@@ -1885,7 +2120,7 @@ struct OrderDashboardDetailPage: View {
             Spacer(minLength: 0)
             HStack(spacing: 8) {
                 Button("生成 Traveler") { model.generateSelectedOrder() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .appActionButton(minWidth: 112)
                     .disabled(!model.orderCanGenerateTraveler)
                 Button("关闭") { dismiss() }
@@ -2102,7 +2337,7 @@ private struct OrderAnnotationsSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("订单安排 (\(order.orderId))")
+                Text(order.orderId)
                     .font(.title2.weight(.semibold))
                 Spacer(minLength: 0)
                 Button("关闭") { dismiss() }
@@ -2119,7 +2354,7 @@ private struct OrderAnnotationsSheet: View {
         .padding(AppLayout.contentPadding)
         .frame(minWidth: 640, idealWidth: 700)
         .fixedSize(horizontal: false, vertical: true)
-        .background(AppPalette.background)
+        .background(LiquidGlassPreviewBackdrop())
     }
 }
 
@@ -2148,7 +2383,7 @@ private struct OrderAnnotationsEditor: View {
     var body: some View {
         AppSurfaceCard(padding: 14) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("订单备注与安装安排")
+                Text("订单说明")
                     .font(.headline)
                 TextEditor(text: $note)
                     .font(.body)
@@ -2178,10 +2413,10 @@ private struct OrderAnnotationsEditor: View {
                             .foregroundColor(status.contains("失败") ? AppPalette.danger : .secondary)
                     }
                     Spacer(minLength: 0)
-                    Button("保存备注和安装安排") {
+                    Button("保存") {
                         save()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .disabled(model.orderRunning)
                 }
             }
@@ -2224,9 +2459,9 @@ private struct OrderAnnotationsEditor: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             .padding(.horizontal, 9)
-                            .frame(width: 156, height: 26, alignment: .leading)
+                            .frame(width: orderInstallationDateButtonWidth, height: 30, alignment: .leading)
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.glass)
                         .popover(
                             isPresented: Binding(
                                 get: { datePickerRowID == day.id },
@@ -2236,23 +2471,19 @@ private struct OrderAnnotationsEditor: View {
                                     }
                                 }
                             ),
-                            arrowEdge: .bottom
+                            // Present beside the date button; the taller order sheet keeps the
+                            // complete calendar visible instead of clipping it below the form.
+                            arrowEdge: .trailing
                         ) {
-                            DatePicker("", selection: $day.date, displayedComponents: [.date])
-                                .labelsHidden()
-                                .datePickerStyle(.graphical)
-                                .frame(
-                                    width: orderInstallationDatePickerPopoverWidth,
-                                    height: orderInstallationDatePickerPopoverHeight
-                                )
-                                .padding(16)
+                            AppGlassDatePickerCalendar(selection: $day.date, compact: true)
+                                .appGlassDatePickerPopoverSurface()
                         }
 
                         HStack(spacing: 0) {
                             TextField("安装人/安装小组", text: $day.installer)
                                 .textFieldStyle(.plain)
                                 .padding(.leading, 8)
-                                .frame(minHeight: 26)
+                                .frame(minHeight: 30)
                             Menu {
                                 let suggestions = orderInstallationInstallerSuggestions(from: model.dashboardOrders)
                                 if suggestions.isEmpty {
@@ -2266,7 +2497,7 @@ private struct OrderAnnotationsEditor: View {
                                 }
                             } label: {
                                 Text("")
-                                    .frame(width: 28, height: 26)
+                                    .frame(width: 28, height: 30)
                             }
                             .menuStyle(.borderlessButton)
                             .accessibilityLabel("选择以前使用过的安装人或安装小组")
@@ -2379,7 +2610,7 @@ struct OrderDashboardDetailCard: View {
                         .help(isCompletedOrder ? "订单已出货，不能再设置出库范围" : "设置当前订单出库范围")
                 }
                 Button("生产") { onOpenProduction() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .appActionButton(minWidth: 96)
                     .disabled(
                         isCompletedOrder || model.orderRunning || model.inventoryRunning || selectedFactoryIDs.isEmpty ||
@@ -2390,7 +2621,7 @@ struct OrderDashboardDetailCard: View {
                     )
                     .help("选择一个或多个已优化且未生产的工厂单，登记本次实际消耗的订单材料")
                 Button(outboundActionTitle) { onOpenOutbound() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .appActionButton(minWidth: 96)
                     .disabled(
                         isCompletedOrder
@@ -2642,15 +2873,15 @@ struct ProductionSheet: View {
             HStack {
                 Spacer()
                 Button(operationState == .success ? "完成" : "关闭") { onClose() }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.glass)
                     .disabled(isProcessing)
                 if operationState == .failure && retryAllowed {
                     Button("重试") { submitProduction() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.glassProminent)
                         .disabled(isProcessing)
                 } else if operationState == .idle {
                     Button("确认生产并扣减材料") { submitProduction() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.glassProminent)
                         .disabled(selectedQuantityCount == 0 || model.productionMaterials.isEmpty)
                 }
             }
@@ -2811,10 +3042,10 @@ struct OrderShipmentConfirmationSheet: View {
             HStack {
                 Spacer()
                 Button("取消") { onCancel() }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.glass)
                     .appActionButton(minWidth: 90)
                 Button("确认并直接出货") { onConfirm() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .tint(AppPalette.danger)
                     .appActionButton(minWidth: 150)
                     .disabled(model.inventoryRunning)
@@ -2904,7 +3135,7 @@ struct OutboundScopeSheet: View {
                         if success { dismiss() }
                     }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.glassProminent)
                 .disabled(isLoadingSavedScope || model.inventoryRunning || orderID.isEmpty || (scopeType == "hardware" && factoryOrder.isEmpty) || (noOutboundDecision && reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
             }
         }
@@ -3014,7 +3245,7 @@ struct PendingCenterSheet: View {
                 Spacer()
                 if !model.pendingAimesReviews.isEmpty && !model.selectedAimesReviewIDs.isEmpty {
                     Button("忽略选中的 AIMES") { model.ignoreSelectedAimesFactories() }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.glass)
                         .disabled(model.orderRunning)
                 }
                 Button("稍后处理") { model.showPendingCenterPrompt = false }
@@ -3023,13 +3254,13 @@ struct PendingCenterSheet: View {
                     // while background AIMES/Server work is running.
                     .disabled(false)
                 Button("预览并逐单确认") { model.processPendingServerChanges() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .appActionButton(minWidth: 150)
                     .disabled(model.orderRunning || selectedServerCount == 0)
             }
         }
         .padding(20)
-        .background(AppPalette.background)
+        .background(LiquidGlassPreviewBackdrop())
     }
 
     @ViewBuilder
@@ -3124,7 +3355,7 @@ struct PendingCenterSheet: View {
                             Button("忽略此文件夹（观察一个月）") {
                                 model.ignoreServerFolder(group.folderPath)
                             }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.glassProminent)
                             .disabled(model.orderRunning)
                         }
                     }
@@ -3172,22 +3403,22 @@ struct PendingCenterSheet: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 180)
                     Button("自动处理") { model.autoResolveCurrentIssue(issue) }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.glass)
                         .disabled(model.orderRunning)
                     Button("确认归属") { model.resolveCurrentIssue(issue, orderID: orderIDs[issue.id] ?? "") }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.glassProminent)
                         .disabled(model.orderRunning || (orderIDs[issue.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 } else if issue.kind == "server_missing_report" {
                     Button("忽略此文件夹（观察一个月）") { model.ignoreServerFolder(issue.path) }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.glassProminent)
                         .disabled(model.orderRunning)
                 } else if currentIssueRequiresInventoryMapping(issue) {
                     Button("处理订单文件映射") { model.requestInventoryMapping(folderPath: issue.path, message: issue.message) }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.glassProminent)
                         .disabled(model.orderRunning)
                 } else {
                     Button("标记已处理") { model.resolveCurrentIssue(issue, orderID: "") }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.glass)
                         .disabled(model.orderRunning)
                 }
             }
@@ -3218,7 +3449,7 @@ struct PendingCenterSheet: View {
             Spacer(minLength: 8)
             if !item.suggestedOrderID.isEmpty {
                 Button("按 \(item.suggestedOrderID) 处理") { model.assignAimesFactoryToSuggestedOrder(item) }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .disabled(model.orderRunning)
             }
         }
@@ -3286,7 +3517,7 @@ struct OrderCostSheet: View {
                     Button("导出 Excel") {
                         model.calculateSelectedOrderCost(export: true)
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .disabled(model.orderRunning)
                     Button("关闭") { model.showCostSheet = false }
                         .appActionButton(minWidth: 72)
@@ -3364,7 +3595,7 @@ struct OrderCostSheet: View {
         }
         .padding(20)
         .frame(minWidth: 700, idealWidth: 900, minHeight: 560, idealHeight: 720)
-        .background(AppPalette.background)
+        .background(LiquidGlassPreviewBackdrop())
     }
 
     private func costCard(_ title: String, value: String, warning: Bool) -> some View {
@@ -3488,13 +3719,13 @@ struct ServerProcessingOptionsSheet: View {
                         includeHardware: model.includeHardwareForServerProcessing
                     )
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.glassProminent)
                 .appActionButton(minWidth: 100)
                 .disabled(model.orderRunning)
             }
         }
         .padding(24)
-        .background(AppPalette.background)
+        .background(LiquidGlassPreviewBackdrop())
     }
 }
 
@@ -3538,14 +3769,14 @@ struct AimesReviewSheet: View {
                 .appActionButton(minWidth: 108)
                 if !model.pendingAimesReviews.isEmpty {
                     Button("忽略选中") { model.ignoreSelectedAimesFactories() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.glassProminent)
                         .appActionButton(minWidth: 118)
                         .disabled(model.orderRunning || model.selectedAimesReviewIDs.isEmpty)
                 }
             }
         }
         .padding(20)
-        .background(AppPalette.background)
+        .background(LiquidGlassPreviewBackdrop())
     }
 
     @ViewBuilder
@@ -3582,7 +3813,7 @@ struct AimesReviewSheet: View {
                                         orderID: manualOrderIDs[item.id] ?? item.suggestedOrderID
                                     )
                                 }
-                                .buttonStyle(.borderedProminent)
+                                .buttonStyle(.glassProminent)
                                 .disabled(
                                     model.orderRunning
                                         || (manualOrderIDs[item.id] ?? item.suggestedOrderID)
@@ -3639,7 +3870,7 @@ struct AimesReviewSheet: View {
                                 Button("按 \(item.suggestedOrderID) 处理") {
                                     model.assignAimesFactoryToSuggestedOrder(item)
                                 }
-                                .buttonStyle(.borderedProminent)
+                                .buttonStyle(.glassProminent)
                                 .appActionButton(minWidth: 132)
                                 .disabled(model.orderRunning)
                             }
@@ -3780,18 +4011,18 @@ struct CurrentIssuesSheet: View {
                                             .textFieldStyle(.roundedBorder)
                                             .frame(width: 180)
                                             Button("自动处理") { model.autoResolveCurrentIssue(issue) }
-                                                .buttonStyle(.bordered)
+                                                .buttonStyle(.glass)
                                                 .disabled(model.orderRunning)
                                             Button("确认归属") { model.resolveCurrentIssue(issue, orderID: orderIDs[issue.id] ?? "") }
-                                                .buttonStyle(.borderedProminent)
+                                                .buttonStyle(.glassProminent)
                                                 .disabled(model.orderRunning || (orderIDs[issue.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                                         } else if currentIssueRequiresInventoryMapping(issue) {
                                             Button("处理订单文件映射") { model.requestInventoryMapping(folderPath: issue.path, message: issue.message) }
-                                                .buttonStyle(.borderedProminent)
+                                                .buttonStyle(.glassProminent)
                                                 .disabled(model.orderRunning)
                                         } else {
                                             Button("标记已处理") { model.resolveCurrentIssue(issue, orderID: "") }
-                                                .buttonStyle(.bordered)
+                                                .buttonStyle(.glass)
                                                 .disabled(model.orderRunning)
                                         }
                                         Spacer()
@@ -3812,7 +4043,7 @@ struct CurrentIssuesSheet: View {
             }
         }
         .padding(20)
-        .background(AppPalette.background)
+        .background(LiquidGlassPreviewBackdrop())
     }
 }
 
@@ -3903,7 +4134,7 @@ struct ServerChangesSheet: View {
                                     Button("忽略此文件夹（观察一个月）") {
                                         model.ignoreServerFolder(group.folderPath)
                                     }
-                                    .buttonStyle(.borderedProminent)
+                                    .buttonStyle(.glassProminent)
                                     .disabled(model.orderRunning)
                                 }
                             }
@@ -3923,13 +4154,13 @@ struct ServerChangesSheet: View {
                     .appActionButton(minWidth: 108)
                     .disabled(model.orderRunning)
                 Button("预览并逐单确认") { model.processPendingServerChanges() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .appActionButton(minWidth: 118)
                     .disabled(model.orderRunning || selectedCount == 0)
             }
         }
         .padding(20)
-        .background(AppPalette.background)
+        .background(LiquidGlassPreviewBackdrop())
     }
 
     private func changeIcon(_ type: String) -> String {
@@ -4077,12 +4308,12 @@ struct ServerWriteConfirmationSheet: View {
                         skipHardwareOrderIDs: skippedHardwareOrderIDs
                     )
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.glassProminent)
                 .disabled(model.orderRunning || model.inventoryRunning || orders.isEmpty || model.serverWriteConfirmationFinished || !activeHardwareRequirements.isEmpty || !invalidOrderValidations.isEmpty)
             }
         }
         .padding(20)
-        .background(AppPalette.background)
+        .background(LiquidGlassPreviewBackdrop())
         .sheet(item: $mappingTarget) { target in
             InventoryMappingSheet(
                 model: model,
@@ -4145,12 +4376,12 @@ struct ServerWriteConfirmationSheet: View {
                             Button("映射 SKU") {
                                 mappingTarget = PendingInventoryMappingTarget(name: item.name)
                             }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.glassProminent)
                             .disabled(model.inventoryRunning)
                             Button("忽略") {
                                 ignoreTarget = PendingInventoryMappingTarget(name: item.name)
                             }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(.glass)
                             .disabled(model.inventoryRunning)
                         }
                         .padding(.vertical, 6)
@@ -4327,23 +4558,23 @@ struct ServerWriteConfirmationSheet: View {
                     Button("本次写入五金") {
                         skippedHardwareOrderIDs.remove(orderID)
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.glass)
                     .tint(.secondary)
                     Button("本次不写入五金") {
                         skippedHardwareOrderIDs.insert(orderID)
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .tint(AppPalette.warning)
                 } else {
                     Button("本次写入五金") {
                         skippedHardwareOrderIDs.remove(orderID)
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .tint(AppPalette.success)
                     Button("本次不写入五金") {
                         skippedHardwareOrderIDs.insert(orderID)
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.glass)
                     .tint(.secondary)
                 }
             }
@@ -4514,7 +4745,7 @@ struct FactoryStockComparisonSheet: View {
             }
         }
         .padding(20)
-        .background(AppPalette.background)
+        .background(LiquidGlassPreviewBackdrop())
     }
 
     private var stockHeader: some View {

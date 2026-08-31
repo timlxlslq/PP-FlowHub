@@ -22,8 +22,11 @@
 | 4 | `docs/business-rules.md` | 了解跨流程业务规则 |
 | 5 | `docs/learning/01-complete-architecture-and-business-flow.md` | 按完整调用链学习主要功能 |
 | 6 | 本文 | 使用入口函数和调试步骤阅读源码 |
-| 7 | `tests/` | 用可执行测试确认自己的理解 |
-| 8 | `docs/project-handoff-log.md` | 了解历史问题、修改原因和验证证据 |
+| 7 | `docs/learning/09-user-operation-call-chains.md` | 查看每个页面操作的参数、跨文件下一跳和副作用 |
+| 8 | `docs/learning/05-file-map.md` | 按中文职责定位文件 |
+| 9 | `docs/learning/06-python-symbol-reference.md`、`07-swift-symbol-reference.md` | 查询全部函数、方法、参数、返回和静态调用 |
+| 10 | `docs/learning/08-support-test-symbol-reference.md`、`tests/` | 从测试意图确认自己的理解 |
+| 11 | `docs/project-handoff-log.md` | 了解历史问题、修改原因和验证证据 |
 
 `docs/learning/02-macos-code-signing-tcc.md` 和
 `docs/learning/03-server-scan-performance-observation.md` 是专题材料，分别在阅读 macOS 集成和 Server 扫描时使用。
@@ -155,7 +158,7 @@ Server/AIMES/SQLite 事实
 - `order_workflow.py` 中的 `OrderPreview`、`FactoryPreview` 和 `PreviewFitting`。
 - `parse_order_materials()`、`parse_fittings_groups()`。
 - `generate_order_traveler()`、`update_order_traveler()`。
-- `_write_picking_list()` 及其合并单元格处理。
+- `_prepare_picking_list()`、`_fill_usage_list()` 及其合并单元格处理。
 - `inventory.py` 中的 `parse_traveler()`，理解生成端和读取端如何互相约束。
 
 每次修改 Traveler 都要同时检查：工作表名称和顺序、合并单元格、样式、公式、空集合情况，以及重新打开后的内容。

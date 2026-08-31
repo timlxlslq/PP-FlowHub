@@ -77,6 +77,10 @@ private struct MacOSUIRegressionTests {
         testProductionFeedbackAndDashboardProgress()
         testServerWriteMaterialPreviewOrdering()
         testServerWriteHardwareChangeLayout()
+        testAssistantOrderTimelineContract()
+        testGlassDatePickerContract()
+        testTodoTableHeaderRoundedCorners()
+        testSettingsDefaultWindowLayoutContract()
         testSharedPageHeaderHeight()
         testInventoryActionLayoutRules()
         testProductionOrderPaths()
@@ -147,8 +151,8 @@ private struct MacOSUIRegressionTests {
         require(AppPalette.interfaceColorScheme == .light, "固定白色表面必须配套浅色文字环境")
         require(AppLayout.inventoryPreviewMinHeight >= 320, "库存预览区最小高度不足")
         require(AppLayout.windowMinWidth >= 1180, "窗口最小宽度不足以容纳导航和操作控件")
-        require(AppLayout.windowIdealWidth == 1760, "默认窗口宽度应与当前生产工作区一致")
-        require(AppLayout.windowIdealHeight == 1360, "默认窗口高度应与当前生产工作区一致")
+        require(AppLayout.windowIdealWidth == 1223, "默认窗口宽度应与当前助手看板工作区一致")
+        require(AppLayout.windowIdealHeight == 768, "默认窗口高度应与当前助手看板工作区一致")
         require(AppLayout.todoDeadlineColumnWidth >= 270, "截止时间列不足以同时显示时间和过期提醒")
         require(AppLayout.todoListMaxHeight == 340, "待办列表高度未按要求压缩")
         require(AppLayout.todoInputMinHeight >= 92, "新增待办输入框高度不足三行")
@@ -368,6 +372,12 @@ private struct MacOSUIRegressionTests {
         require(orderDashboardMetricColumnCount == 8, "订单指标卡必须固定为一行 8 列")
         require(orderDashboardMetricColumns.count == orderDashboardMetricColumnCount, "订单指标卡列配置数量错误")
         require(
+            orderDashboardFactoryCountColumnWidth == 90
+                && orderDashboardUpdatedAtColumnWidth == 176
+                && orderDashboardFactoryCountColumnWidth < orderDashboardUpdatedAtColumnWidth,
+            "订单主表必须缩窄工厂单列，并为更新时间保留完整显示空间"
+        )
+        require(
             orderDashboardProgressFraction(completed: 1, total: 1) == 1,
             "订单中心已完成优化的进度条比例错误"
         )
@@ -404,14 +414,41 @@ private struct MacOSUIRegressionTests {
         )
         require(orderInstallationDisplayDate("2026-07-08") == "2026年7月8日", "安装日期显示格式错误")
         require(
-            dashboardSource.contains(".datePickerStyle(.graphical)")
+            dashboardSource.contains("orderInstallationDateButtonWidth: CGFloat = 184")
+                && dashboardSource.contains("struct AppGlassDatePickerCalendar: View")
+                && dashboardSource.contains("LazyVGrid(columns: columns")
+                && dashboardSource.contains("appGlassDatePickerDate(date, preservingTimeFrom: selection")
+                && dashboardSource.contains(".presentationBackground(.clear)")
                 && dashboardSource.contains("orderInstallationPickerDisplayDate")
                 && dashboardSource.contains("datePickerRowID")
                 && dashboardSource.contains("allowsMultiple: false")
-                && dashboardSource.contains("orderInstallationDatePickerPopoverWidth")
-                && dashboardSource.contains("orderInstallationDatePickerPopoverHeight")
+                && dashboardSource.contains("AppGlassDatePickerCalendar(selection: $day.date, compact: true)")
+                && dashboardSource.contains("arrowEdge: .trailing")
+                && !dashboardSource.contains(".datePickerStyle(.graphical)")
+                && !dashboardSource.contains("struct AppGraphicalDatePicker")
                 && dashboardSource.contains("yyyy年M月d日"),
-            "安装日期必须按计划单日期、实际多日期区分，并通过放大的日历式选择器选择"
+            "安装日期必须完整显示，并统一使用自定义玻璃月历"
+        )
+
+        var glassCalendar = Calendar(identifier: .gregorian)
+        glassCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let originalDateTime = glassCalendar.date(
+            from: DateComponents(year: 2026, month: 8, day: 22, hour: 14, minute: 35, second: 41)
+        )!
+        let replacementDate = glassCalendar.date(
+            from: DateComponents(year: 2026, month: 9, day: 15)
+        )!
+        let combinedDateTime = appGlassDatePickerDate(
+            replacementDate,
+            preservingTimeFrom: originalDateTime,
+            calendar: glassCalendar
+        )
+        require(
+            glassCalendar.dateComponents(
+                [.year, .month, .day, .hour, .minute, .second],
+                from: combinedDateTime
+            ) == DateComponents(year: 2026, month: 9, day: 15, hour: 14, minute: 35, second: 41),
+            "玻璃月历切换日期时必须保留待办原有的时分秒"
         )
         require(
             dashboardSource.contains("orderInstallationInstallerSuggestions")
@@ -427,7 +464,7 @@ private struct MacOSUIRegressionTests {
             "订单安排窗口尺寸没有按紧凑布局调整"
         )
         require(
-            dashboardSource.contains(".background(AppPalette.background)")
+            dashboardSource.contains(".background(LiquidGlassPreviewBackdrop())")
                 && !dashboardSource.contains(".frame(minWidth: 640, idealWidth: 700)\n        .appPageFrame()"),
             "订单安排弹窗不应继续继承主窗口的最小高度"
         )
@@ -900,6 +937,19 @@ private struct MacOSUIRegressionTests {
         require(orderDashboardExpandedID(current: "PP0035", tapped: "PP0035-2") == "PP0035-2", "点击其他订单行应切换展开项")
         require(orderDashboardExpandedID(current: "PP0035-2", tapped: "PP0035-2", forceOpen: true) == "PP0035-2", "强制打开不应意外折叠")
         require(appDefaultSectionRawValue == "orders", "App 默认页面必须继续是订单中心")
+        let augustReference = dashboardBusinessDate("2026-08-29T12:00:00")!
+        require(
+            dashboardTimestamp("2026-08-01T08:30:00", isInSameMonthAs: augustReference),
+            "助手看板没有按订单完成时间统计本月已完成"
+        )
+        require(
+            !dashboardTimestamp("2026-07-31T23:59:59", isInSameMonthAs: augustReference),
+            "助手看板把上月完成订单计入本月"
+        )
+        require(
+            !dashboardTimestamp("", isInSameMonthAs: augustReference),
+            "缺少完成时间的订单不应计入本月已完成"
+        )
         _ = OrderDashboardMetricsView(model: AppModel())
         _ = OrderDashboardView(model: AppModel())
     }
@@ -1132,7 +1182,7 @@ private struct MacOSUIRegressionTests {
                 Label("1 项未完成", systemImage: "circle.dashed")
             }),
             AnyView(AppPageHeader(systemImage: "gearshape", title: "设置", subtitle: "测试") {
-                Button("重新载入") {}
+                EmptyView()
             }),
         ]
         for header in headers {
@@ -1140,6 +1190,268 @@ private struct MacOSUIRegressionTests {
             hosting.layoutSubtreeIfNeeded()
             require(hosting.fittingSize.height <= 0.5, "底部重复页头未移除：\(hosting.fittingSize.height)")
         }
+    }
+
+    private static func testAssistantOrderTimelineContract() {
+        let assistantSource = try! String(
+            contentsOfFile: "macos/AssistantView.swift",
+            encoding: .utf8
+        )
+        require(
+            assistantSource.contains("assistantProgressRail")
+                && assistantSource.contains("assistantStageIcon")
+                && assistantSource.contains("OrderDashboardClickContainer(")
+                && assistantSource.contains("onDoubleClick: { openOrderCenter(item.orderId) }")
+                && assistantSource.contains(".symbolEffect(.rotate")
+                && assistantSource.contains("ProgressView()")
+                && assistantSource.contains("static let metricValue: CGFloat = 40")
+                && assistantSource.contains("static let orderID: CGFloat = 20")
+                && assistantSource.contains("static let stageValue: CGFloat = 13")
+                && assistantSource.contains("GeometryReader")
+                && assistantSource.contains("startX = columnWidth")
+                && assistantSource.contains("endX = columnWidth")
+                && assistantSource.contains("stages[index].1 && stages[index + 1].1 ? AppPalette.success")
+                && assistantSource.contains("let iconColor = completed ? AppPalette.success : color")
+                && assistantSource.contains("GlassEffectContainer(spacing: 20)")
+                && assistantSource.contains(".regular.tint(AppPalette.success.opacity(0.20))")
+                && assistantSource.contains(".regular.tint(color.opacity(0.17))")
+                && assistantSource.contains("assistantProgressValue(item.outboundProgress), AppPalette.accent, \"shippingbox.fill\"")
+                && assistantSource.contains(".contentTransition(.symbolEffect(.replace))")
+                && assistantSource.contains("assistantProgressValue")
+                && assistantSource.contains(".frame(width: 54, height: 19, alignment: .center)")
+                && assistantSource.contains("VStack(alignment: .center, spacing: 5)")
+                && assistantSource.contains(".resizable()")
+                && assistantSource.contains(".frame(width: 18, height: 18)")
+                && assistantSource.contains(".padding(.top, 3)")
+                && assistantSource.contains("let centerY: CGFloat = 41")
+                && assistantSource.contains("TimelineView(.animation(minimumInterval: 1.0 / 20.0")
+                && assistantSource.contains("dashPhase: dashPhase")
+                && assistantSource.contains("accessibilityReduceMotion")
+                && assistantSource.contains("ScrollView(.vertical)")
+                && !assistantSource.contains("assistantOrderStatusBadge")
+                && !assistantSource.contains("双击订单行进入订单中心")
+                && !assistantSource.contains("订单中心查看"),
+            "助手看板必须使用图标和连接线显示状态，并保持统一的完成色、数字列与局部滚动"
+        )
+        if let railStart = assistantSource.range(of: "private func assistantProgressRail"),
+           let railEnd = assistantSource.range(of: "private func assistantStageIcon", range: railStart.upperBound..<assistantSource.endIndex) {
+            let railSource = String(assistantSource[railStart.lowerBound..<railEnd.lowerBound])
+            let titlePosition = railSource.range(of: "Text(stage.0)")?.lowerBound
+            let iconPosition = railSource.range(of: "assistantStageIcon(")?.lowerBound
+            let valuePosition = railSource.range(of: "Text(stage.2)")?.lowerBound
+            require(
+                titlePosition != nil && iconPosition != nil && valuePosition != nil
+                    && titlePosition! < iconPosition! && iconPosition! < valuePosition!,
+                "助手看板阶段名称、图标和数值必须按上中下顺序排列"
+            )
+        } else {
+            require(false, "未找到助手看板进度轨道源码")
+        }
+        guard
+            let commandStart = assistantSource.range(of: "private var commandStrip: some View"),
+            let boardStart = assistantSource.range(of: "private var orderStatusBoard: some View"),
+            let metricStart = assistantSource.range(of: "private func assistantMetric", range: boardStart.upperBound..<assistantSource.endIndex)
+        else {
+            require(false, "未找到助手输入、当前操作或订单总览卡片")
+            return
+        }
+        let commandCardSource = String(assistantSource[commandStart.lowerBound..<boardStart.lowerBound])
+        let orderBoardSource = String(assistantSource[boardStart.lowerBound..<metricStart.lowerBound])
+        require(
+            commandCardSource.contains("AppSurfaceCard(padding: 0)")
+                && commandCardSource.contains("currentOperationSummary")
+                && orderBoardSource.contains("assistantMetric(\"总订单数\"")
+                && orderBoardSource.contains("ForEach(ongoingOrders)")
+                && !orderBoardSource.contains("currentOperationSummary"),
+            "助手输入与当前操作应共用一张卡片，订单总览与订单行应共用另一张卡片"
+        )
+        require(
+            assistantSource.contains("assistantMetric(\"总订单数\", value: effectiveOrders.count, symbol:")
+                && !assistantSource.contains("Text(\"当前订单\")")
+                && !assistantSource.contains("未完成订单 · 以图标和颜色显示各状态数据")
+                && assistantSource.contains("Image(systemName: \"doc.text\")")
+                && assistantSource.contains(".frame(width: 172, height: 42, alignment: .center)")
+                && assistantSource.contains(".padding(.leading, 10)")
+                && assistantSource.contains(".padding(.horizontal, 34)")
+                && assistantSource.contains("orderIdentityText = Color(red: 0.08, green: 0.36, blue: 0.20)")
+                && assistantSource.contains(".background(AppPalette.success.opacity(0.10), in: Capsule())")
+                && assistantSource.contains(".glassEffect(.regular.tint(AppPalette.success.opacity(0.12)), in: Capsule())"),
+            "助手看板未按要求居中并右移淡绿色订单身份牌"
+        )
+
+        let dashboardSource = try! String(
+            contentsOfFile: "macos/OrderDashboardView.swift",
+            encoding: .utf8
+        )
+        require(
+            dashboardSource.contains("orderInstallationDateButtonWidth")
+                && dashboardSource.contains("UnevenRoundedRectangle")
+                && dashboardSource.contains(".clipShape(RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius")
+                && dashboardSource.contains(".mask(RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius")
+                && dashboardSource.contains("Array(filteredOrders.enumerated())")
+                && dashboardSource.contains("isLastRow && !isExpanded ? AppLayout.cardCornerRadius : 0")
+                && dashboardSource.contains("Menu {"),
+            "订单中心的日期、表格圆角和状态菜单布局没有统一"
+        )
+
+        let appSource = try! String(
+            contentsOfFile: "macos/TravelerAssistant.swift",
+            encoding: .utf8
+        )
+        require(
+            !appSource.contains("liquidGlassPreview")
+                && !appSource.contains("LiquidGlassPreviewView"),
+            "玻璃预览入口或路由仍残留在正式 App"
+        )
+    }
+
+    private static func testGlassDatePickerContract() {
+        let appSource = try! String(
+            contentsOfFile: "macos/TravelerAssistant.swift",
+            encoding: .utf8
+        )
+        let dashboardSource = try! String(
+            contentsOfFile: "macos/OrderDashboardView.swift",
+            encoding: .utf8
+        )
+        let buildSource = try! String(
+            contentsOfFile: "scripts/build-app",
+            encoding: .utf8
+        )
+        let uiTestSource = try! String(
+            contentsOfFile: "scripts/test-macos-ui",
+            encoding: .utf8
+        )
+
+        require(
+            dashboardSource.contains("struct AppGlassDatePickerCalendar: View")
+                && dashboardSource.contains("private let weekdays = [\"日\", \"一\", \"二\", \"三\", \"四\", \"五\", \"六\"]")
+                && dashboardSource.contains("ForEach(gridDates, id: \\.self)")
+                && dashboardSource.contains("isDateInToday")
+                && dashboardSource.contains("appGlassDatePickerPopoverSurface")
+                && dashboardSource.contains(".presentationBackground(.clear)")
+                && dashboardSource.contains("AppGlassDatePickerCalendar(selection: $day.date, compact: true)")
+                && appSource.contains("AppGlassDatePickerCalendar(selection: $model.initialDate)")
+                && appSource.contains("AppGlassDatePickerCalendar(selection: $selection)")
+                && appSource.contains("displayedComponents: [.hourAndMinute]")
+                && !dashboardSource.contains("AppGraphicalDatePicker")
+                && !appSource.contains("AppGraphicalDatePicker"),
+            "设置、订单安排和待办日期必须统一使用自定义玻璃月历，时间输入仍单独保留"
+        )
+        require(
+            !appSource.contains("case datePreview")
+                && !appSource.contains("DatePickerStylePreviewView")
+                && !buildSource.contains("DatePickerStylePreviewView.swift")
+                && !uiTestSource.contains("DatePickerStylePreviewView.swift"),
+            "正式采用玻璃月历后必须移除临时日期预览入口和构建目标"
+        )
+
+        _ = AppGlassDatePickerCalendar(selection: .constant(Date()))
+    }
+
+    private static func testTodoTableHeaderRoundedCorners() {
+        let source = try! String(
+            contentsOfFile: "macos/TravelerAssistant.swift",
+            encoding: .utf8
+        )
+        guard
+            let headerStart = source.range(of: "Text(\"截止时间\")"),
+            let rowsStart = source.range(of: "if sortedItems.isEmpty", range: headerStart.upperBound..<source.endIndex)
+        else {
+            require(false, "未找到待办列表表头源码")
+            return
+        }
+        let headerSource = String(source[headerStart.lowerBound..<rowsStart.lowerBound])
+        require(
+            headerSource.contains("UnevenRoundedRectangle(")
+                && headerSource.contains("topLeading: AppLayout.cardCornerRadius")
+                && headerSource.contains("bottomLeading: 0")
+                && headerSource.contains("bottomTrailing: 0")
+                && headerSource.contains("topTrailing: AppLayout.cardCornerRadius"),
+            "待办列表表头必须显示顶部圆角，并保持与列表连接处为直角"
+        )
+    }
+
+    private static func testSettingsDefaultWindowLayoutContract() {
+        let source = try! String(
+            contentsOfFile: "macos/TravelerAssistant.swift",
+            encoding: .utf8
+        )
+        guard
+            let settingsStart = source.range(of: "struct SettingsView: View"),
+            let settingsEnd = source.range(
+                of: "struct InventoryIgnoredMappingsSheet: View",
+                range: settingsStart.upperBound..<source.endIndex
+            )
+        else {
+            require(false, "未找到设置页面源码")
+            return
+        }
+        let settingsSource = String(source[settingsStart.lowerBound..<settingsEnd.lowerBound])
+        require(
+            !settingsSource.contains("ScrollView {")
+                && !settingsSource.contains("GeometryReader { geometry in")
+                && settingsSource.contains("SettingsCard(title: \"运行与文件\"")
+                && settingsSource.contains("SettingsCard(title: \"系统账户\"")
+                && settingsSource.contains("SettingsCard(title: \"库存资料与规则\"")
+                && settingsSource.contains("SettingsCard(title: \"备份与日志\"")
+                && settingsSource.contains(".frame(height: 238)")
+                && settingsSource.contains(".frame(height: 212)")
+                && settingsSource.contains("showInitialDatePicker")
+                && settingsSource.contains("settingsDateDisplay(model.initialDate)")
+                && settingsSource.contains(".frame(width: 168, height: 30, alignment: .leading)")
+                && settingsSource.contains("AppGlassDatePickerCalendar(selection: $model.initialDate)")
+                && settingsSource.contains(".frame(height: 56)"),
+            "设置页面必须使用紧凑布局，并通过宽日期按钮和玻璃月历完整显示初始扫描日期"
+        )
+        require(
+            settingsSource.contains("initialDate")
+                && settingsSource.contains("sourceRoot")
+                && settingsSource.contains("orderRoot")
+                && settingsSource.contains("backupRoot")
+                && settingsSource.contains("jdyUsername")
+                && settingsSource.contains("aimesUsername")
+                && settingsSource.contains("updateInventoryCatalog")
+                && settingsSource.contains("showManualMappingList = true")
+                && settingsSource.contains("showIgnoredHardwareList = true")
+                && settingsSource.contains("performBackup")
+                && settingsSource.contains("operationLogEnabled")
+                && settingsSource.contains("saveAllSettings"),
+            "设置页面重新分组后遗漏了原有配置或维护入口"
+        )
+        require(
+            !settingsSource.contains("程序只在你手工点击运行后执行。")
+                && !settingsSource.contains("从库存系统更新商品名称、SKU、规格、类别和单位等资料。")
+                && !settingsSource.contains("App 每天首次启动时，在本地订单缓存读取完成后自动备份")
+                && !settingsSource.contains("用于发生错误时按时间顺序回溯。"),
+            "设置页面仍保留会挤占默认窗口空间的长说明文字"
+        )
+        require(
+            source.contains("static let todoDeadlineDatePickerWidth: CGFloat = 226")
+                && source.contains("static let todoDeadlineDatePickerHeight: CGFloat = 30")
+                && source.contains("static let todoDeadlineTimeCardWidth: CGFloat = 220")
+                && source.contains("static let todoDeadlineTimePickerWidth: CGFloat = 136")
+                && source.contains("static let todoDeadlineTimePickerTrailingInset: CGFloat = 4")
+                && source.contains(".frame(width: AppLayout.todoDeadlineTimePickerWidth)")
+                && source.contains(".padding(.trailing, AppLayout.todoDeadlineTimePickerTrailingInset)")
+                && source.contains(".frame(width: AppLayout.todoDeadlineTimeCardWidth, height: 44)")
+                && source.components(separatedBy: "TodoDeadlinePickerControl(selection:").count == 3
+                && source.contains("dateFormat = \"yyyy年M月d日 HH:mm\"")
+                && source.contains("AppGlassDatePickerCalendar(selection: $selection)")
+                && source.contains("displayedComponents: [.hourAndMinute]"),
+            "待办新增和编辑界面没有统一使用中文玻璃日期时间控件"
+        )
+        require(
+            source.contains("func loadSettings() -> Bool")
+                && source.contains("var passwordResults: [String] = []")
+                && source.contains("常规设置和已填写的钥匙串密码均已保存。")
+                && settingsSource.contains("库存规则由各自按钮单独保存。")
+                && settingsSource.components(separatedBy: "SecureField(\"用户名\"").count == 3
+                && !settingsSource.contains("TextField(\"用户名\"")
+                && !source.contains("Label(\"重新载入\"")
+                && !source.contains("放弃页面中尚未保存的常规设置"),
+            "设置页没有移除重新载入按钮、掩码账号字段或保留准确的保存范围"
+        )
     }
 
     private static func testInventoryActionLayoutRules() {

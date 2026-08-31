@@ -6,10 +6,10 @@
 
 ```text
 SwiftUI App
-  → 本地命令解析器（常用命令零 Token）
-  → Workflow Agent（仅模糊表达）
-  → order / traveler / inventory Skills
-  → Typed Tool Gateway + 本地审批
+  → scripts/pp-flowhub 进程入口
+  → Python CLI
+  → 本地命令解析器（常用命令零 Token）/ Workflow Agent（仅模糊表达）
+  → Typed Tool Gateway + 本地审批（助手命令）
   → Python 确定性引擎
   → Excel / SMB / Playwright / SQLite
 ```
@@ -18,7 +18,7 @@ Agent 不直接修改 Excel、服务器或库存系统。Agent 不可用时，Ap
 
 ## Agent 开发环境
 
-Agent 使用 Python 3.10+，macOS App 的最低系统版本为 14.0。新电脑不要复制旧 `.venv`；请在本机重建环境，以免 Intel/Apple Silicon 原生扩展混用：
+Agent 使用 Python 3.10+，当前 macOS App 构建目标为 macOS 26.0。新电脑不要复制旧 `.venv`；请在本机重建环境，以免 Intel/Apple Silicon 原生扩展混用：
 
 ```bash
 python3 -m venv .venv
@@ -52,4 +52,14 @@ PYTHONPATH=".:vendor" .venv/bin/python3 -m unittest discover -s tests -v
 ```
 
 正式业务规则见 [docs/business-rules.md](docs/business-rules.md)，系统分层见 [docs/architecture/system-architecture.md](docs/architecture/system-architecture.md)。
-接手学习入口见 [docs/learning/04-handoff-guide.md](docs/learning/04-handoff-guide.md)，其中按用户场景说明源码阅读、调试和安全修改路径。
+
+版本变更见 [更新日志](CHANGELOG.md)。
+
+学习和接手建议从以下入口开始：
+
+- [接手学习指南](docs/learning/04-handoff-guide.md)：阅读顺序、数据边界和安全修改方法。
+- [全文件中文地图](docs/learning/05-file-map.md)：逐文件说明职责。
+- [Python 全符号中文参考](docs/learning/06-python-symbol-reference.md)：每个类型、函数、参数、返回和静态下一跳。
+- [Swift/macOS 全符号中文参考](docs/learning/07-swift-symbol-reference.md)：每个 App 类型、过程、计算属性和静态下一跳。
+- [测试、脚本与工具全符号中文参考](docs/learning/08-support-test-symbol-reference.md)：测试意图和辅助过程。
+- [用户操作与业务调用链全解](docs/learning/09-user-operation-call-chains.md)：从页面入口到 CLI、Python、SQLite/Excel/外部系统的人工校验链路。
