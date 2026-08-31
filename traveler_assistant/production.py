@@ -185,15 +185,6 @@ def _legacy_inventory_consumed(
     evidence, so use them only for those legacy batches.  Once a batch has
     explicit material rows, this path skips it and avoids double counting.
     """
-    audit_path = config.state_dir / "inventory-outbound-records.json"
-    try:
-        payload = json.loads(audit_path.read_text(encoding="utf-8"))
-    except (OSError, TypeError, json.JSONDecodeError):
-        return {}
-    records = payload.get("records", {}) if isinstance(payload, dict) else {}
-    if not isinstance(records, dict):
-        return {}
-
     material_rows = []
     for item in _order_material_rows(connection, order_id):
         item["total_quantity"] = item.pop("quantity")
@@ -204,27 +195,21 @@ def _legacy_inventory_consumed(
         return {}
 
     documents = connection.execute(
-        """select document_number, document_type, status, factory_order
+        """select document_number, document_type, status, factory_order, items_json
            from outbound_documents where order_id=?""",
         (order_id,),
     ).fetchall()
     consumed: dict[str, float] = {}
     for document in documents:
         document_number = str(document[0] or "").strip()
-        record = next(
-            (
-                value for value in records.values()
-                if isinstance(value, dict)
-                and str(value.get("document_number", "")).strip() == document_number
-            ),
-            None,
-        )
-        if not record:
-            continue
-        kind = str(record.get("kind") or document[1] or "").strip().casefold()
+        try:
+            items = json.loads(document[4] or "[]")
+        except (TypeError, json.JSONDecodeError):
+            items = []
+        kind = str(document[1] or "").strip().casefold()
         if kind not in {"materials", "material", "板材", "材料"}:
             continue
-        status = str(record.get("status") or document[2] or "").strip()
+        status = str(document[2] or "").strip()
         if status != "已出库":
             continue
         links = [
@@ -257,7 +242,7 @@ def _legacy_inventory_consumed(
                 legacy_factories.append(factory_order)
         if not legacy_factories:
             continue
-        for item in record.get("items", []):
+        for item in items:
             if not isinstance(item, dict):
                 continue
             code = str(item.get("productCode", "")).strip().upper()

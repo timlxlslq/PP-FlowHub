@@ -324,6 +324,7 @@ struct ServerWriteHardwarePreview: Identifiable {
     let id: String
     let productCode: String
     let name: String
+    let displayName: String
     let spec: String
     let quantity: Double
     let unit: String
@@ -335,6 +336,7 @@ struct ServerWriteHardwarePreview: Identifiable {
         self.id = "\(index)|\(code)|\(name)"
         self.productCode = code
         self.name = name
+        self.displayName = row["display_name"] as? String ?? name
         self.spec = row["spec"] as? String ?? ""
         self.quantity = (row["quantity"] as? NSNumber)?.doubleValue ?? 0
         self.unit = row["unit"] as? String ?? ""
@@ -427,6 +429,7 @@ struct ServerWriteHardwareChange: Identifiable {
     let changeType: String
     let productCode: String
     let name: String
+    let displayName: String
     let spec: String
     let unit: String
     let oldQuantity: Double
@@ -442,6 +445,7 @@ struct ServerWriteHardwareChange: Identifiable {
         self.changeType = row["change_type"] as? String ?? "数量变化"
         self.productCode = row["product_code"] as? String ?? ""
         self.name = name
+        self.displayName = row["display_name"] as? String ?? name
         self.spec = row["spec"] as? String ?? ""
         self.unit = row["unit"] as? String ?? ""
         self.oldQuantity = (row["old_quantity"] as? NSNumber)?.doubleValue ?? 0
@@ -1009,6 +1013,7 @@ struct OrderFittingPreview: Identifiable {
     let factoryOrder: String
     let orderName: String
     let name: String
+    let displayName: String
     let code: String
     let size: String
     let unit: String
@@ -1140,6 +1145,7 @@ struct InventoryManualMapping: Identifiable {
     let id: String
     let name: String
     let productCode: String
+    let displayName: String
 }
 
 struct InventoryStep: Identifiable {
@@ -1372,6 +1378,92 @@ struct AssistantTaskItem: Identifiable, Equatable {
     var status: String = "排队中"
 }
 
+private final class ResidentOrderServiceClient {
+    private let process = Process()
+    private let input = Pipe()
+    private let output = Pipe()
+    private let errors = Pipe()
+    private let lock = NSLock()
+    private var outputBuffer = Data()
+    private var started = false
+    private let onProgress: (String) -> Void
+
+    init(onProgress: @escaping (String) -> Void) {
+        self.onProgress = onProgress
+    }
+
+    func start(command: URL, environment: [String: String]) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !started else { return }
+        process.executableURL = command
+        process.arguments = ["order-service"]
+        process.currentDirectoryURL = command.deletingLastPathComponent().deletingLastPathComponent()
+        process.environment = environment
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = errors
+        errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
+            self?.onProgress(chunk)
+        }
+        try process.run()
+        started = true
+    }
+
+    func request(id: String, arguments: [String], inputData: Data?) throws -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        guard started, process.isRunning else {
+            throw NSError(domain: "PPFlowHub.OrderService", code: 1, userInfo: [NSLocalizedDescriptionKey: "订单后台服务未运行"])
+        }
+        var request: [String: Any] = ["id": id, "arguments": arguments]
+        if let inputData {
+            request["input_base64"] = inputData.base64EncodedString()
+        }
+        let payload = try JSONSerialization.data(withJSONObject: request, options: [])
+        input.fileHandleForWriting.write(payload)
+        input.fileHandleForWriting.write(Data([0x0A]))
+
+        while true {
+            if let newline = outputBuffer.firstIndex(of: 0x0A) {
+                let line = outputBuffer.prefix(upTo: newline)
+                outputBuffer.removeSubrange(...newline)
+                return Data(line)
+            }
+            // ``readData(ofLength:)`` calls ``synchronizeFile`` internally on
+            // this macOS FileHandle implementation and can raise
+            // NSFileHandleOperationException for a pipe. ``availableData``
+            // is the pipe-safe blocking read used by the stderr stream too.
+            let chunk = output.fileHandleForReading.availableData
+            if chunk.isEmpty {
+                throw NSError(domain: "PPFlowHub.OrderService", code: 2, userInfo: [NSLocalizedDescriptionKey: "订单后台服务已退出"])
+            }
+            outputBuffer.append(chunk)
+        }
+    }
+
+    func stop() {
+        lock.lock()
+        guard started else {
+            lock.unlock()
+            return
+        }
+        if process.isRunning {
+            if let payload = try? JSONSerialization.data(withJSONObject: ["id": UUID().uuidString, "command": "shutdown"], options: []) {
+                input.fileHandleForWriting.write(payload)
+                input.fileHandleForWriting.write(Data([0x0A]))
+                input.fileHandleForWriting.closeFile()
+            }
+            process.waitUntilExit()
+        }
+        errors.fileHandleForReading.readabilityHandler = nil
+        started = false
+        lock.unlock()
+    }
+}
+
 final class AppModel: ObservableObject {
     @Published var assistantInput = ""
     @Published var assistantOutput = "输入或说出一条指令。"
@@ -1519,6 +1611,7 @@ final class AppModel: ObservableObject {
     private var pendingOrderDetailItem: OrderDashboardItem?
     private var orderDetailRetryScheduled = false
     private var dashboardStartupStarted = false
+    private var residentOrderService: ResidentOrderServiceClient?
 
     var pendingCenterItems: [PendingCenterItem] {
         buildPendingCenterItems(
@@ -1572,6 +1665,28 @@ final class AppModel: ObservableObject {
         )
         loadTodoItems()
         loadAssistantUsage()
+        startResidentOrderService()
+    }
+
+    private func startResidentOrderService() {
+        guard residentOrderService == nil else { return }
+        let service = ResidentOrderServiceClient { [weak self] chunk in
+            DispatchQueue.main.async { self?.consumeOrderLogChunk(chunk) }
+        }
+        do {
+            try service.start(
+                command: projectRoot.appendingPathComponent("scripts/pp-flowhub"),
+                environment: environmentForOperation(newOperationID("启动订单后台服务"))
+            )
+            residentOrderService = service
+        } catch {
+            OperationLogWriter.shared.record(
+                "order.service.start.failed",
+                message: "订单后台服务启动失败",
+                details: ["error": error.localizedDescription],
+                force: true
+            )
+        }
     }
 
     func checkBackupReminder() {
@@ -2468,8 +2583,8 @@ final class AppModel: ObservableObject {
                 self.closePendingCenterIfEmpty()
                 self.dashboardServerStatus = "✅ Server 扫描完成，没有待处理变化"
                 self.dashboardSyncStatus = optimizationRefreshCount > 0
-                    ? "✅ Server 扫描完成；已刷新 \(optimizationRefreshCount) 个工厂单的优化证据"
-                    : "✅ Server 扫描完成；材料与工厂单身份未写入，优化证据已核对"
+                    ? "✅ 订单数据已刷新；已更新 \(optimizationRefreshCount) 个工厂单的优化证据"
+                    : "✅ 订单数据已刷新；材料与工厂单身份未写入，优化证据已核对"
             } else {
                 self.dashboardServerStatus = "⚠️ Server 发现 \(self.pendingServerChanges.count) 项待逐单确认变化"
                 self.dashboardSyncStatus = "请在待处理中心预览并逐单确认写入"
@@ -2649,17 +2764,25 @@ final class AppModel: ObservableObject {
             let orderText = orders.isEmpty ? "订单材料" : orders.joined(separator: "、")
             let skipped = (object["hardware_skipped_orders"] as? [String] ?? [])
             let skippedText = skipped.isEmpty ? "" : "；以下来料加工订单本次未写入五金：\(skipped.joined(separator: "、"))"
-            self.serverWriteConfirmationNotice = "✅ 已成功写入 \(orderText) 的材料和对应工厂单五金\(skippedText)"
+            let writeSkipped = object["server_write_skipped"] as? Bool ?? false
+            let skipReason = object["server_write_skip_reason"] as? String ?? "本次没有实际业务数据变化"
+            self.serverWriteConfirmationNotice = writeSkipped
+                ? "✅ \(skipReason)"
+                : "✅ 已成功写入 \(orderText) 的材料和对应工厂单五金\(skippedText)"
             self.serverWriteConfirmationNoticeIsError = false
             self.serverWriteConfirmationFinished = true
-            self.dashboardServerStatus = "✅ 已确认写入 \(orderText) 的材料和五金\(skippedText)"
+            self.dashboardServerStatus = writeSkipped
+                ? "✅ \(skipReason)"
+                : "✅ 已确认写入 \(orderText) 的材料和五金\(skippedText)"
             self.dashboardSyncStatus = self.dashboardServerStatus
             let duration = self.dashboardOperationDurations["server"] ?? 0
             self.dashboardActivity.insert(
                 InventoryStep(
                     time: dashboardClockTime(),
-                    title: "Server 材料写入完成",
-                    detail: "订单 \(orderText) 的订单级材料和工厂单五金已写入本地数据库\(skippedText)",
+                    title: writeSkipped ? "Server 预览确认完成" : "Server 材料写入完成",
+                    detail: writeSkipped
+                        ? skipReason
+                        : "订单 \(orderText) 的订单级材料和工厂单五金已写入本地数据库\(skippedText)",
                     state: "success",
                     paths: preview.sourceFolders,
                     operationDetails: [
@@ -2737,18 +2860,18 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func ignoreServerFolder(_ folderPath: String) {
-        logUserAction("点击忽略 Server 文件夹")
+    func markTemporaryFolderManual(_ folderPath: String) {
+        logUserAction("点击标记临时文件夹已人工处理")
         guard !orderRunning else { return }
-        beginDashboardOperation("server", label: "记录 Server 忽略设置")
-        dashboardServerStatus = "正在记录忽略设置：\(URL(fileURLWithPath: folderPath).lastPathComponent)…"
+        beginDashboardOperation("server", label: "登记临时文件夹人工处理")
+        dashboardServerStatus = "正在登记人工处理：\(URL(fileURLWithPath: folderPath).lastPathComponent)…"
         dashboardSyncStatus = dashboardServerStatus
         runOrder(
-            ["ignore-server-folder", "--folder", folderPath],
-            failureStatus: "忽略 Server 文件夹失败",
+            ["mark-temporary-manual", "--folder", folderPath],
+            failureStatus: "登记临时文件夹人工处理失败",
             onFailure: {
                 self.finishDashboardOperation("server")
-                self.dashboardSyncStatus = "⚠️ \(businessFriendlyMessage(self.orderError, operation: "忽略 Server 文件夹"))"
+                self.dashboardSyncStatus = "⚠️ \(businessFriendlyMessage(self.orderError, operation: "登记人工处理"))"
             }
         ) { object in
             self.finishDashboardOperation("server")
@@ -2759,7 +2882,7 @@ final class AppModel: ObservableObject {
             )
             self.selectedServerFolderPaths.remove(folderPath)
             self.closePendingCenterIfEmpty()
-            self.dashboardServerStatus = "✅ 已忽略文件夹；未来一个月内发生变化会重新提醒"
+            self.dashboardServerStatus = "✅ 已登记人工处理；未来三天只观察两个 XML 文件"
             self.dashboardSyncStatus = self.dashboardServerStatus
         }
     }
@@ -3568,11 +3691,13 @@ final class AppModel: ObservableObject {
     func refreshInventoryMappings() {
         runInventory(["list-mappings"]) { object in
             let manual = object["manual"] as? [String: Any] ?? [:]
+            let displayNames = object["manual_display_names"] as? [String: Any] ?? [:]
             self.inventoryManualMappings = manual.keys.sorted().map { name in
                 InventoryManualMapping(
                     id: name,
                     name: name,
-                    productCode: manual[name] as? String ?? ""
+                    productCode: manual[name] as? String ?? "",
+                    displayName: displayNames[name] as? String ?? name
                 )
             }
             let ignored = object["ignored"] as? [String: Any] ?? [:]
@@ -3586,21 +3711,24 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func saveSettingsManualMapping(name: String, productCode: String) {
+    func saveSettingsManualMapping(name: String, productCode: String, displayName: String) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedCode = productCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard !trimmedName.isEmpty, !trimmedCode.isEmpty else {
             settingsStatus = "❌ 映射名称和商品 SKU 不能为空。"
             return
         }
-        beginInventoryOperation("保存材料映射")
-        runInventory(["set-mapping", "--item-name", trimmedName, "--product-code", trimmedCode]) { _ in
-            self.settingsStatus = "✅ 材料映射已保存：\(trimmedName) → \(trimmedCode)"
+        beginInventoryOperation("保存库存商品映射")
+        runInventory([
+            "set-mapping", "--item-name", trimmedName, "--product-code", trimmedCode,
+            "--display-name", displayName.trimmingCharacters(in: .whitespacesAndNewlines),
+        ]) { _ in
+            self.settingsStatus = "✅ 库存商品映射已保存：\(trimmedName) → \(trimmedCode)"
             self.refreshInventoryMappings()
         }
     }
 
-    func updateSettingsManualMapping(oldName: String, name: String, productCode: String) {
+    func updateSettingsManualMapping(oldName: String, name: String, productCode: String, displayName: String) {
         let trimmedOldName = oldName.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedCode = productCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
@@ -3608,12 +3736,13 @@ final class AppModel: ObservableObject {
             settingsStatus = "❌ 映射名称和商品 SKU 不能为空。"
             return
         }
-        beginInventoryOperation("修改材料映射")
+        beginInventoryOperation("修改库存商品映射")
         runInventory([
             "update-mapping", "--old-name", trimmedOldName,
             "--item-name", trimmedName, "--product-code", trimmedCode,
+            "--display-name", displayName.trimmingCharacters(in: .whitespacesAndNewlines),
         ]) { _ in
-            self.settingsStatus = "✅ 材料映射已修改：\(trimmedName) → \(trimmedCode)"
+            self.settingsStatus = "✅ 库存商品映射已修改：\(trimmedName) → \(trimmedCode)"
             self.refreshInventoryMappings()
         }
     }
@@ -3621,9 +3750,9 @@ final class AppModel: ObservableObject {
     func removeSettingsManualMapping(name: String) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { return }
-        beginInventoryOperation("删除材料映射")
+        beginInventoryOperation("删除库存商品映射")
         runInventory(["remove-mapping", "--item-name", trimmedName]) { _ in
-            self.settingsStatus = "✅ 已删除材料映射：\(trimmedName)"
+            self.settingsStatus = "✅ 已删除库存商品映射：\(trimmedName)"
             self.refreshInventoryMappings()
         }
     }
@@ -4189,43 +4318,29 @@ final class AppModel: ObservableObject {
             details: ["command": "order", "argument_count": arguments.count]
         )
         let operationStartedAt = Date()
-        DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process()
-            let output = Pipe()
-            let errors = Pipe()
-            let standardInput: Pipe? = input == nil ? nil : Pipe()
-            process.executableURL = command
-            process.arguments = ["order"] + arguments
-            process.currentDirectoryURL = root
-            process.environment = self.environmentForOperation(operationID)
-            process.standardOutput = output
-            process.standardError = errors
-            process.standardInput = standardInput
-            errors.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
-                DispatchQueue.main.async { self.consumeOrderLogChunk(chunk) }
+        let service: ResidentOrderServiceClient
+        if let existing = residentOrderService {
+            service = existing
+        } else {
+            let created = ResidentOrderServiceClient { [weak self] chunk in
+                DispatchQueue.main.async { self?.consumeOrderLogChunk(chunk) }
             }
+            residentOrderService = created
+            service = created
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
             do {
-                try process.run()
-                if let input, let standardInput {
-                    standardInput.fileHandleForWriting.write(input)
-                    standardInput.fileHandleForWriting.closeFile()
-                }
-                let data = output.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-                errors.fileHandleForReading.readabilityHandler = nil
-                let remainder = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                try service.start(command: command, environment: self.environmentForOperation(operationID))
+                let data = try service.request(id: operationID, arguments: arguments, inputData: input)
                 DispatchQueue.main.async {
                     self.finishOperationLog(
                         operationID,
                         name: "订单后台操作",
                         startedAt: operationStartedAt,
-                        exitStatus: process.terminationStatus
+                        exitStatus: 0
                     )
                     self.orderRunning = false
                     defer { self.startPendingDashboardOutboundRefreshIfNeeded() }
-                    if !remainder.isEmpty { self.consumeOrderLogChunk(remainder + "\n") }
                     if !self.orderStderrBuffer.isEmpty { self.consumeOrderLogChunk("\n") }
                     guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                         let reason = businessFriendlyMessage(self.orderRawErrors, operation: "读取订单结果")
@@ -4276,6 +4391,11 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    func stopResidentOrderService() {
+        residentOrderService?.stop()
+        residentOrderService = nil
     }
 
     func loadOrderFolders() {
@@ -4468,6 +4588,7 @@ final class AppModel: ObservableObject {
                     factoryOrder: number,
                     orderName: name,
                     name: fitting["name"] as? String ?? "",
+                    displayName: fitting["display_name"] as? String ?? fitting["name"] as? String ?? "",
                     code: fitting["code"] as? String ?? "",
                     size: fitting["size"] as? String ?? "",
                     unit: fitting["unit"] as? String ?? "",
@@ -4514,12 +4635,13 @@ final class AppModel: ObservableObject {
                     "order_name": factory.orderName,
                     "fittings": rows.map {
                         let name = $0["name"] as? String ?? ""
+                        let displayName = $0["display_name"] as? String ?? name
                         let code = $0["product_code"] as? String ?? ""
                         let size = $0["spec"] as? String ?? ""
                         let signature = "\(factory.factoryOrder)|\(code)|\(name)|\(size)"
                         let occurrence = occurrences[signature, default: 0]
                         occurrences[signature] = occurrence + 1
-                        return ["key": "\(signature)|\(occurrence)", "name": name, "code": code, "size": size, "unit": $0["unit"] as? String ?? "", "quantity": $0["quantity"] as? NSNumber ?? 0, "ignored": false]
+                        return ["key": "\(signature)|\(occurrence)", "name": name, "display_name": displayName, "code": code, "size": size, "unit": $0["unit"] as? String ?? "", "quantity": $0["quantity"] as? NSNumber ?? 0, "ignored": false]
                     }
                 ]
             }
@@ -4870,9 +4992,12 @@ enum AppLayout {
     static let todoInputMinHeight: CGFloat = 92
     static let todoDeadlineDatePickerWidth: CGFloat = 226
     static let todoDeadlineDatePickerHeight: CGFloat = 30
-    static let todoDeadlineTimeCardWidth: CGFloat = 220
-    static let todoDeadlineTimePickerWidth: CGFloat = 136
-    static let todoDeadlineTimePickerTrailingInset: CGFloat = 4
+    static let todoDeadlineTimeCardWidth: CGFloat = 300
+    static let todoDeadlineTimePickerWidth: CGFloat = 224
+    static let todoDeadlineTimePickerHeight: CGFloat = 30
+    static let todoDeadlineTimePickerTrailingInset: CGFloat = 10
+    static let settingsTopRowMinHeight: CGFloat = 256
+    static let settingsBottomRowMinHeight: CGFloat = 236
     static let todoTableHeaderFontSize: CGFloat = 17
     static let todoTableBodyFontSize: CGFloat = 16
     static let materialNameFontSize: CGFloat = 18
@@ -6908,11 +7033,16 @@ struct TodoDeadlinePickerControl: View {
                     Label("时间", systemImage: "clock")
                         .font(.subheadline.weight(.medium))
                         .foregroundColor(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
                     Spacer(minLength: 0)
                     DatePicker("", selection: $selection, displayedComponents: [.hourAndMinute])
                         .labelsHidden()
-                        .controlSize(.large)
-                        .frame(width: AppLayout.todoDeadlineTimePickerWidth)
+                        .controlSize(.regular)
+                        .frame(
+                            width: AppLayout.todoDeadlineTimePickerWidth,
+                            height: AppLayout.todoDeadlineTimePickerHeight,
+                            alignment: .trailing
+                        )
                 }
                 .padding(.leading, 8)
                 .padding(.trailing, AppLayout.todoDeadlineTimePickerTrailingInset)
@@ -7002,7 +7132,7 @@ struct SettingsView: View {
                     accountSettingsCard
                         .frame(maxWidth: .infinity)
                 }
-                .frame(height: 238)
+                .frame(minHeight: AppLayout.settingsTopRowMinHeight)
 
                 HStack(alignment: .top, spacing: 12) {
                     inventorySettingsCard
@@ -7010,7 +7140,7 @@ struct SettingsView: View {
                     maintenanceSettingsCard
                         .frame(maxWidth: .infinity)
                 }
-                .frame(height: 212)
+                .frame(minHeight: AppLayout.settingsBottomRowMinHeight)
 
                 AppSurfaceCard(padding: 10) {
                     HStack(spacing: 12) {
@@ -7122,13 +7252,9 @@ struct SettingsView: View {
                         .appInputField()
                     HStack(spacing: 8) {
                         Button("保存密码") { model.saveAimesPassword() }
-                            .appActionButton(minWidth: 0)
-                            .frame(maxWidth: .infinity)
+                            .appActionButton(minWidth: 112)
                             .disabled(model.aimesPassword.isEmpty)
-                        Button("待确认记录") { model.showPendingCenterPrompt = true }
-                            .appActionButton(minWidth: 0)
-                            .frame(maxWidth: .infinity)
-                            .help("管理 AIMES 待确认与忽略记录")
+                        Spacer(minLength: 0)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -7154,9 +7280,9 @@ struct SettingsView: View {
 
                 Divider()
                 settingsManagementRow(
-                    "材料映射",
+                    "库存商品映射",
                     count: model.inventoryManualMappings.count,
-                    help: "将订单材料名称对应到商品资料中的启用 SKU。"
+                    help: "将来源名称对应到启用 SKU，并维护客户看到的显示名称。"
                 ) { showManualMappingList = true }
                 Divider()
                 settingsManagementRow(
@@ -7197,16 +7323,24 @@ struct SettingsView: View {
 
                 Divider()
 
-                HStack(spacing: 10) {
-                    Toggle(
-                        "记录操作日志",
-                        isOn: Binding(
-                            get: { model.operationLogEnabled },
-                            set: { model.setOperationLogEnabled($0) }
+                HStack(alignment: .top, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Toggle(
+                            "记录操作日志",
+                            isOn: Binding(
+                                get: { model.operationLogEnabled },
+                                set: { model.setOperationLogEnabled($0) }
+                            )
                         )
-                    )
-                    .toggleStyle(.checkbox)
-                    .help("记录后台步骤，不记录密码、用户名、备注、语音原文或网页输入内容")
+                        .toggleStyle(.checkbox)
+                        .help("记录后台步骤，不记录密码、用户名、备注、语音原文或网页输入内容")
+                        Text(model.operationLogURL.path)
+                            .font(.caption.monospaced())
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(model.operationLogURL.path)
+                    }
                     Spacer(minLength: 0)
                     Text(model.operationLogSizeText)
                         .font(.caption.monospacedDigit())
@@ -7221,14 +7355,7 @@ struct SettingsView: View {
                         .disabled(model.orderRunning || model.inventoryRunning || model.assistantRunning)
                         .help("只保留最近三天操作日志")
                 }
-                .frame(minHeight: AppLayout.controlHeight)
-
-                Text(model.operationLogURL.path)
-                    .font(.caption.monospaced())
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(model.operationLogURL.path)
+                .frame(minHeight: 68)
             }
         }
     }
@@ -7395,16 +7522,17 @@ struct InventoryManualMappingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var productCode = ""
+    @State private var displayName = ""
     @State private var editingName = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("材料映射")
+                    Text("库存商品映射")
                         .font(.title2)
                         .fontWeight(.semibold)
-                    Text("统一管理订单材料名称与商品 SKU 的对应关系")
+                    Text("统一管理来源名称、库存 SKU 和客户看到的显示名称")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -7414,20 +7542,24 @@ struct InventoryManualMappingsSheet: View {
             }
             Divider()
             HStack(spacing: 8) {
-                TextField("材料名称", text: $name)
+                TextField("来源名称", text: $name)
                     .textFieldStyle(.roundedBorder)
                     .appInputField()
                 TextField("商品 SKU", text: $productCode)
                     .textFieldStyle(.roundedBorder)
                     .appInputField()
+                TextField("显示名称（可选）", text: $displayName)
+                    .textFieldStyle(.roundedBorder)
+                    .appInputField()
                 Button(editingName.isEmpty ? "增加" : "保存修改") {
                     if editingName.isEmpty {
-                        model.saveSettingsManualMapping(name: name, productCode: productCode)
+                        model.saveSettingsManualMapping(name: name, productCode: productCode, displayName: displayName)
                     } else {
                         model.updateSettingsManualMapping(
                             oldName: editingName,
                             name: name,
-                            productCode: productCode
+                            productCode: productCode,
+                            displayName: displayName
                         )
                     }
                     clearEditor()
@@ -7442,7 +7574,7 @@ struct InventoryManualMappingsSheet: View {
                 }
             }
             if model.inventoryManualMappings.isEmpty {
-                ContentUnavailableView("当前没有材料映射", systemImage: "arrow.left.arrow.right")
+                ContentUnavailableView("当前没有库存商品映射", systemImage: "arrow.left.arrow.right")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
@@ -7452,6 +7584,10 @@ struct InventoryManualMappingsSheet: View {
                                 Text(item.name)
                                     .fontWeight(.medium)
                                 Spacer(minLength: 0)
+                                Text(item.displayName.isEmpty ? item.name : item.displayName)
+                                    .foregroundColor(.primary)
+                                    .lineLimit(1)
+                                    .frame(width: 150, alignment: .leading)
                                 Text(item.productCode)
                                     .font(.body.monospaced())
                                     .foregroundColor(AppPalette.accent)
@@ -7459,6 +7595,7 @@ struct InventoryManualMappingsSheet: View {
                                     editingName = item.name
                                     name = item.name
                                     productCode = item.productCode
+                                    displayName = item.displayName
                                 }
                                 .appActionButton(minWidth: 56)
                                 .disabled(model.inventoryRunning)
@@ -7481,6 +7618,7 @@ struct InventoryManualMappingsSheet: View {
     private func clearEditor() {
         name = ""
         productCode = ""
+        displayName = ""
         editingName = ""
     }
 }
@@ -7793,6 +7931,7 @@ struct TravelerAssistantApp: App {
             )
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                 model.closeInventoryChromeOnQuit()
+                model.stopResidentOrderService()
             }
             .onReceive(NotificationCenter.default.publisher(for: .ppOpenOrderCenter)) { _ in
                 selection = .orders

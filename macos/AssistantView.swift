@@ -73,6 +73,7 @@ struct AssistantOrderResult {
                     factoryOrder: number,
                     orderName: name,
                     name: fitting["name"] as? String ?? "",
+                    displayName: fitting["display_name"] as? String ?? fitting["name"] as? String ?? "",
                     code: fitting["code"] as? String ?? "",
                     size: fitting["size"] as? String ?? "",
                     unit: fitting["unit"] as? String ?? "",
@@ -329,7 +330,8 @@ struct AssistantOrderPreviewView: View {
                         .background(AppPalette.accent.opacity(0.09))
                         ForEach(rows) { row in
                             HStack {
-                                Text(row.name).frame(maxWidth: .infinity, alignment: .leading)
+                                Text(row.displayName.isEmpty ? row.name : row.displayName)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                                 Text(row.code).foregroundColor(.secondary).frame(width: 100, alignment: .leading)
                                 Text(row.size.isEmpty ? "—" : row.size).foregroundColor(.secondary).frame(width: 110, alignment: .leading)
                                 Text("\(row.quantity.formatted()) \(row.unit)")
@@ -699,12 +701,16 @@ struct AssistantView: View {
     @StateObject private var speech = SpeechInputController()
     @StateObject private var pushToTalkShortcut = PushToTalkShortcutMonitor()
     @State private var showCommandHints = false
-    @State private var commandHintsCloseTask: Task<Void, Never>?
+    @State private var commandHintsTransitionTask: Task<Void, Never>?
+    @State private var commandHintsAnchorHovering = false
+    @State private var commandHintsPanelHovering = false
+    @State private var commandHintsHoverGeneration = 0
 
     var body: some View {
         VStack(spacing: 18) {
             commandStrip
             orderStatusBoard
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             if showsAssistantWorkspace {
                 HStack(alignment: .top, spacing: 16) {
                     workspaceCard.frame(maxWidth: .infinity)
@@ -730,7 +736,10 @@ struct AssistantView: View {
             )
         }
         .onDisappear {
-            commandHintsCloseTask?.cancel()
+            commandHintsTransitionTask?.cancel()
+            commandHintsAnchorHovering = false
+            commandHintsPanelHovering = false
+            showCommandHints = false
             pushToTalkShortcut.uninstall()
             speech.stop()
         }
@@ -754,14 +763,14 @@ struct AssistantView: View {
                         .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                         .onSubmit { model.runAssistantCommand() }
                         .onHover { hovering in
-                            if hovering { showCommandHintPopover() }
-                            else { scheduleCommandHintClose() }
+                            if hovering { beginCommandHintsAnchorHover() }
+                            else { endCommandHintsAnchorHover() }
                         }
                         .popover(isPresented: $showCommandHints, arrowEdge: .bottom) {
                             AssistantCommandHintsContent()
                                 .onHover { hovering in
-                                    if hovering { showCommandHintPopover() }
-                                    else { scheduleCommandHintClose() }
+                                    if hovering { beginCommandHintsPanelHover() }
+                                    else { endCommandHintsPanelHover() }
                                 }
                         }
                     Image(systemName: speech.isHolding ? "waveform.circle.fill" : "mic.fill")
@@ -832,7 +841,7 @@ struct AssistantView: View {
                             .padding(.horizontal, 20)
                             .padding(.vertical, 16)
                         }
-                        .frame(maxHeight: 360)
+                        .frame(maxHeight: .infinity)
                         .scrollIndicators(.automatic)
                     }
                 }
@@ -1148,14 +1157,14 @@ struct AssistantView: View {
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppPalette.separator))
                         .onSubmit { model.runAssistantCommand() }
                         .onHover { hovering in
-                            if hovering { showCommandHintPopover() }
-                            else { scheduleCommandHintClose() }
+                            if hovering { beginCommandHintsAnchorHover() }
+                            else { endCommandHintsAnchorHover() }
                         }
                         .popover(isPresented: $showCommandHints, arrowEdge: .bottom) {
                             AssistantCommandHintsContent()
                                 .onHover { hovering in
-                                    if hovering { showCommandHintPopover() }
-                                    else { scheduleCommandHintClose() }
+                                    if hovering { beginCommandHintsPanelHover() }
+                                    else { endCommandHintsPanelHover() }
                                 }
                         }
                     Image(systemName: speech.isHolding ? "waveform.circle.fill" : "mic.fill")
@@ -1364,17 +1373,49 @@ struct AssistantView: View {
         }
     }
 
-    private func showCommandHintPopover() {
-        commandHintsCloseTask?.cancel()
-        showCommandHints = true
+    private func beginCommandHintsAnchorHover() {
+        commandHintsAnchorHovering = true
+        commandHintsHoverGeneration += 1
+        commandHintsTransitionTask?.cancel()
+        guard !showCommandHints else { return }
+        let generation = commandHintsHoverGeneration
+        commandHintsTransitionTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(dashboardMessageHoverDelay))
+            guard !Task.isCancelled,
+                  generation == commandHintsHoverGeneration,
+                  commandHintsAnchorHovering || commandHintsPanelHovering else { return }
+            showCommandHints = true
+        }
     }
 
-    private func scheduleCommandHintClose() {
-        commandHintsCloseTask?.cancel()
-        commandHintsCloseTask = Task {
-            try? await Task.sleep(for: .milliseconds(220))
-            guard !Task.isCancelled else { return }
-            await MainActor.run { showCommandHints = false }
+    private func endCommandHintsAnchorHover() {
+        commandHintsAnchorHovering = false
+        commandHintsHoverGeneration += 1
+        scheduleCommandHintsClose()
+    }
+
+    private func beginCommandHintsPanelHover() {
+        commandHintsPanelHovering = true
+        commandHintsHoverGeneration += 1
+        commandHintsTransitionTask?.cancel()
+    }
+
+    private func endCommandHintsPanelHover() {
+        commandHintsPanelHovering = false
+        commandHintsHoverGeneration += 1
+        scheduleCommandHintsClose()
+    }
+
+    private func scheduleCommandHintsClose() {
+        commandHintsTransitionTask?.cancel()
+        let generation = commandHintsHoverGeneration
+        commandHintsTransitionTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(dashboardMessageHoverCloseGrace))
+            guard !Task.isCancelled,
+                  generation == commandHintsHoverGeneration,
+                  !commandHintsAnchorHovering,
+                  !commandHintsPanelHovering else { return }
+            showCommandHints = false
         }
     }
 

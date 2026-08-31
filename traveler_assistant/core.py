@@ -26,8 +26,6 @@ from .operation_log import log_progress_payload
 from .database import (
     database_path,
     ensure_schema,
-    migrate_inventory_mapping_file,
-    migrate_legacy_databases,
     read_cache,
     write_cache,
 )
@@ -96,6 +94,10 @@ class Config:
     # Server previews use one process-local database connection.  It is
     # intentionally not part of persisted settings or command-line state.
     workflow_connection: sqlite3.Connection | None = None
+    # One-shot maintenance/diagnostic commands may request a repair pass.
+    # The resident App service sets this false so normal reads consume the
+    # transactionally maintained status directly.
+    reconcile_outbound_on_read: bool = True
 
     @property
     def operation_log_file(self) -> Path:
@@ -103,24 +105,22 @@ class Config:
 
     @property
     def workflow_database(self) -> Path:
-        central = database_path(self.state_dir)
-        if self.storage_prepared:
-            return central
-        # Test fixtures and users interrupted during a pre-cutover launch may
-        # still have only the old index.  Keep that file readable until the
-        # explicit storage preparation merges it into workflow.sqlite3.
-        legacy = self.state_dir / "order-index.sqlite3"
-        return legacy if legacy.exists() else self.state_dir / "order-index.sqlite3"
+        return database_path(self.state_dir)
 
     @property
     def database_backup_root(self) -> Path:
         return self.state_dir / "database-backups"
 
     def prepare_storage(self) -> None:
+        """Prepare the canonical database for normal application use.
+
+        Legacy storage was migrated once during the database cutover and is
+        now kept only under ``migration-archives``.  Startup must not inspect
+        or mutate those files again: ``workflow.sqlite3`` is the sole runtime
+        source of durable application facts.
+        """
         self.storage_prepared = True
         ensure_schema(database_path(self.state_dir))
-        migrate_legacy_databases(self.state_dir)
-        migrate_inventory_mapping_file(self.state_dir)
 
     @property
     def settings_file(self) -> Path:
@@ -209,36 +209,18 @@ class Config:
 
 
 def load_factory_name_cache(config: Config) -> dict[str, str]:
-    if not config.storage_prepared:
-        try:
-            values = json.loads(config.factory_names_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-        return {str(key).upper(): str(value).strip() for key, value in values.items() if str(value).strip()}
-    values = read_cache(config.workflow_database, "factory_names", config.factory_names_file, {})
+    values = read_cache(config.workflow_database, "factory_names", None, {})
     if not isinstance(values, dict):
         return {}
     return {str(key).upper(): str(value).strip() for key, value in values.items() if str(value).strip()}
 
 
 def save_factory_name_cache(config: Config, values: dict[str, str]) -> None:
-    if not config.storage_prepared:
-        config.state_dir.mkdir(parents=True, exist_ok=True)
-        temporary = config.factory_names_file.with_suffix(".tmp")
-        temporary.write_text(json.dumps(dict(sorted(values.items())), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(config.factory_names_file)
-        return
     write_cache(config.workflow_database, "factory_names", dict(sorted(values.items())))
 
 
 def load_aimes_order_cache(config: Config) -> list[dict[str, str]]:
-    if not config.storage_prepared:
-        try:
-            values = json.loads(config.aimes_orders_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return []
-    else:
-        values = read_cache(config.workflow_database, "aimes_orders", config.aimes_orders_file, [])
+    values = read_cache(config.workflow_database, "aimes_orders", None, [])
     if not isinstance(values, list):
         return []
     return [
@@ -254,36 +236,18 @@ def load_aimes_order_cache(config: Config) -> list[dict[str, str]]:
 
 
 def save_aimes_order_cache(config: Config, values: list[dict[str, str]]) -> None:
-    if not config.storage_prepared:
-        config.state_dir.mkdir(parents=True, exist_ok=True)
-        temporary = config.aimes_orders_file.with_suffix(".tmp")
-        temporary.write_text(json.dumps(values, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(config.aimes_orders_file)
-        return
     write_cache(config.workflow_database, "aimes_orders", values)
 
 
 def load_material_assignments(config: Config) -> dict[str, str]:
-    if not config.storage_prepared:
-        try:
-            values = json.loads(config.material_assignments_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-    else:
-        values = read_cache(config.workflow_database, "material_assignments", config.material_assignments_file, {})
+    values = read_cache(config.workflow_database, "material_assignments", None, {})
     return {str(key): str(value) for key, value in values.items() if str(value).strip()}
 
 
 def save_material_assignment(config: Config, key: str, path: str) -> None:
     values = load_material_assignments(config)
     values[str(key)] = str(path)
-    if not config.storage_prepared:
-        config.state_dir.mkdir(parents=True, exist_ok=True)
-        temporary = config.material_assignments_file.with_suffix(".tmp")
-        temporary.write_text(json.dumps(dict(sorted(values.items())), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(config.material_assignments_file)
-    else:
-        write_cache(config.workflow_database, "material_assignments", dict(sorted(values.items())))
+    write_cache(config.workflow_database, "material_assignments", dict(sorted(values.items())))
 
 
 def _run_aimes_lookup(

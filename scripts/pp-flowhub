@@ -34,8 +34,12 @@ case "${1:-}" in
     shift
     exec "$PYTHON_BIN" -m traveler_assistant.order_workflow "$@"
     ;;
+  order-service)
+    shift
+    exec "$PYTHON_BIN" -m traveler_assistant.order_service "$@"
+    ;;
   *)
-    echo "Usage: pp-flowhub {assistant|order|inventory} <command> [options]" >&2
+    echo "Usage: pp-flowhub {assistant|order|order-service|inventory} <command> [options]" >&2
     exit 2
     ;;
 esac

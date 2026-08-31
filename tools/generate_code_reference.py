@@ -137,7 +137,7 @@ SYMBOL_PURPOSES = {
     "scan_server_changes": "扫描候选 Server 文件夹和业务文件变化，返回待确认项与分阶段耗时。",
     "preview_server_changes": "在克隆数据库上演算 Server 变化，生成不会污染正式事实的确认预览。",
     "confirm_server_preview": "验证预览仍与当前文件一致后，把已确认 Server 事实写入中央数据库。",
-    "ignore_server_folder": "持久化一个文件夹的观察期忽略状态，并仅移除该文件夹的待处理项。",
+    "mark_temporary_folder_manual": "登记临时 Server 文件夹已人工出库，并建立三天 XML 观察期。",
     "sync_order_index": "把 AIMES、Server 和本地事实同步为可供看板读取的订单索引。",
     "list_order_index": "读取订单、工厂单、问题和状态，生成看板列表 payload。",
     "reconcile_outbound_statuses": "依据工厂单范围与出库证据重新计算订单/工厂单出库状态。",

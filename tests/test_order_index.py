@@ -2,6 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +13,7 @@ from traveler_assistant.core import Config, RuleError
 from traveler_assistant.database import ensure_schema
 from traveler_assistant.order_index import (
     OrderIndexStore,
+    _aimes_order_fingerprint,
     _aimes_row_issue,
     _business_aimes_message,
     _business_report_message,
@@ -26,15 +28,20 @@ from traveler_assistant.order_index import (
     _factory_order_before_initial_date,
     _merge_candidate,
     _load_outbound_records,
+    _mark_initial_orders_shipped,
     _merge_database_factory_candidates,
     _orders_requiring_server_scan,
+    _optimization_artifacts,
     _partition_aimes_rows,
     _record_generated_material_baseline,
+    _reconcile_temporary_order_projections,
     _report_files,
     _replace_server_material_facts,
     _reconcile_authoritative_server_material_sources,
     reconcile_outbound_statuses,
     _server_snapshot,
+    _server_optimization_monitor_files,
+    _server_snapshot_folder,
     _server_folder_rename_pairs,
     _server_folders_for_sync,
     _server_data_change_message,
@@ -43,7 +50,6 @@ from traveler_assistant.order_index import (
     _valid_aimes_order_id,
     _visible_aimes_row,
     assign_aimes_factory_order,
-    ignore_server_folder,
     scan_server_changes,
     ignore_aimes_factories,
     list_order_index,
@@ -57,6 +63,7 @@ from traveler_assistant.order_index import (
     confirm_server_material_preview_memory,
     confirm_server_preview,
     confirm_server_preview_memory,
+    mark_temporary_folder_manual,
     record_temporary_outbound,
     restore_aimes_factories,
     restore_aimes_order_assignment,
@@ -68,6 +75,16 @@ from traveler_assistant.inventory import InventoryMappings
 
 
 class OrderIndexTests(unittest.TestCase):
+    @staticmethod
+    def _set_permanent_server_policy(store, order_id, folder):
+        store.upsert_order(order_id, source_folder=str(folder))
+        store.save_server_scan_policy(
+            order_id,
+            policy="permanent",
+            aimes_fingerprint=_aimes_order_fingerprint(store, order_id),
+            updated_at="2026-08-31T10:00:00",
+        )
+
     def test_desktop_cs004_and_pp0072_are_offline_memory_preview_fixtures(self):
         """The desktop copies exercise parsing only, not current Server state."""
         desktop = Path.home() / "Desktop"
@@ -724,7 +741,7 @@ class OrderIndexTests(unittest.TestCase):
                 [stage["stage"] for stage in scan_timing["stages"]],
                 ["server_metadata", "material_validation", "optimization_evidence", "scan_finalize"],
             )
-            self.assertTrue(any(
+            self.assertFalse(any(
                 issue["kind"] == "material_validation"
                 for issue in first_scan["current_issues"]
             ))
@@ -991,6 +1008,78 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(cleared, 0)
         self.assertEqual(row, ("数据异常", "订单存在未完成商品 SKU 处理：LED。"))
 
+    def test_fully_shipped_temporary_order_is_excluded_from_unfinished_stage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state", source_root=root / "source")
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_order(
+                "PP9999",
+                order_type="temporary",
+                validation_status="正常",
+                stage="待人工处理",
+                source_folder=str(root / "source" / "temporary-production"),
+            )
+            store.upsert_factory(
+                "F999",
+                order_id="PP9999",
+                factory_name="PP9999-KITCHEN",
+                sales_order_name="PP9999",
+                name_source="AIMES",
+                ownership_status="已确认",
+                outbound_status="已出库",
+                outbound_document="QTCK-999",
+            )
+            store.commit()
+
+            row = store.summaries()[0]
+            persisted_stage = store.connection.execute(
+                "select stage from orders where order_id = ?",
+                ("PP9999",),
+            ).fetchone()[0]
+            store.close()
+
+        self.assertEqual(row["stage"], "已出货")
+        self.assertEqual(persisted_stage, "已出货")
+
+    def test_temporary_projection_is_removed_without_overwriting_formal_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state", source_root=root / "source")
+            formal_folder = config.source_root / "PP9999"
+            formal_folder.mkdir(parents=True)
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_order(
+                "PP9999",
+                order_type="temporary",
+                source_folder=str(root / "source" / "temporary-recut"),
+            )
+            store.upsert_factory(
+                "F999",
+                order_id="PP9999",
+                factory_name="PP9999-KITCHEN",
+                sales_order_name="PP9999",
+                name_source="AIMES",
+                source_folder=str(formal_folder),
+            )
+            store.upsert_order(
+                "B12",
+                order_type="temporary",
+                source_folder=str(root / "source" / "B12 repair"),
+            )
+
+            self.assertEqual(_reconcile_temporary_order_projections(store), 2)
+            formal = store.connection.execute(
+                "select order_type, source_folder from orders where order_id = 'PP9999'"
+            ).fetchone()
+            orphan = store.connection.execute(
+                "select 1 from orders where order_id = 'B12'"
+            ).fetchone()
+            store.close()
+
+        self.assertEqual(formal, ("owned", str(formal_folder)))
+        self.assertIsNone(orphan)
+
     def test_aimes_stage_durations_exclude_aggregate_and_account_for_backend_overhead(self):
         stages = _complete_aimes_stage_durations([
             {"stage": "login", "label": "登录 AIMES", "duration_seconds": 1.2},
@@ -1007,7 +1096,7 @@ class OrderIndexTests(unittest.TestCase):
             places=6,
         )
 
-    def test_order_annotations_store_note_and_nonconsecutive_installation_days(self):
+    def test_order_annotations_store_single_actual_installation_start_date(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = Config(state_dir=root / "state")
@@ -1033,7 +1122,6 @@ class OrderIndexTests(unittest.TestCase):
                 ],
                 actual_days=[
                     {"date": "2026-07-08", "installer": "安装组 A"},
-                    {"date": "2026-07-11", "installer": "安装组 A"},
                 ],
             )
 
@@ -1047,15 +1135,73 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(row["installation"]["planned"]["start_date"], "2026-07-08")
             self.assertEqual(row["installation"]["planned"]["end_date"], "2026-07-08")
             self.assertEqual(row["installation"]["planned"]["day_count"], 1)
-            self.assertEqual(row["installation"]["actual"]["days"][1]["installer"], "安装组 A")
-            self.assertEqual(row["installation"]["actual"]["day_count"], 2)
+            self.assertEqual(row["installation"]["actual"]["days"], [
+                {"date": "2026-07-08", "installer": "安装组 A"},
+            ])
+            self.assertEqual(row["installation"]["actual"]["start_date"], "2026-07-08")
+            self.assertEqual(row["installation"]["actual"]["end_date"], "2026-07-08")
+            self.assertEqual(row["installation"]["actual"]["day_count"], 1)
 
             reopened = OrderIndexStore(config.workflow_database)
             reopened.upsert_order("PP9999", server_seen="2026-08-18T12:00:00")
             persisted = next(item for item in reopened.summaries() if item["order_id"] == "PP9999")
             reopened.close()
             self.assertEqual(persisted["user_note"], "客户要求安装前确认台面颜色")
-            self.assertEqual(persisted["installation"]["actual"]["day_count"], 2)
+            self.assertEqual(persisted["installation"]["actual"]["day_count"], 1)
+
+    def test_order_annotations_reject_multiple_actual_installation_dates(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state")
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_order("PP9998", source_folder="/server/PP9998")
+            store.commit()
+            with self.assertRaisesRegex(ValueError, "实际安装日期只能填写一个开始日期"):
+                store.save_order_annotations(
+                    "PP9998",
+                    user_note="",
+                    planned_days=[],
+                    actual_days=[
+                        {"date": "2026-07-08", "installer": "安装组 A"},
+                        {"date": "2026-07-11", "installer": "安装组 A"},
+                    ],
+                )
+            store.close()
+
+    def test_order_index_collapses_historical_actual_installation_dates(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state")
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_order("PP9997", source_folder="/server/PP9997")
+            # Simulate a legacy database from before the single-start-date
+            # unique index was introduced.
+            store.connection.execute("drop index idx_order_installation_actual_start")
+            store.connection.executemany(
+                """
+                insert into order_installation_days(
+                    order_id, date_type, install_date, installer, updated_at
+                ) values(?,?,?,?,?)
+                """,
+                [
+                    ("PP9997", "actual", "2026-07-11", "安装组 B", "2026-07-11T08:00:00"),
+                    ("PP9997", "actual", "2026-07-08", "安装组 A", "2026-07-08T08:00:00"),
+                ],
+            )
+            store.connection.commit()
+            store.close()
+
+            reopened = OrderIndexStore(config.workflow_database)
+            rows = reopened.connection.execute(
+                """
+                select install_date, installer
+                from order_installation_days
+                where order_id = ? and date_type = 'actual'
+                """,
+                ("PP9997",),
+            ).fetchall()
+            reopened.close()
+            self.assertEqual(rows, [("2026-07-08", "安装组 A")])
 
     def test_order_annotations_allow_missing_installer_but_reject_duplicate_dates(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1085,7 +1231,7 @@ class OrderIndexTests(unittest.TestCase):
                     ],
                     actual_days=[],
                 )
-            with self.assertRaisesRegex(ValueError, "日期重复"):
+            with self.assertRaisesRegex(ValueError, "实际安装日期只能填写一个开始日期"):
                 store.save_order_annotations(
                     "PP9999",
                     user_note="",
@@ -1259,7 +1405,7 @@ class OrderIndexTests(unittest.TestCase):
             cut_to_size.mkdir(parents=True)
             (owned / "PP9999 materials.xlsx").write_bytes(b"material")
             (cut_to_size / "CS999 materials.xlsx").write_bytes(b"material")
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             store.upsert_aimes_factory(
                 "F100", order_id="PP9999", factory_name="PP9999-KITCHEN",
                 sales_order_name="PP9999", split_time="2026-08-10T08:30:00",
@@ -1280,7 +1426,7 @@ class OrderIndexTests(unittest.TestCase):
             }
             self.assertIn(str(owned), folder_paths)
             self.assertIn(str(cut_to_size), folder_paths)
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             _, folders = _server_folders_for_sync(config, None, store=store)
             store.close()
             self.assertEqual({str(item) for item in folders}, {str(owned), str(cut_to_size)})
@@ -1396,6 +1542,47 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(expanded["orders"][0]["stage"], "部分优化")
             self.assertEqual(expanded["orders"][0]["optimized_count"], 2)
 
+    def test_optimization_marker_scan_uses_known_paths_without_recursive_file_walk(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / "PP0099"
+            kitchen_root = folder / "Kitchen" / "Optimize file"
+            kitchen_root.mkdir(parents=True)
+            (kitchen_root / "Optimize file.xml").write_text("<Optimize />", encoding="utf-8")
+            (kitchen_root / "layout file").mkdir()
+            nesting = kitchen_root / "layout file" / "nesting_result.xml"
+            nesting.write_text("<Nesting />", encoding="utf-8")
+
+            unexpected = folder / "Kitchen" / "output" / "Optimize file" / "nesting_result.xml"
+            unexpected.parent.mkdir(parents=True)
+            unexpected.write_text("<Unexpected />", encoding="utf-8")
+
+            with patch.object(Path, "rglob", side_effect=AssertionError("不应递归遍历文件")):
+                artifacts = _optimization_artifacts(folder)
+                monitor_files = _server_optimization_monitor_files(folder)
+
+            self.assertEqual(artifacts, [kitchen_root / "Optimize file.xml", nesting])
+            self.assertEqual(
+                [path for path, _ in monitor_files],
+                [kitchen_root / "Optimize file.xml", nesting],
+            )
+
+    def test_folder_timing_total_equals_final_file_timing_sum(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / "PP0099"
+            optimize_root = folder / "Kitchen" / "Optimize file"
+            optimize_root.mkdir(parents=True)
+            (optimize_root / "Optimize file.xml").write_text("<Optimize />", encoding="utf-8")
+            (optimize_root / "layout file").mkdir()
+            (optimize_root / "layout file" / "nesting_result.xml").write_text(
+                "<Nesting />", encoding="utf-8"
+            )
+
+            _, timing = _server_snapshot_folder(folder)
+
+            file_total = round(sum(item["duration_seconds"] for item in timing["files"]), 6)
+            self.assertEqual(timing["duration_seconds"], file_total)
+            self.assertGreaterEqual(timing["wall_duration_seconds"], timing["duration_seconds"])
+
     def test_visible_server_scan_refreshes_aicnc_evidence_and_returns_updated_orders(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1459,7 +1646,7 @@ class OrderIndexTests(unittest.TestCase):
                  patch("traveler_assistant.order_workflow.preview_order", return_value=preview):
                 sync_order_index(config)
 
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             source_folders = {
                 row[0]: row[1]
                 for row in store.connection.execute(
@@ -1542,6 +1729,105 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(third["index_stats"]["parsed_report_count"], 1)
             self.assertEqual(third["index_stats"]["validated_order_count"], 1)
 
+    def test_server_sync_preserves_hardware_when_report_is_unchanged_or_mapping_fails(self):
+        """A scan must not erase the last valid hardware projection."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(
+                state_dir=root / "state",
+                source_root=root / "server" / "Optimized Orders",
+            )
+            config.prepare_storage()
+            folder = config.source_root / "PP9999"
+            fittings = folder / "Report" / "Fittingslist.xlsx"
+            fittings.parent.mkdir(parents=True)
+            from tests.test_order_workflow import make_fittings
+
+            make_fittings(fittings, [("F100", 2)])
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_order("PP9999", validation_status="正常", source_folder=str(folder))
+            store.upsert_factory(
+                "F100",
+                order_id="PP9999",
+                factory_name="PP9999-KITCHEN",
+                sales_order_name="PP9999",
+                name_source="AIMES",
+                ownership_status="已确认",
+                has_hardware=True,
+            )
+            store.upsert_source_file(
+                fittings,
+                source_folder=folder,
+                kind="fittings",
+                order_id="PP9999",
+                factory_order="F100",
+                changed_at="2026-08-31T10:00:00",
+            )
+            store.connection.execute(
+                """insert into hardware_items(
+                    order_id, factory_order, product_code, source_code, name, spec,
+                    quantity, unit, source_type, source_path, active, updated_at
+                ) values(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "PP9999", "F100", "M1001", "71T950A", "TestFullHinge", "",
+                    2, "Piece", "aicnc", str(fittings), 1, "2026-08-31T10:00:00",
+                ),
+            )
+            store.commit()
+            store.close()
+
+            unchanged = sync_order_index(
+                config,
+                refresh_outbound_statuses=False,
+                reconcile_outbound=False,
+            )
+            self.assertGreaterEqual(unchanged["index_stats"]["reused_report_count"], 1)
+
+            store = OrderIndexStore(config.workflow_database)
+            try:
+                self.assertEqual(
+                    store.connection.execute(
+                        "select quantity from hardware_items where order_id='PP9999'"
+                    ).fetchone()[0],
+                    2.0,
+                )
+            finally:
+                store.close()
+
+            make_fittings(fittings, [("F100", 5)])
+            unresolved = {
+                "missing": [{
+                    "name": "TestFullHinge",
+                    "source_code": "71T950A",
+                    "quantity": 5,
+                    "message": "找不到有效库存 SKU",
+                }],
+                "ignored": [],
+                "outbound": [],
+                "accepted": [],
+            }
+            with patch(
+                "traveler_assistant.inventory.resolve_inventory_items",
+                return_value=unresolved,
+            ):
+                failed = sync_order_index(
+                    config,
+                    refresh_outbound_statuses=False,
+                    reconcile_outbound=False,
+                )
+
+            self.assertGreaterEqual(failed["index_stats"]["parsed_report_count"], 1)
+            store = OrderIndexStore(config.workflow_database)
+            try:
+                self.assertEqual(
+                    store.connection.execute(
+                        "select quantity from hardware_items where order_id='PP9999'"
+                    ).fetchone()[0],
+                    2.0,
+                )
+            finally:
+                store.close()
+
     def test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records(self):
         class TrackingExecutor:
             def __init__(self, max_workers):
@@ -1578,7 +1864,7 @@ class OrderIndexTests(unittest.TestCase):
                 "traveler_assistant.order_index.ThreadPoolExecutor",
                 side_effect=make_executor,
             ):
-                store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+                store = OrderIndexStore(config.workflow_database)
                 root_path, snapshot = _server_snapshot(config, store)
                 store.close()
 
@@ -1591,7 +1877,7 @@ class OrderIndexTests(unittest.TestCase):
             )
             self.assertEqual(
                 sorted(Path(path).name for path, item in snapshot.items() if item["kind"] != "folder"),
-                ["PP0035 materials.xlsx", "PP0046 materials.xlsx"],
+                [],
             )
 
     def test_sync_index_reuses_scan_snapshot_and_reports_phase_durations(self):
@@ -1605,7 +1891,7 @@ class OrderIndexTests(unittest.TestCase):
             report = folder / "Report" / "板材清单.xlsx"
             report.parent.mkdir(parents=True)
             report.write_bytes(b"placeholder")
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             store.upsert_aimes_factory(
                 "F100",
                 order_id="PP9999",
@@ -1627,7 +1913,7 @@ class OrderIndexTests(unittest.TestCase):
                 result = sync_order_index(config, server_snapshot_path=snapshot_path)
 
             self.assertTrue(result["index_stats"]["server_snapshot_reused"])
-            self.assertEqual(result["index_stats"]["server_snapshot_entry_count"], 2)
+            self.assertEqual(result["index_stats"]["server_snapshot_entry_count"], 1)
             self.assertIn("server_metadata_and_report_sync", result["index_stats"]["phase_durations"])
             self.assertIn("索引阶段耗时：", result["operation_trace"]["sync"][-1])
 
@@ -1641,7 +1927,7 @@ class OrderIndexTests(unittest.TestCase):
             )
             folder = config.source_root / "pp001"
             folder.mkdir(parents=True)
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             store.upsert_source_file(
                 folder,
                 source_folder=folder,
@@ -1661,7 +1947,7 @@ class OrderIndexTests(unittest.TestCase):
 
             self.assertEqual(result["server"]["changes"], [])
             self.assertEqual(result["current_issues"], [])
-            reopened = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            reopened = OrderIndexStore(config.workflow_database)
             self.assertEqual(
                 reopened.connection.execute("select count(*) from source_files").fetchone()[0],
                 0,
@@ -1684,7 +1970,7 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(folder_change["order_id"], "CS003、PP0047")
             self.assertIn("混单文件夹", folder_change["message"])
 
-    def test_fully_shipped_mixed_folder_is_skipped_until_aimes_reopens_an_order(self):
+    def test_fully_shipped_mixed_folder_is_watched_then_reopened_by_aimes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = Config(state_dir=root / "state", source_root=root / "source")
@@ -1711,9 +1997,12 @@ class OrderIndexTests(unittest.TestCase):
                     {"order_id": "PP0047", "remark": "PP0047 KITCHEN", "status": "已出库", "document_number": "OUT-PP0047"},
                 ],
             ):
-                skipped = scan_server_changes(config)["server"]
-                self.assertFalse(skipped["changed"])
-                self.assertEqual(skipped["scan_stats"]["order_folder_count"], 0)
+                watched = scan_server_changes(config)["server"]
+                self.assertTrue(watched["changed"])
+                self.assertEqual(watched["scan_stats"]["order_folder_count"], 1)
+                self.assertTrue(any(
+                    item["change_type"] == "missing_report" for item in watched["changes"]
+                ))
 
                 reopened = OrderIndexStore(config.workflow_database)
                 reopened.upsert_aimes_factory(
@@ -1729,7 +2018,138 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(reopened_scan["scan_stats"]["order_folder_count"], 1)
         self.assertEqual(reopened_scan["changes"][0]["path"], str(folder))
 
-    def test_reportless_mixed_folder_requires_review_and_can_be_ignored_for_one_month(self):
+    def test_shipped_server_order_becomes_permanent_after_seven_day_watch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state", source_root=root / "source")
+            folder = config.source_root / "PP9999"
+            folder.mkdir(parents=True)
+            (folder / "PP9999 materials.xlsx").write_bytes(b"material")
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_aimes_factory(
+                "F100", order_id="PP9999", factory_name="PP9999 KITCHEN",
+                sales_order_name="PP9999", split_time="2026-08-10T08:30:00",
+                seen_at="2026-08-10T08:30:00",
+            )
+            store.commit()
+            with patch(
+                "traveler_assistant.order_index._load_outbound_records",
+                return_value=[{
+                    "order_id": "PP9999", "remark": "PP9999 KITCHEN",
+                    "status": "已出库", "document_number": "QTCK001",
+                }],
+            ):
+                _, first = _server_snapshot(config, store)
+                self.assertIn(str(folder), first)
+                self.assertEqual(store.server_scan_policy("PP9999")["policy"], "watching")
+                store.connection.execute(
+                    "update orders set server_scan_watch_until = ? where order_id = ?",
+                    ("2026-08-01T00:00:00", "PP9999"),
+                )
+                store.commit()
+                _, expired = _server_snapshot(config, store)
+                self.assertNotIn(str(folder), expired)
+                self.assertEqual(store.server_scan_policy("PP9999")["policy"], "permanent")
+            store.close()
+
+    def test_initial_date_orders_are_marked_shipped_without_fabricating_documents(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state", source_root=root / "source")
+            old_folder = config.source_root / "PP0010"
+            old_folder.mkdir(parents=True)
+            old_mtime = datetime.fromisoformat("2026-07-21T12:00:00").timestamp()
+            os.utime(old_folder, (old_mtime, old_mtime))
+            factory_folder = config.source_root / "PP0011"
+            factory_folder.mkdir(parents=True)
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_aimes_factory(
+                "F2605120103", order_id="PP0011", factory_name="Kitchen",
+                sales_order_name="PP0011", split_time="2026-05-12T02:59:55",
+                seen_at="2026-08-31T10:00:00",
+            )
+            store.upsert_order("PP0011", source_folder=str(factory_folder))
+            store.connection.execute(
+                "update factory_orders set outbound_status = '未查询', outbound_document = '' where factory_order = ?",
+                ("F2605120103",),
+            )
+            store.connection.execute(
+                "update orders set validation_status = '数据异常', validation_message = '旧的缺少 material 提醒' where order_id = ?",
+                ("PP0011",),
+            )
+            store.commit()
+
+            updated = _mark_initial_orders_shipped(config, store)
+
+            shipped_order = store.connection.execute(
+                "select stage, validation_status, validation_message from orders where order_id = ?", ("PP0011",)
+            ).fetchone()
+            shipped_factory = store.connection.execute(
+                "select outbound_status, outbound_document, outbound_mode from factory_orders where factory_order = ?",
+                ("F2605120103",),
+            ).fetchone()
+            store.close()
+
+        self.assertEqual(updated, 1)
+        self.assertEqual(shipped_order, ("已出货", "待校验", ""))
+        self.assertEqual(shipped_factory, ("已出库", "", "historical_initial_date"))
+
+    def test_mark_temporary_folder_manual_starts_three_day_xml_watch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state", source_root=root / "source")
+            folder = config.source_root / "manual-temporary"
+            xml_root = folder / "New Nesting" / "Optimize file"
+            xml_root.mkdir(parents=True)
+            (xml_root / "Optimize file.xml").write_text("<Optimize />", encoding="utf-8")
+            (xml_root / "layout file").mkdir()
+            (xml_root / "layout file" / "nesting_result.xml").write_text(
+                '<Nesting><BoardControl OrderID="F100" /></Nesting>', encoding="utf-8"
+            )
+            (folder / "manual materials.xlsx").write_bytes(b"material")
+
+            result = mark_temporary_folder_manual(config, folder)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["outbound_status"], "已出库")
+            self.assertEqual(result["server_scan_policy"], "watching")
+            store = OrderIndexStore(config.workflow_database)
+            temporary = store.temporary_order(str(folder))
+            xml_count = store.connection.execute(
+                "select count(*) from server_scan_xml_state where source_folder = ?",
+                (str(folder),),
+            ).fetchone()[0]
+            self.assertEqual(temporary["processing_status"], "已人工处理")
+            self.assertEqual(temporary["outbound_status"], "已出库")
+            self.assertEqual(temporary["server_scan_policy"], "watching")
+            self.assertEqual(xml_count, 2)
+            store.close()
+            self.assertEqual(scan_server_changes(config)["server"]["changes"], [])
+
+    def test_removed_server_folder_ignore_table_is_cleaned_on_open(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state", source_root=root / "source")
+            config.state_dir.mkdir(parents=True)
+            connection = sqlite3.connect(config.workflow_database)
+            connection.execute(
+                "create table ignored_server_folders(path text primary key, ignored_at text)"
+            )
+            connection.execute(
+                "insert into ignored_server_folders(path, ignored_at) values(?, ?)",
+                ("/old/server/folder", "2026-08-01T00:00:00"),
+            )
+            connection.commit()
+            connection.close()
+
+            store = OrderIndexStore(config.workflow_database)
+            exists = store.connection.execute(
+                "select 1 from sqlite_master where type = 'table' and name = 'ignored_server_folders'"
+            ).fetchone()
+            store.close()
+            self.assertIsNone(exists)
+
+    def test_reportless_mixed_folder_requires_review(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = Config(state_dir=root / "state", source_root=root / "source")
@@ -1744,120 +2164,64 @@ class OrderIndexTests(unittest.TestCase):
             issue = next(item for item in first["current_issues"] if item["kind"] == "server_missing_report")
             self.assertIn("缺少可识别的报表", issue["message"])
 
-            ignored = ignore_server_folder(config, folder)
-            self.assertEqual(ignored["pending_server_changes"], [])
-            self.assertEqual(ignored["current_issues"], [])
-
-            unchanged = scan_server_changes(config)
-            self.assertEqual(unchanged["server"]["changes"], [])
-            self.assertEqual(unchanged["current_issues"], [])
-
-            folder_stat = folder.stat()
-            os.utime(folder, ns=(folder_stat.st_atime_ns, folder_stat.st_mtime_ns + 1_000_000_000))
-            changed = scan_server_changes(config)
-            self.assertEqual(changed["server"]["changes"], [])
-            self.assertEqual(changed["current_issues"], [])
-
-            report = folder / "Report" / "pp-板材清单.xlsx"
-            from tests.test_order_workflow import make_board_material_report
-            make_board_material_report(report, factory="F100", name="PP9999-KITCHEN")
-            report_changed = scan_server_changes(config)
-            self.assertTrue(any(item["path"] == str(report) for item in report_changed["server"]["changes"]))
-            self.assertFalse(any(item["kind"] == "server_missing_report" for item in report_changed["current_issues"]))
-
-    def test_reportless_mixed_folder_becomes_permanently_ignored_after_watch_window(self):
+    def test_processed_temporary_folder_uses_three_day_xml_watch_then_is_permanent(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = Config(state_dir=root / "state", source_root=root / "source")
-            folder = config.source_root / "CS003 PP0047"
-            folder.mkdir(parents=True)
-            scan_server_changes(config)
-            ignore_server_folder(config, folder)
+            folder = config.source_root / "temporary-production"
+            xml = folder / "New Nesting" / "Optimize file" / "nesting_result.xml"
+            xml.parent.mkdir(parents=True)
+            xml.write_text('<Nesting><BoardControl OrderID="F100" /></Nesting>', encoding="utf-8")
+            (folder / "material.xlsx").write_bytes(b"placeholder")
+            processed_at = datetime.now().isoformat(timespec="seconds")
 
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_temporary_order(
+                temporary_id="TMP:watch",
+                folder_name=folder.name,
+                source_folder=str(folder),
+                folder_created_at=0,
+                content_fingerprint="workbooks",
+                processing_status="Traveler 已生成",
+                outbound_status="已出库",
+                processed_at=processed_at,
+            )
+            store.save_server_scan_xml_baseline(
+                [folder],
+                [{
+                    "path": str(xml),
+                    "source_folder": str(folder),
+                    "kind": "optimization_result",
+                    "order_id": "",
+                    "modified_at": int(xml.stat().st_mtime_ns // 1_000_000),
+                }],
+                observed_at=processed_at,
+            )
+            store.commit()
+            store.close()
+
+            watched = scan_server_changes(config)["server"]
+            self.assertFalse(watched["changed"])
+            store = OrderIndexStore(config.workflow_database)
+            self.assertEqual(
+                store.temporary_order(str(folder))["server_scan_policy"],
+                "watching",
+            )
             store.connection.execute(
-                "update ignored_server_folders set watch_until = ? where path = ?",
+                "update temporary_orders set server_scan_watch_until = ? where source_folder = ?",
                 ("2000-01-01T00:00:00", str(folder)),
             )
             store.commit()
             store.close()
 
-            expired = scan_server_changes(config)
-            self.assertEqual(expired["server"]["changes"], [])
-            self.assertEqual(expired["current_issues"], [])
-            reopened = OrderIndexStore(config.state_dir / "order-index.sqlite3")
-            permanent = reopened.connection.execute(
-                "select permanent from ignored_server_folders where path = ?", (str(folder),)
-            ).fetchone()[0]
-            reopened.close()
-            self.assertEqual(permanent, 1)
-
-    def test_temporary_folder_can_be_ignored_for_one_month_and_reappears_on_change(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            config = Config(state_dir=root / "state", source_root=root / "source")
-            folder = config.source_root / "temporary-production"
-            folder.mkdir(parents=True)
-
-            first = scan_server_changes(config)
-            self.assertTrue(any(item["path"] == str(folder) for item in first["server"]["changes"]))
-
-            ignored = ignore_server_folder(config, folder)
-            self.assertEqual(ignored["pending_server_changes"], [])
-            self.assertEqual(ignored["current_issues"], [])
-            self.assertEqual(scan_server_changes(config)["server"]["changes"], [])
-
-            report = folder / "Report" / "pp-板材清单.xlsx"
-            from tests.test_order_workflow import make_board_material_report
-            make_board_material_report(report, factory="F100", name="TMP-KITCHEN")
-            changed = scan_server_changes(config)
-            self.assertTrue(any(item["path"] == str(report) for item in changed["server"]["changes"]))
-
-    def test_ignoring_folder_does_not_run_a_second_full_server_scan(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            config = Config(state_dir=root / "state", source_root=root / "source")
-            folder = config.source_root / "temporary-production"
-            folder.mkdir(parents=True)
-
-            with patch("traveler_assistant.order_index.scan_server_changes") as scan:
-                result = ignore_server_folder(config, folder)
-
-            scan.assert_not_called()
-            self.assertEqual(result["pending_server_changes"], [])
-            self.assertEqual(result["current_issues"], [])
+            expired = scan_server_changes(config)["server"]
+            self.assertFalse(expired["changed"])
             store = OrderIndexStore(config.workflow_database)
-            ignored = store.ignored_server_folder(str(folder))
-            store.close()
-            self.assertIsNotNone(ignored)
-            self.assertFalse(ignored["permanent"])
-
-    def test_temporary_folder_becomes_permanently_ignored_after_watch_window(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            config = Config(state_dir=root / "state", source_root=root / "source")
-            folder = config.source_root / "temporary-production"
-            folder.mkdir(parents=True)
-            scan_server_changes(config)
-            ignore_server_folder(config, folder)
-
-            store = OrderIndexStore(config.workflow_database)
-            store.connection.execute(
-                "update ignored_server_folders set watch_until = ? where path = ?",
-                ("2000-01-01T00:00:00", str(folder)),
+            self.assertEqual(
+                store.temporary_order(str(folder))["server_scan_policy"],
+                "permanent",
             )
-            store.commit()
             store.close()
-
-            expired = scan_server_changes(config)
-            self.assertEqual(expired["server"]["changes"], [])
-            self.assertEqual(expired["current_issues"], [])
-            reopened = OrderIndexStore(config.workflow_database)
-            permanent = reopened.connection.execute(
-                "select permanent from ignored_server_folders where path = ?", (str(folder),)
-            ).fetchone()[0]
-            reopened.close()
-            self.assertEqual(permanent, 1)
 
     def test_failed_temporary_processing_remains_in_pending_server_changes(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1873,7 +2237,7 @@ class OrderIndexTests(unittest.TestCase):
             pending_paths = {item["path"] for item in result["pending_server_changes"]}
             self.assertIn(str(folder), pending_paths)
             self.assertIn(str(folder / "material.xlsx"), pending_paths)
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             self.assertTrue(any(item["kind"] == "temporary_processing" for item in store.active_issues()))
             self.assertEqual(
                 store.connection.execute("select count(*) from source_files").fetchone()[0],
@@ -1932,7 +2296,7 @@ class OrderIndexTests(unittest.TestCase):
                 {"saved": True, "results": [{"documentNumber": "QTCK-001"}]},
             )
 
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             rows = store.connection.execute(
                 "select source_folder, outbound_status, outbound_document from temporary_orders"
             ).fetchall()
@@ -1957,6 +2321,9 @@ class OrderIndexTests(unittest.TestCase):
             report = folder / "Report" / "pp-板材清单.xlsx"
             report.parent.mkdir(parents=True)
             report.write_bytes(b"board")
+            xml = folder / "New Nesting" / "Optimize file" / "nesting_result.xml"
+            xml.parent.mkdir(parents=True)
+            xml.write_text('<Nesting><BoardControl OrderID="F100" /></Nesting>', encoding="utf-8")
             traveler = config.order_root / "TEMPORARY-PRODUCTION" / "Work Order Traveler(TEMPORARY-PRODUCTION).xlsx"
             record_temporary_outbound(
                 config,
@@ -1968,6 +2335,12 @@ class OrderIndexTests(unittest.TestCase):
                 result = scan_server_changes(config)
 
             self.assertFalse(result["server"]["changed"])
+            store = OrderIndexStore(config.workflow_database)
+            self.assertEqual(
+                store.temporary_order(str(folder))["server_scan_policy"],
+                "watching",
+            )
+            store.close()
             self.assertFalse(any(
                 call.args and str(folder) == str(call.args[0])
                 for call in report_files.call_args_list
@@ -2088,7 +2461,7 @@ class OrderIndexTests(unittest.TestCase):
                 for row in range(1, picking.max_row + 1)
             ))
             outbound.assert_called_once()
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             record = store.temporary_order(str(folder))
             self.assertEqual(record["folder_name"], "B12")
             self.assertEqual(record["processing_status"], "Traveler 已生成")
@@ -2169,7 +2542,7 @@ class OrderIndexTests(unittest.TestCase):
             from tests.test_order_workflow import make_board_material_report, make_fittings
             make_board_material_report(report, factory="F100", name="B12")
             make_fittings(fittings, [("F100", 2)])
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             store.replace_aimes_review_rows([{
                 "ignore_key": "factory:F100",
                 "factory_order": "F100",
@@ -2211,7 +2584,7 @@ class OrderIndexTests(unittest.TestCase):
                 source_root=root / "missing-source",
                 initial_date="2026-07-22",
             )
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             store.upsert_factory("F2605260119", ownership_status="待确认")
             store.upsert_active_issue(
                 issue_key="factory_ownership:F2605260119",
@@ -2233,7 +2606,7 @@ class OrderIndexTests(unittest.TestCase):
             ):
                 result = sync_order_index(config)
 
-            reopened = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            reopened = OrderIndexStore(config.workflow_database)
             self.assertFalse(any(
                 item["issue_key"] == "factory_ownership:F2605260119"
                 for item in result["current_issues"]
@@ -2570,7 +2943,7 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(row["stage"], "数据异常")
         self.assertEqual(stored_stage, "已设计")
         self.assertEqual(row["validation_message"], "未找到 material 文件。请补充后重新扫描 Server。")
-        self.assertEqual(version, 8)
+        self.assertEqual(version, 11)
 
     def test_schema_migration_resolves_legacy_warning_from_unique_order_folder(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -2627,8 +3000,9 @@ class OrderIndexTests(unittest.TestCase):
     def test_aimes_order_validation_and_test_filter(self):
         self.assertEqual(_valid_aimes_order_id("PP0035"), "PP0035")
         self.assertEqual(_valid_aimes_order_id("PP0035-2"), "PP0035-2")
+        self.assertEqual(_valid_aimes_order_id("PP0011"), "PP0011")
         self.assertEqual(_valid_aimes_order_id("CS123"), "CS123")
-        self.assertEqual(_valid_aimes_order_id("PP0034-2"), "")
+        self.assertEqual(_valid_aimes_order_id("PP0034-2"), "PP0034-2")
         self.assertEqual(_valid_aimes_order_id("PP035"), "")
         self.assertEqual(_valid_aimes_order_id("PP0035-A"), "")
         self.assertIsNone(_visible_aimes_row({
@@ -2644,11 +3018,11 @@ class OrderIndexTests(unittest.TestCase):
             "split_time": "2026-08-10 08:30:00",
         }))
 
-    def test_old_pp_server_paths_are_outside_dashboard_scope(self):
+    def test_historical_pp_server_paths_are_in_dashboard_scope(self):
         root = Path("/Volumes/server/Optimized Orders")
 
-        self.assertFalse(_source_path_in_dashboard_scope(root, str(root / "PP0034")))
-        self.assertFalse(_source_path_in_dashboard_scope(root, str(root / "PP0034-2" / "report.xlsx")))
+        self.assertTrue(_source_path_in_dashboard_scope(root, str(root / "PP0034")))
+        self.assertTrue(_source_path_in_dashboard_scope(root, str(root / "PP0034-2" / "report.xlsx")))
         self.assertTrue(_source_path_in_dashboard_scope(root, str(root / "PP0035")))
         self.assertTrue(_source_path_in_dashboard_scope(root, str(root / "PP0035-2" / "report.xlsx")))
         self.assertTrue(_source_path_in_dashboard_scope(root, str(root / "CS123")))
@@ -2695,7 +3069,7 @@ class OrderIndexTests(unittest.TestCase):
     def test_standard_outbound_status_reconciles_and_survives_reopen(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config(state_dir=Path(temp) / "state")
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             store.upsert_order("CS005", validation_status="正常")
             store.upsert_factory(
                 "F2608120222",
@@ -2718,14 +3092,14 @@ class OrderIndexTests(unittest.TestCase):
                 "synced_at": "2026-08-15T16:20:00",
             }]
             with patch("traveler_assistant.order_index._load_outbound_records", return_value=records):
-                store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+                store = OrderIndexStore(config.workflow_database)
                 self.assertEqual(reconcile_outbound_statuses(config, store), 1)
                 store.close()
                 listed = list_order_index(config)
 
             self.assertEqual(listed["orders"][0]["stage"], "已出货")
             self.assertEqual(listed["orders"][0]["completed_at"], "2026-08-15T16:20:00")
-            reopened = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            reopened = OrderIndexStore(config.workflow_database)
             row = reopened.connection.execute(
                 "select outbound_status, outbound_document, outbound_completed_at from factory_orders where factory_order = ?",
                 ("F2608120222",),
@@ -2736,7 +3110,7 @@ class OrderIndexTests(unittest.TestCase):
     def test_fully_shipped_order_is_completed_even_if_optimization_evidence_is_missing(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config(state_dir=Path(temp) / "state")
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             store.upsert_order("PP9998", validation_status="正常")
             for factory_order, factory_name in (("F100", "PP9998-KITCHEN"), ("F101", "PP9998-LAUNDRY")):
                 store.upsert_factory(
@@ -2835,7 +3209,7 @@ class OrderIndexTests(unittest.TestCase):
     def test_order_level_outbound_record_is_not_broadcast_to_split_factories(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config(state_dir=Path(temp) / "state")
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             store.upsert_order("CS005", validation_status="正常")
             for factory_order, factory_name in (("F100", "CS005-KITCHEN"), ("F101", "CS005-LAUNDRY")):
                 store.upsert_factory(
@@ -2900,7 +3274,7 @@ class OrderIndexTests(unittest.TestCase):
     def test_fully_shipped_aimes_order_is_not_a_server_scan_candidate(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config(state_dir=Path(temp) / "state")
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             store.upsert_aimes_factory(
                 "F100",
                 order_id="PP9999",
@@ -2949,6 +3323,7 @@ class OrderIndexTests(unittest.TestCase):
                 split_time="2026-08-10T08:30:00",
                 seen_at="2026-08-10T08:30:00",
             )
+            self._set_permanent_server_policy(store, "PP9999", folder)
             store.commit()
             store.close()
 
@@ -2994,6 +3369,7 @@ class OrderIndexTests(unittest.TestCase):
                 split_time="2026-08-10T08:30:00",
                 seen_at="2026-08-10T08:30:00",
             )
+            self._set_permanent_server_policy(store, "PP9999", folder)
             store.upsert_active_issue(
                 issue_key=f"material_validation:PP9999:{material_path}",
                 kind="material_validation",
@@ -3050,6 +3426,7 @@ class OrderIndexTests(unittest.TestCase):
                 split_time="2026-08-10T08:30:00",
                 seen_at="2026-08-10T08:30:00",
             )
+            self._set_permanent_server_policy(store, "PP9999", folder)
             issue_key = f"hardware_selection:PP9999:{folder}"
             store.upsert_active_issue(
                 issue_key=issue_key,
@@ -3107,6 +3484,7 @@ class OrderIndexTests(unittest.TestCase):
                 split_time="2026-08-10T08:30:00",
                 seen_at="2026-08-10T08:30:00",
             )
+            self._set_permanent_server_policy(store, "PP9999", folder)
             issue_key = "order_validation:PP9999"
             store.upsert_active_issue(
                 issue_key=issue_key,
@@ -3160,7 +3538,7 @@ class OrderIndexTests(unittest.TestCase):
             (shipped_folder / "PP9999 materials.xlsx").write_bytes(b"shipped")
             (active_folder / "PP8888 materials.xlsx").write_bytes(b"active")
             (unindexed_folder / "PP7777 materials.xlsx").write_bytes(b"unindexed")
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             store.upsert_aimes_factory(
                 "F100",
                 order_id="PP9999",
@@ -3188,7 +3566,9 @@ class OrderIndexTests(unittest.TestCase):
                 }],
             ):
                 _, snapshot = _server_snapshot(config, store)
-                self.assertNotIn(str(shipped_folder), snapshot)
+                # A newly confirmed shipped order is watched for seven days;
+                # it is not skipped immediately.
+                self.assertIn(str(shipped_folder), snapshot)
                 self.assertIn(str(active_folder), snapshot)
                 self.assertIn(str(unindexed_folder), snapshot)
 
@@ -3243,7 +3623,8 @@ class OrderIndexTests(unittest.TestCase):
             config.source_root.mkdir()
             folder = config.source_root / "PP9999"
             folder.mkdir()
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
+            self._set_permanent_server_policy(store, "PP9999", folder)
             store.upsert_active_issue(
                 issue_key="factory_ownership:F100",
                 kind="factory_ownership",
@@ -3272,8 +3653,8 @@ class OrderIndexTests(unittest.TestCase):
             rows = store.summaries()
             store.close()
 
-        self.assertEqual([row["order_id"] for row in rows], ["PP0035", "PP0036"])
-        self.assertEqual([row["factory_order"] for row in rows[0]["factories"]], ["F101", "F100"])
+        self.assertEqual([row["order_id"] for row in rows], ["PP0034", "PP0035", "PP0036"])
+        self.assertEqual([row["factory_order"] for row in rows[1]["factories"]], ["F101", "F100"])
 
     def test_summary_includes_confirmed_server_report_factory_assigned_to_normal_order(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -3363,14 +3744,20 @@ class OrderIndexTests(unittest.TestCase):
             config.source_root = Path(temp) / "source"
             folder = config.source_root / "PP0035-2"
             folder.mkdir(parents=True)
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            nesting = folder / "New Nesting" / "Optimize file" / "layout file" / "nesting_result.xml"
+            nesting.parent.mkdir(parents=True)
+            nesting.write_text(
+                '<Nesting><BoardControl OrderID="F100" /></Nesting>',
+                encoding="utf-8",
+            )
+            store = OrderIndexStore(config.workflow_database)
             store.upsert_aimes_factory(
                 "F100",
                 order_id="PP0035-2",
                 factory_name="PP0035-2 KITCHEN",
                 sales_order_name="PP0035-2",
-                split_time="2026-08-10T08:30:00",
-                seen_at="2026-08-10T08:30:00",
+                split_time="2026-08-25T08:30:00",
+                seen_at="2026-08-25T08:30:00",
             )
             store.commit()
             store.close()
@@ -3380,8 +3767,9 @@ class OrderIndexTests(unittest.TestCase):
             self.assertTrue(first["changed"])
             self.assertEqual(first["changes"], repeated["changes"])
             self.assertEqual(first["scan_stats"]["order_folder_count"], 1)
+            self.assertEqual(first["scan_stats"]["related_xml_count"], 1)
             self.assertEqual(first["scan_stats"]["related_excel_count"], 0)
-            self.assertEqual(first["scan_stats"]["quick_checked_file_count"], 0)
+            self.assertEqual(first["scan_stats"]["quick_checked_file_count"], 1)
             self.assertEqual(first["scan_stats"]["reused_folder_count"], 0)
             self.assertEqual(first["scan_stats"]["deep_scanned_folder_count"], 1)
             self.assertEqual(first["scan_stats"]["added_count"], 1)
@@ -3390,11 +3778,25 @@ class OrderIndexTests(unittest.TestCase):
             self.assertTrue(first["changes"][0]["event_time"])
             trace = scan_server_changes(config)["operation_trace"]["server"]
             self.assertIn(
-                "快速检查 0 个相关 Excel 文件，复用 0 个订单文件夹，深度扫描 1 个订单文件夹，总用时",
+                "快速检查 1 个相关 XML 文件，复用 0 个订单文件夹，深度扫描 1 个订单文件夹，总用时",
                 trace[0],
             )
-            self.assertIn("扫描范围：订单文件夹 1 个，相关 Excel 文件 0 个", trace[1])
+            self.assertIn("扫描范围：订单文件夹 1 个，相关 XML 文件 1 个", trace[1])
 
+            sync_order_index(config)
+            self.assertFalse(scan_server_changes(config)["server"]["changed"])
+
+            xml_stat = nesting.stat()
+            os.utime(
+                nesting,
+                ns=(xml_stat.st_atime_ns, xml_stat.st_mtime_ns + 1_000_000_000),
+            )
+            xml_changed = scan_server_changes(config)["server"]
+            self.assertTrue(xml_changed["changed"])
+            self.assertTrue(any(
+                item["path"] == str(nesting) and item["change_type"] == "modified"
+                for item in xml_changed["changes"]
+            ))
             sync_order_index(config)
             self.assertFalse(scan_server_changes(config)["server"]["changed"])
 
@@ -3422,39 +3824,75 @@ class OrderIndexTests(unittest.TestCase):
             report = folder / "material.xlsx"
             report.write_bytes(b"placeholder")
             changed = scan_server_changes(config)["server"]
-            self.assertTrue(changed["changed"])
-            self.assertEqual(changed["scan_stats"]["related_excel_count"], 1)
+            self.assertFalse(changed["changed"])
+            self.assertEqual(changed["scan_stats"]["related_xml_count"], 1)
+            self.assertEqual(changed["scan_stats"]["related_excel_count"], 0)
             self.assertEqual(changed["scan_stats"]["quick_checked_file_count"], 1)
             self.assertEqual(changed["scan_stats"]["reused_folder_count"], 0)
             self.assertEqual(changed["scan_stats"]["deep_scanned_folder_count"], 1)
-            self.assertEqual(changed["scan_stats"]["added_count"], 1)
-            # Creating a child report may also update the parent folder mtime;
-            # only the recognized report is a business change.
+            self.assertEqual(changed["scan_stats"]["added_count"], 0)
             self.assertEqual(changed["scan_stats"]["modified_count"], 0)
             self.assertEqual(changed["scan_stats"]["deleted_count"], 0)
-            self.assertTrue(any(item["path"] == str(report) for item in changed["changes"]))
-            report_change = next(item for item in changed["changes"] if item["path"] == str(report))
-            self.assertTrue(report_change["event_time"])
-            self.assertEqual(changed["changes"], scan_server_changes(config)["server"]["changes"])
+            self.assertFalse(any(item["path"] == str(report) for item in changed["changes"]))
 
             sync_order_index(config)
             self.assertFalse(scan_server_changes(config)["server"]["changed"])
 
             report.unlink()
             removed = scan_server_changes(config)["server"]
+            self.assertEqual(removed["scan_stats"]["related_xml_count"], 1)
             self.assertEqual(removed["scan_stats"]["related_excel_count"], 0)
             self.assertEqual(removed["scan_stats"]["added_count"], 0)
-            self.assertEqual(
-                removed["scan_stats"]["modified_count"],
-                sum(item["change_type"] == "modified" for item in removed["changes"]),
-            )
-            self.assertEqual(removed["scan_stats"]["deleted_count"], 1)
-            self.assertTrue(any(
-                item["change_type"] == "removed" and item["path"] == str(report)
-                for item in removed["changes"]
-            ))
+            self.assertEqual(removed["scan_stats"]["modified_count"], 0)
+            self.assertEqual(removed["scan_stats"]["deleted_count"], 0)
             sync_order_index(config)
             self.assertFalse(scan_server_changes(config)["server"]["changed"])
+
+    def test_confirm_without_business_changes_only_updates_xml_scan_baseline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state", source_root=root / "source")
+            folder = config.source_root / "PP9999"
+            xml = folder / "New Nesting" / "Optimize file" / "nesting_result.xml"
+            xml.parent.mkdir(parents=True)
+            xml.write_text('<Nesting><BoardControl OrderID="F100" /></Nesting>', encoding="utf-8")
+
+            payload = {
+                "source_folders": [str(folder)],
+                "orders": [{
+                    "order_id": "PP9999",
+                    "validation_status": "正常",
+                    "validation_message": "",
+                    "material_changes": [],
+                    "factories": [],
+                    "hardware_changes": [],
+                }],
+                "has_business_changes": False,
+                "hardware_mapping_requirements": [],
+                "write_records": {},
+            }
+            result = confirm_server_material_preview_memory(
+                config,
+                payload,
+                confirm_write=True,
+            )
+
+            self.assertTrue(result["server_write_confirmed"])
+            self.assertTrue(result["server_write_skipped"])
+            self.assertIn("仅更新 Server XML 扫描基线", result["server_write_skip_reason"])
+            store = OrderIndexStore(config.workflow_database)
+            try:
+                self.assertEqual(
+                    store.connection.execute(
+                        "select path, kind, modified_at from server_scan_xml_state"
+                    ).fetchall(),
+                    [(str(xml), "optimization_result", int(xml.stat().st_mtime_ns // 1_000_000))],
+                )
+                self.assertEqual(store.connection.execute("select count(*) from orders").fetchone()[0], 0)
+                self.assertEqual(store.connection.execute("select count(*) from material_items").fetchone()[0], 0)
+                self.assertEqual(store.connection.execute("select count(*) from hardware_items").fetchone()[0], 0)
+            finally:
+                store.close()
 
     def test_server_scan_baseline_covers_both_server_roots(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -3465,6 +3903,12 @@ class OrderIndexTests(unittest.TestCase):
             )
             folder = root / "CUT TO SIZE" / "CS003"
             folder.mkdir(parents=True)
+            nesting = folder / "New Nesting" / "Optimize file" / "nesting_result.xml"
+            nesting.parent.mkdir(parents=True)
+            nesting.write_text(
+                '<Nesting><BoardControl OrderID="F100" /></Nesting>',
+                encoding="utf-8",
+            )
             store = OrderIndexStore(config.workflow_database)
             store.upsert_aimes_factory(
                 "F100",
@@ -3482,7 +3926,7 @@ class OrderIndexTests(unittest.TestCase):
                 return_value=[],
             ):
                 first = scan_server_changes(config)["server"]
-                self.assertTrue(any(item["path"] == str(folder) for item in first["changes"]))
+                self.assertTrue(any(item["path"] == str(nesting) for item in first["changes"]))
 
                 sync_order_index(config)
                 repeated = scan_server_changes(config)["server"]
@@ -3490,7 +3934,7 @@ class OrderIndexTests(unittest.TestCase):
         self.assertFalse(repeated["changed"])
         self.assertEqual(repeated["changes"], [])
 
-    def test_app_generated_material_is_baselined_but_later_edit_is_detected(self):
+    def test_report_edits_are_ignored_by_xml_only_server_scan(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = Config(
@@ -3499,7 +3943,7 @@ class OrderIndexTests(unittest.TestCase):
             )
             folder = config.source_root.parent / "CUT TO SIZE" / "CS005"
             folder.mkdir(parents=True)
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             store.upsert_aimes_factory(
                 "F100",
                 order_id="CS005",
@@ -3521,10 +3965,10 @@ class OrderIndexTests(unittest.TestCase):
             materials = folder / "CS005 materials.xlsx"
             materials.write_bytes(b"generated material")
             before_registration = scan_server_changes(config)["server"]
-            self.assertTrue(before_registration["changed"])
-            self.assertTrue(any(item["path"] == str(materials) for item in before_registration["changes"]))
+            self.assertFalse(before_registration["changed"])
+            self.assertFalse(any(item["path"] == str(materials) for item in before_registration["changes"]))
 
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             _record_generated_material_baseline(store, folder, materials, order_id="CS005")
             store.commit()
             store.close()
@@ -3532,11 +3976,8 @@ class OrderIndexTests(unittest.TestCase):
 
             materials.write_bytes(b"external edit")
             after_edit = scan_server_changes(config)["server"]
-            self.assertTrue(after_edit["changed"])
-            self.assertTrue(any(
-                item["path"] == str(materials) and item["change_type"] == "modified"
-                for item in after_edit["changes"]
-            ))
+            self.assertFalse(after_edit["changed"])
+            self.assertFalse(any(item["path"] == str(materials) for item in after_edit["changes"]))
 
     def test_selected_server_folder_reuses_index_processing_for_one_folder(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -3554,7 +3995,7 @@ class OrderIndexTests(unittest.TestCase):
             result = process_server_folder(config, folder)
 
             self.assertEqual(result["sync"]["server_folder_count"], 1)
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             order_type = store.connection.execute(
                 "select order_type from orders where order_id = ?", ("PP0035-2",)
             ).fetchone()[0]
@@ -3579,7 +4020,7 @@ class OrderIndexTests(unittest.TestCase):
             with self.assertRaisesRegex(RuleError, "选错了文件夹"):
                 process_server_folder(config, selected)
 
-            self.assertFalse((config.state_dir / "order-index.sqlite3").exists())
+            self.assertFalse((config.workflow_database).exists())
 
     def test_selected_non_order_folder_with_recognized_report_is_temporary_order(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -3593,7 +4034,7 @@ class OrderIndexTests(unittest.TestCase):
             result = process_server_folder(config, selected)
 
             self.assertEqual(result["sync"]["server_folder_count"], 1)
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             source_paths = {
                 row[0] for row in store.connection.execute("select path from source_files").fetchall()
             }

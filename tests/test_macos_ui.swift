@@ -262,9 +262,32 @@ private struct MacOSUIRegressionTests {
         require(
             dashboardSource.contains("Button(\"详情\")")
                 && dashboardSource.contains("Button(\"订单安排\")")
-                && dashboardSource.contains(".sheet(item: $orderArrangementOrder)"),
+                && dashboardSource.contains(".sheet(item: $orderArrangementOrder)")
+                && dashboardSource.contains("OrderDashboardTableLayout")
+                && dashboardSource.contains("tableHeader(\"订单\", width: layout.flexibleColumnWidth)")
+                && dashboardSource.contains("tableCell(width: layout.flexibleColumnWidth)")
+                && dashboardSource.contains("LazyVGrid(columns: layout.columns, spacing: 0)")
+                && dashboardSource.contains("LazyVGrid(columns: layout.dataColumns, spacing: 0)")
+                && dashboardSource.contains(".frame(width: layout.dataWidth, alignment: .leading)")
+                && dashboardSource.contains(".frame(width: layout.containerWidth, alignment: .leading)")
+                && dashboardSource.contains("orderDashboardScrollIndicatorReservation")
+                && dashboardSource.contains("trailingSpacerWidth")
+                && dashboardSource.contains(".fixedSize(horizontal: true, vertical: true)")
+                && dashboardSource.contains("minWidth: width, idealWidth: width, maxWidth: width"),
             "订单行没有同时提供材料详情和独立订单安排入口"
         )
+        if let requestedStart = dashboardSource.range(of: "private func openRequestedOrderIfAvailable()"),
+           let requestedEnd = dashboardSource.range(of: "private func tableHeader", range: requestedStart.upperBound..<dashboardSource.endIndex) {
+            let requestedSource = String(dashboardSource[requestedStart.lowerBound..<requestedEnd.lowerBound])
+            require(
+                requestedSource.contains("searchText = item.orderId")
+                    && requestedSource.contains("expandedOrderID = nil")
+                    && !requestedSource.contains("openOrderDetail(item)"),
+                "看板双击订单后只能定位到订单中心，不应自动打开订单详情"
+            )
+        } else {
+            require(false, "无法定位看板双击订单的跳转逻辑")
+        }
         require(
             dashboardSource.contains("count: 3")
                 && dashboardSource.contains("LazyVGrid(columns: orderCostSourceColumns, spacing: 0)"),
@@ -395,14 +418,14 @@ private struct MacOSUIRegressionTests {
             OrderInstallationDay(date: "2026-07-11", installer: "安装组 B"),
         ]
         require(
-            orderInstallationDateSummary(installationDays) == "2026年7月8日–2026年7月11日 · 2天",
-            "非连续安装日期的开始日、结束日或天数摘要错误"
+            orderInstallationDateSummary(installationDays) == "2026年7月8日",
+            "实际安装日期摘要必须只显示最早的安装开始日期"
         )
         require(
             orderInstallationQuickSummaries(
                 planned: [OrderInstallationDay(date: "2026-07-08", installer: "安装组 A")],
                 actual: [OrderInstallationDay(date: "2026-07-09", installer: "安装组 B")]
-            ) == ["计划安装 2026年7月8日", "实际安装 2026年7月9日 · 1天"],
+            ) == ["计划安装 2026年7月8日", "实际安装 2026年7月9日"],
             "订单行必须同时保留计划安装和实际安装摘要，不能用实际日期覆盖计划日期"
         )
         require(
@@ -421,7 +444,8 @@ private struct MacOSUIRegressionTests {
                 && dashboardSource.contains(".presentationBackground(.clear)")
                 && dashboardSource.contains("orderInstallationPickerDisplayDate")
                 && dashboardSource.contains("datePickerRowID")
-                && dashboardSource.contains("allowsMultiple: false")
+                && dashboardSource.contains("installationRows(title: \"实际安装开始日期\", rows: $actualDays)")
+                && !dashboardSource.contains("allowsMultiple:")
                 && dashboardSource.contains("AppGlassDatePickerCalendar(selection: $day.date, compact: true)")
                 && dashboardSource.contains("arrowEdge: .trailing")
                 && !dashboardSource.contains(".datePickerStyle(.graphical)")
@@ -717,8 +741,8 @@ private struct MacOSUIRegressionTests {
             serverTime: "12:01:02",
             activity: [],
             operationDetailsBySource: ["server": [
-                "快速检查 8 个相关 Excel 文件，复用 2 个订单文件夹，深度扫描 1 个订单文件夹，总用时 0.12 秒。",
-                "扫描范围：订单文件夹 3 个，相关 Excel 文件 8 个（目录：/Volumes/server/Optimized Orders）。",
+                "快速检查 8 个相关 XML 文件，复用 2 个订单文件夹，深度扫描 1 个订单文件夹，总用时 0.12 秒。",
+                "扫描范围：订单文件夹 3 个，相关 XML 文件 8 个（目录：/Volumes/server/Optimized Orders）。",
                 "变化统计：新增 1 个，修改 2 个，删除 0 个。",
             ]],
             durationsBySource: ["server": 20.205],
@@ -728,8 +752,8 @@ private struct MacOSUIRegressionTests {
             ]]
         )
         let performanceServer = performanceTrace.first(where: { $0.source == "server" })
-        require(performanceServer?.operationDetails.contains("快速检查 8 个相关 Excel 文件，复用 2 个订单文件夹，深度扫描 1 个订单文件夹，总用时 0.12 秒。") == true, "Server 扫描方式统计没有进入悬停详情")
-        require(performanceServer?.operationDetails.contains("扫描范围：订单文件夹 3 个，相关 Excel 文件 8 个（目录：/Volumes/server/Optimized Orders）。") == true, "Server 扫描范围统计没有进入悬停详情")
+        require(performanceServer?.operationDetails.contains("快速检查 8 个相关 XML 文件，复用 2 个订单文件夹，深度扫描 1 个订单文件夹，总用时 0.12 秒。") == true, "Server 扫描方式统计没有进入悬停详情")
+        require(performanceServer?.operationDetails.contains("扫描范围：订单文件夹 3 个，相关 XML 文件 8 个（目录：/Volumes/server/Optimized Orders）。") == true, "Server 扫描范围统计没有进入悬停详情")
         require(performanceServer?.operationDetails.contains("变化统计：新增 1 个，修改 2 个，删除 0 个。") == true, "Server 变化数量统计没有进入悬停详情")
         require(dashboardMessageDetailText(performanceServer!).contains("用时 20.20 秒"), "订单消息没有显示总操作用时")
         require(dashboardMessageDetailText(performanceServer!).contains("扫描 Server："), "Server 阶段耗时没有进入消息列表")
@@ -823,16 +847,17 @@ private struct MacOSUIRegressionTests {
         require(groupedServerRows.allSatisfy { $0.changes.count == 2 || $0.changes.count == 1 }, "Server 文件夹分组没有保留文件变化明细")
         require(groupedServerRows.contains { $0.requiresManualReview }, "缺少报表的混单文件夹没有标记为人工检查")
         require(
-            dashboardSource.contains("忽略此文件夹（观察一个月）") &&
-                dashboardSource.contains("model.ignoreServerFolder(group.folderPath)"),
-            "普通临时 Server 文件夹没有忽略入口"
+            dashboardSource.contains("已人工处理") &&
+                dashboardSource.contains("model.markTemporaryFolderManual(group.folderPath)"),
+            "普通临时 Server 文件夹没有已人工处理入口"
         )
         require(
             assistantSource.contains("serverChangesExcludingFolder") &&
-                !assistantSource.contains("self.pendingServerChanges = serverChangePreviews(rows)\n            self.selectedServerFolderPaths.remove(folderPath)"),
-            "忽略 Server 文件夹后不应清空其他待处理项或依赖全量扫描结果"
+                !dashboardSource.contains("忽略此文件夹") &&
+                !assistantSource.contains("ignoreServerFolder"),
+            "已人工处理动作不应保留旧的 Server 文件夹忽略入口"
         )
-        let ignoredFolder = "/Volumes/server/Optimized Orders/temporary"
+        let handledFolder = "/Volumes/server/Optimized Orders/temporary"
         let retainedServerChanges = serverChangesExcludingFolder(
             [
                 ServerChangePreview(
@@ -840,8 +865,8 @@ private struct MacOSUIRegressionTests {
                     changeType: "added",
                     kind: "folder",
                     orderId: "",
-                    sourceFolder: ignoredFolder,
-                    path: ignoredFolder,
+                    sourceFolder: handledFolder,
+                    path: handledFolder,
                     message: "临时文件夹",
                     manualOnly: true,
                     eventTime: ""
@@ -858,11 +883,11 @@ private struct MacOSUIRegressionTests {
                     eventTime: ""
                 ),
             ],
-            folderPath: ignoredFolder
+            folderPath: handledFolder
         )
         require(
             retainedServerChanges.map(\.id) == ["other"],
-            "忽略一个 Server 文件夹时不应丢失其他待处理文件夹"
+            "处理一个 Server 文件夹时不应丢失其他待处理文件夹"
         )
         let completedDisplay = dashboardCurrentOperation(messages: combinedDashboardMessages, isRunning: false)
         require(completedDisplay?.isRunning == false && completedDisplay?.message.state == "warning", "空闲时没有显示最近成功或失败结果")
@@ -1092,14 +1117,14 @@ private struct MacOSUIRegressionTests {
             "订单行出货进度没有使用与优化进度相同的进度条格式"
         )
         require(
-            dashboard.contains("tableHeader(\"生产进度\")") &&
+            dashboard.contains("tableHeader(\"生产进度\", width: layout.flexibleColumnWidth)") &&
                 dashboard.contains("accessibilityTitle: \"生产进度\"") &&
                 dashboard.contains("completed: item.producedCount") &&
                 dashboard.contains("Text(item.productionProgress)"),
             "订单行没有使用生产完成数显示生产进度列"
         )
-        let materialHeader = dashboard.range(of: "tableHeader(\"材料\")")
-        let optimizationHeader = dashboard.range(of: "tableHeader(\"优化进度\")")
+        let materialHeader = dashboard.range(of: "tableHeader(\"材料\", width: layout.flexibleColumnWidth)")
+        let optimizationHeader = dashboard.range(of: "tableHeader(\"优化进度\", width: layout.flexibleColumnWidth)")
         require(
             materialHeader != nil && optimizationHeader != nil && materialHeader!.lowerBound < optimizationHeader!.lowerBound,
             "材料列应显示在优化进度列前面"
@@ -1233,6 +1258,14 @@ private struct MacOSUIRegressionTests {
                 && !assistantSource.contains("订单中心查看"),
             "助手看板必须使用图标和连接线显示状态，并保持统一的完成色、数字列与局部滚动"
         )
+        require(
+            assistantSource.contains("beginCommandHintsAnchorHover")
+                && assistantSource.contains("beginCommandHintsPanelHover")
+                && assistantSource.contains("dashboardMessageHoverDelay")
+                && assistantSource.contains("dashboardMessageHoverCloseGrace")
+                && !assistantSource.contains("Task.sleep(for: .milliseconds(220))"),
+            "助手命令提示框必须与订单中心统一悬停显示和关闭保留时序"
+        )
         if let railStart = assistantSource.range(of: "private func assistantProgressRail"),
            let railEnd = assistantSource.range(of: "private func assistantStageIcon", range: railStart.upperBound..<assistantSource.endIndex) {
             let railSource = String(assistantSource[railStart.lowerBound..<railEnd.lowerBound])
@@ -1262,6 +1295,8 @@ private struct MacOSUIRegressionTests {
                 && commandCardSource.contains("currentOperationSummary")
                 && orderBoardSource.contains("assistantMetric(\"总订单数\"")
                 && orderBoardSource.contains("ForEach(ongoingOrders)")
+                && assistantSource.contains("orderStatusBoard\n                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)")
+                && assistantSource.contains(".frame(maxHeight: .infinity)")
                 && !orderBoardSource.contains("currentOperationSummary"),
             "助手输入与当前操作应共用一张卡片，订单总览与订单行应共用另一张卡片"
         )
@@ -1278,10 +1313,13 @@ private struct MacOSUIRegressionTests {
                 && assistantSource.contains(".glassEffect(.regular.tint(AppPalette.success.opacity(0.12)), in: Capsule())"),
             "助手看板未按要求居中并右移淡绿色订单身份牌"
         )
-
         let dashboardSource = try! String(
             contentsOfFile: "macos/OrderDashboardView.swift",
             encoding: .utf8
+        )
+        require(
+            dashboardSource.contains("private let orderDashboardDataHeaderOffset: CGFloat = 2"),
+            "订单中心从订单到出货进度的标题行必须向左微调"
         )
         require(
             dashboardSource.contains("orderInstallationDateButtonWidth")
@@ -1395,14 +1433,19 @@ private struct MacOSUIRegressionTests {
                 && settingsSource.contains("SettingsCard(title: \"系统账户\"")
                 && settingsSource.contains("SettingsCard(title: \"库存资料与规则\"")
                 && settingsSource.contains("SettingsCard(title: \"备份与日志\"")
-                && settingsSource.contains(".frame(height: 238)")
-                && settingsSource.contains(".frame(height: 212)")
+                && settingsSource.contains(".frame(minHeight: AppLayout.settingsTopRowMinHeight)")
+                && settingsSource.contains(".frame(minHeight: AppLayout.settingsBottomRowMinHeight)")
                 && settingsSource.contains("showInitialDatePicker")
                 && settingsSource.contains("settingsDateDisplay(model.initialDate)")
                 && settingsSource.contains(".frame(width: 168, height: 30, alignment: .leading)")
                 && settingsSource.contains("AppGlassDatePickerCalendar(selection: $model.initialDate)")
                 && settingsSource.contains(".frame(height: 56)"),
             "设置页面必须使用紧凑布局，并通过宽日期按钮和玻璃月历完整显示初始扫描日期"
+        )
+        require(
+            !settingsSource.contains("Button(\"待确认记录\")")
+                && settingsSource.contains("showManualMappingList = true"),
+            "设置页面不应显示待确认记录按钮，但应保留其他查看入口"
         )
         require(
             settingsSource.contains("initialDate")
@@ -1429,10 +1472,13 @@ private struct MacOSUIRegressionTests {
         require(
             source.contains("static let todoDeadlineDatePickerWidth: CGFloat = 226")
                 && source.contains("static let todoDeadlineDatePickerHeight: CGFloat = 30")
-                && source.contains("static let todoDeadlineTimeCardWidth: CGFloat = 220")
-                && source.contains("static let todoDeadlineTimePickerWidth: CGFloat = 136")
-                && source.contains("static let todoDeadlineTimePickerTrailingInset: CGFloat = 4")
-                && source.contains(".frame(width: AppLayout.todoDeadlineTimePickerWidth)")
+                && source.contains("static let todoDeadlineTimeCardWidth: CGFloat = 300")
+                && source.contains("static let todoDeadlineTimePickerWidth: CGFloat = 224")
+                && source.contains("static let todoDeadlineTimePickerTrailingInset: CGFloat = 10")
+                && source.contains("width: AppLayout.todoDeadlineTimePickerWidth,")
+                && source.contains("height: AppLayout.todoDeadlineTimePickerHeight,")
+                && source.contains("alignment: .trailing")
+                && source.contains(".fixedSize(horizontal: true, vertical: false)")
                 && source.contains(".padding(.trailing, AppLayout.todoDeadlineTimePickerTrailingInset)")
                 && source.contains(".frame(width: AppLayout.todoDeadlineTimeCardWidth, height: 44)")
                 && source.components(separatedBy: "TodoDeadlinePickerControl(selection:").count == 3

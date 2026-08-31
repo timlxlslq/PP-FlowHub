@@ -1780,6 +1780,7 @@ def find_existing_traveler(config: Config, order_id: str) -> Path | None:
 
 def preview_payload(config: Config, preview: OrderPreview) -> dict:
     existing = find_existing_traveler(config, preview.order_id)
+    mappings = InventoryMappings(config.workflow_database)
     return {
         "order_id": preview.order_id,
         "folder": str(preview.folder),
@@ -1793,7 +1794,15 @@ def preview_payload(config: Config, preview: OrderPreview) -> dict:
             {
                 "factory_order": factory.factory_order,
                 "order_name": factory.order_name,
-                "fittings": [asdict(item) for item in factory.fittings],
+                "fittings": [
+                    {
+                        **asdict(item),
+                        "display_name": mappings.display_name_for_hardware(
+                            item.code, item.name, item.code
+                        ),
+                    }
+                    for item in factory.fittings
+                ],
             }
             for factory in preview.factories
         ],
@@ -3210,7 +3219,20 @@ def update_order_traveler(config: Config, preview: OrderPreview) -> tuple[Path, 
     return existing, backup
 
 
-def _config_from_args(args) -> Config:
+def _config_from_args(args, base_config: Config | None = None) -> Config:
+    if base_config is not None:
+        # The resident service has already loaded settings, prepared the
+        # central schema and opened its shared connection.  Request arguments
+        # are intentionally limited to business parameters; changing storage
+        # roots would invalidate the service's in-memory order model.
+        if getattr(args, "state_dir", None):
+            raise RuleError("invalid_arguments", "常驻订单服务不允许在请求中切换状态目录")
+        request_config = copy.copy(base_config)
+        for name in ("source_root", "order_root", "template", "backup_root"):
+            value = getattr(args, name, None)
+            if value:
+                setattr(request_config, name, value)
+        return request_config
     config = Config()
     if configured_state := os.environ.get("PP_FLOWHUB_STATE_DIR", "").strip():
         config.state_dir = Path(configured_state).expanduser()
@@ -3223,9 +3245,17 @@ def _config_from_args(args) -> Config:
     return config
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    config_override: Config | None = None,
+    logger_override=None,
+    emit_result: bool = True,
+    result_sink: dict | None = None,
+    stdin_text: str | None = None,
+) -> int:
     parser = argparse.ArgumentParser(prog="pp-flowhub order")
-    parser.add_argument("command", choices=("list", "list-index", "detail", "cost", "cost-export", "backup-status", "backup-now", "sync-index", "process-server-changes", "process-server-folder", "preview-server-changes", "confirm-server-preview", "confirm-server-material-preview", "confirm-server-preview-memory", "confirm-server-material-preview-memory", "sync-aimes", "scan-server", "ignore-server-folder", "ignore-aimes", "restore-aimes-ignore", "assign-aimes-order", "restore-aimes-assignment", "auto-resolve-issue", "resolve-issue", "save-order-annotations", "production-preview", "prepare-production", "migrate-production-state", "preview", "preview-related", "refresh-aimes", "stock-check", "set-ignore", "generate", "generate-db", "temporary", "generate-material", "generate-material-from-travelers", "update", "update-related", "add-hardware", "add-factory", "assign-material", "create-test-data"))
+    parser.add_argument("command", choices=("list", "list-index", "detail", "cost", "cost-export", "backup-status", "backup-now", "sync-index", "process-server-changes", "process-server-folder", "preview-server-changes", "confirm-server-preview", "confirm-server-material-preview", "confirm-server-preview-memory", "confirm-server-material-preview-memory", "sync-aimes", "scan-server", "mark-temporary-manual", "ignore-aimes", "restore-aimes-ignore", "assign-aimes-order", "restore-aimes-assignment", "auto-resolve-issue", "resolve-issue", "save-order-annotations", "production-preview", "prepare-production", "migrate-production-state", "preview", "preview-related", "refresh-aimes", "stock-check", "set-ignore", "generate", "generate-db", "temporary", "generate-material", "generate-material-from-travelers", "update", "update-related", "add-hardware", "add-factory", "assign-material", "create-test-data"))
     parser.add_argument("--folder", type=Path)
     parser.add_argument("--server-folder", type=Path, action="append", default=[])
     parser.add_argument("--name", action="append", default=[])
@@ -3266,8 +3296,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--factory-orders-json", default="[]")
     parser.add_argument("--materials-json", default="[]")
     args = parser.parse_args(argv)
-    config = _config_from_args(args)
-    logger = configure_operation_log(config)
+    config = _config_from_args(args, config_override)
+    logger = logger_override or configure_operation_log(config)
     command_started = time.perf_counter()
     logger.event("backend.command.started", "开始订单工作流操作", details={"action": args.command})
     try:
@@ -3382,7 +3412,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise RuleError("invalid_arguments", str(exc)) from exc
         elif args.command in {"confirm-server-preview-memory", "confirm-server-material-preview-memory"}:
             try:
-                payload = json.loads(sys.stdin.read() or "{}")
+                payload = json.loads((stdin_text if stdin_text is not None else sys.stdin.read()) or "{}")
             except json.JSONDecodeError as exc:
                 raise RuleError("invalid_arguments", "内存预览不是有效 JSON") from exc
             if not isinstance(payload, dict):
@@ -3416,12 +3446,12 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "scan-server":
             from .order_index import scan_server_changes
             result = scan_server_changes(config)
-        elif args.command == "ignore-server-folder":
+        elif args.command == "mark-temporary-manual":
             if not args.folder:
-                raise RuleError("invalid_arguments", "ignore-server-folder 需要 --folder")
-            from .order_index import ignore_server_folder
+                raise RuleError("invalid_arguments", "mark-temporary-manual 需要 --folder")
+            from .order_index import mark_temporary_folder_manual
             try:
-                result = ignore_server_folder(config, args.folder)
+                result = mark_temporary_folder_manual(config, args.folder)
             except ValueError as exc:
                 raise RuleError("invalid_arguments", str(exc)) from exc
         elif args.command == "ignore-aimes":
@@ -3613,12 +3643,24 @@ def main(argv: list[str] | None = None) -> int:
                 updated, backup = update_order_traveler(config, preview)
                 result["updated"] = str(updated)
                 result["backup"] = str(backup)
+        completion_details = {
+            "action": args.command,
+            "duration_seconds": round(time.perf_counter() - command_started, 6),
+        }
+        if args.command == "scan-server":
+            server = result.get("server", {}) if isinstance(result, dict) else {}
+            folder_file_timings = server.get("folder_file_timings", []) if isinstance(server, dict) else []
+            if folder_file_timings:
+                completion_details["server_folder_file_timings"] = folder_file_timings
         logger.event(
             "backend.command.completed",
             "订单工作流操作完成",
-            details={"action": args.command, "duration_seconds": round(time.perf_counter() - command_started, 6)},
+            details=completion_details,
         )
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if result_sink is not None:
+            result_sink["value"] = result
+        if emit_result:
+            print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
         return 0
     except RuleError as exc:
         logger.event(
@@ -3626,7 +3668,11 @@ def main(argv: list[str] | None = None) -> int:
             "订单工作流操作失败",
             details={"action": args.command, "code": exc.code, "error": str(exc), "duration_seconds": round(time.perf_counter() - command_started, 6)},
         )
-        print(json.dumps({"fatal": {"code": exc.code, "message": str(exc), **exc.context}}, ensure_ascii=False, indent=2))
+        fatal = {"fatal": {"code": exc.code, "message": str(exc), **exc.context}}
+        if result_sink is not None:
+            result_sink["value"] = fatal
+        if emit_result:
+            print(json.dumps(fatal, ensure_ascii=False, separators=(",", ":")))
         return 2
     except Exception as exc:
         logger.event(
@@ -3639,12 +3685,16 @@ def main(argv: list[str] | None = None) -> int:
                 "duration_seconds": round(time.perf_counter() - command_started, 6),
             },
         )
-        print(json.dumps({
+        fatal = {
             "fatal": {
                 "code": "unexpected_excel_error",
                 "message": f"Excel 文件无法读取，请检查文件是否损坏或仍在编辑：{exc}",
             }
-        }, ensure_ascii=False, indent=2))
+        }
+        if result_sink is not None:
+            result_sink["value"] = fatal
+        if emit_result:
+            print(json.dumps(fatal, ensure_ascii=False, separators=(",", ":")))
         return 2
 
 

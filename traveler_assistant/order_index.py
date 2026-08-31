@@ -36,7 +36,11 @@ from .core import (
 )
 from .operation_log import log_database_statement
 from .fittings import select_latest_fittings
-from .database import ensure_outbound_document_factory_links, ensure_schema
+from .database import (
+    collapse_actual_installation_days,
+    ensure_outbound_document_factory_links,
+    ensure_schema,
+)
 from .inventory import InventoryMappings
 
 
@@ -49,11 +53,36 @@ ORDER_FOLDER_RE = re.compile(r"^(PP\d{4}(?:-\d+)?|CS\d{3})$", re.IGNORECASE)
 AIMES_ORDER_RE = re.compile(r"^(PP\d{4}(?:-\d+)?|CS\d{3})$", re.IGNORECASE)
 FACTORY_RE = re.compile(r"^F\d+$", re.IGNORECASE)
 FACTORY_DATE_RE = re.compile(r"^F(\d{6})\d+$", re.IGNORECASE)
-MINIMUM_PP_NUMBER = 35
-INDEX_SCHEMA_VERSION = 8
-SERVER_FOLDER_IGNORE_WATCH_DAYS = 30
+INDEX_SCHEMA_VERSION = 11
+
+# The resident order service installs one serialized SQLite connection for the
+# central workflow database.  One-shot CLI/tests do not install it and keep
+# the previous connection ownership behavior.
+_SHARED_WORKFLOW_PATH: Path | None = None
+_SHARED_WORKFLOW_CONNECTION: sqlite3.Connection | None = None
+
+
+def install_shared_workflow_connection(path: Path, connection: sqlite3.Connection) -> None:
+    global _SHARED_WORKFLOW_PATH, _SHARED_WORKFLOW_CONNECTION
+    _SHARED_WORKFLOW_PATH = path.resolve()
+    _SHARED_WORKFLOW_CONNECTION = connection
+
+
+def clear_shared_workflow_connection() -> None:
+    global _SHARED_WORKFLOW_PATH, _SHARED_WORKFLOW_CONNECTION
+    _SHARED_WORKFLOW_PATH = None
+    _SHARED_WORKFLOW_CONNECTION = None
+
+
+def _shared_workflow_connection(path: Path) -> sqlite3.Connection | None:
+    if _SHARED_WORKFLOW_PATH == path.resolve():
+        return _SHARED_WORKFLOW_CONNECTION
+    return None
+SERVER_SHIPPED_WATCH_DAYS = 7
+TEMPORARY_SHIPPED_WATCH_DAYS = 3
 SERVER_SNAPSHOT_MAX_WORKERS = 4
 SERVER_SCAN_SNAPSHOT_FILENAME = "server-scan-snapshot.json"
+SERVER_SCAN_XML_KINDS = {"optimization_input", "optimization_result"}
 BATCH_NUMBER_RE = re.compile(r"(PC\d{12,})", re.IGNORECASE)
 MATERIAL_ALLOCATION_EPSILON = 0.01
 TRAVELER_FILENAME_RE = re.compile(r"^Work Order Traveler\(.+\)\.xlsx$", re.IGNORECASE)
@@ -157,93 +186,6 @@ def _mtime_marker(stat) -> int:
     size, while remaining exactly representable at current dates.
     """
     return int(stat.st_mtime_ns // 1_000_000)
-
-
-def _server_folder_fingerprint(folder: Path) -> str:
-    """Fingerprint recognized reports for ignore watching.
-
-    Directory metadata is intentionally excluded.  Opening and closing an
-    Excel workbook can update a Server directory's mtime through temporary
-    lock-file bookkeeping without changing any business report.
-    """
-    reports = []
-    for path, kind in _report_files(folder):
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        reports.append(
-            (
-                str(path.relative_to(folder)),
-                kind,
-                int(stat.st_mtime_ns),
-                int(stat.st_size),
-            )
-        )
-    payload = {
-        "reports": sorted(reports),
-    }
-    return hashlib.sha256(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-
-
-def _server_folder_ignore_metadata(
-    folder: Path,
-) -> tuple[list[tuple[Path, str]], list[str], str]:
-    """Read ignore-action metadata in one workbook traversal.
-
-    ``related_order_ids`` and ``_server_folder_fingerprint`` both enumerate a
-    temporary Server folder. That is especially expensive over SMB. Keep
-    their existing semantics, including board-name order IDs, while sharing
-    the single workbook enumeration performed by this action.
-    """
-    from .order_workflow import _order_ids_in_text, parse_board_identity
-
-    found_order_ids = _order_ids_in_text(folder.name)
-    report_files: list[tuple[Path, str]] = []
-    fingerprint_rows: list[tuple[str, str, int, int]] = []
-    for path in folder.rglob("*.xlsx"):
-        if path.name.startswith("~$"):
-            continue
-        found_order_ids.update(_order_ids_in_text(path.name))
-        lowered = path.name.lower()
-        kind = ""
-        if lowered.startswith("fittingslist"):
-            kind = "fittings"
-        elif "板材清单" in path.name:
-            kind = "board"
-            try:
-                _, board_name = parse_board_identity(path)
-            except Exception:
-                board_name = ""
-            found_order_ids.update(_order_ids_in_text(board_name))
-        elif "material" in lowered and not lowered.startswith("panelmaterial"):
-            kind = "material"
-        if kind:
-            report_files.append((path, kind))
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            fingerprint_rows.append(
-                (
-                    str(path.relative_to(folder)),
-                    kind,
-                    int(stat.st_mtime_ns),
-                    int(stat.st_size),
-                )
-            )
-    for path in folder.rglob("*.xml"):
-        found_order_ids.update(_order_ids_in_text(path.name))
-    fingerprint = hashlib.sha256(
-        json.dumps(
-            {"reports": sorted(fingerprint_rows)},
-            ensure_ascii=False,
-            sort_keys=True,
-        ).encode("utf-8")
-    ).hexdigest()
-    return report_files, sorted(found_order_ids), fingerprint
 
 
 def _file_content_fingerprint(path: Path) -> str:
@@ -374,8 +316,6 @@ def _valid_aimes_order_id(value: str) -> str:
     order_id = str(value or "").upper().strip()
     if not AIMES_ORDER_RE.fullmatch(order_id):
         return ""
-    if order_id.startswith("PP") and int(order_id[2:6]) < MINIMUM_PP_NUMBER:
-        return ""
     return order_id
 
 
@@ -434,6 +374,121 @@ def _factory_order_before_initial_date(
     return order_date < cutoff
 
 
+def _aimes_order_fingerprint(
+    store: "OrderIndexStore",
+    order_id: str,
+) -> str:
+    """Return a stable fingerprint of one order's persisted AIMES identity.
+
+    The fingerprint deliberately excludes the local source label.  A
+    Server-derived factory row becoming AIMES-confirmed is not an AIMES
+    business change when the factory identity itself is unchanged.
+    """
+    normalized_order = str(order_id or "").upper().strip()
+    rows = store.connection.execute(
+        """
+        select factory_order, factory_name, sales_order_name, split_time,
+               aimes_status, aimes_deleted_at
+        from factory_orders
+        where name_source = 'AIMES'
+          and (order_id = ? or sales_order_name = ?)
+        order by factory_order
+        """,
+        (normalized_order, normalized_order),
+    ).fetchall()
+    payload = [
+        [str(value or "") for value in row]
+        for row in rows
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _order_is_before_initial_date(
+    config: Config,
+    store: "OrderIndexStore",
+    order_id: str,
+    folder: Path,
+) -> bool:
+    """Use factory-order dates first and folder creation as the fallback."""
+    normalized_order = str(order_id or "").upper().strip()
+    rows = store.connection.execute(
+        """
+        select factory_order, split_time
+        from factory_orders
+        where order_id = ? or sales_order_name = ?
+        """,
+        (normalized_order, normalized_order),
+    ).fetchall()
+    if rows:
+        return all(
+            _factory_order_before_initial_date(factory_order, split_time, config.initial_date)
+            for factory_order, split_time in rows
+        )
+    try:
+        cutoff = datetime.fromisoformat(config.initial_date).timestamp()
+        return _folder_created_at(folder) < cutoff
+    except (OSError, ValueError):
+        return False
+
+
+def _order_has_active_aimes_mapping(store: "OrderIndexStore", order_id: str) -> bool:
+    normalized_order = str(order_id or "").upper().strip()
+    return store.connection.execute(
+        """
+        select 1 from factory_orders
+        where name_source = 'AIMES'
+          and aimes_status = 'active'
+          and (order_id = ? or sales_order_name = ?)
+        limit 1
+        """,
+        (normalized_order, normalized_order),
+    ).fetchone() is not None
+
+
+def _order_shipped_watch_until(
+    store: "OrderIndexStore",
+    order_id: str,
+    now: str,
+) -> str:
+    """Use the latest known shipment time, falling back to policy creation."""
+    normalized_order = str(order_id or "").upper().strip()
+    values = [
+        str(row[0]).strip()
+        for row in store.connection.execute(
+            """
+            select outbound_completed_at
+            from factory_orders
+            where order_id = ? or sales_order_name = ?
+            """,
+            (normalized_order, normalized_order),
+        ).fetchall()
+        if str(row[0] or "").strip()
+    ]
+    latest = now
+    if values:
+        parsed: list[tuple[float, datetime]] = []
+        for value in values:
+            try:
+                parsed_value = datetime.fromisoformat(value)
+                parsed.append((parsed_value.timestamp(), parsed_value))
+            except (OSError, OverflowError, ValueError):
+                continue
+        if parsed:
+            latest = max(parsed, key=lambda item: item[0])[1].isoformat(timespec="seconds")
+    try:
+        base = datetime.fromisoformat(latest)
+    except (OSError, OverflowError, ValueError):
+        base = datetime.now()
+    return (base + timedelta(days=SERVER_SHIPPED_WATCH_DAYS)).isoformat(timespec="seconds")
+
+
+def _datetime_timestamp(value: str) -> float:
+    """Parse naive or timezone-aware ISO text into one comparable instant."""
+    return datetime.fromisoformat(str(value or "").strip()).timestamp()
+
+
 def _visible_aimes_row(row: dict) -> dict | None:
     factory_order = str(row.get("factory_order", "")).upper().strip()
     factory_name = str(row.get("factory_name", "")).strip()
@@ -482,10 +537,6 @@ def _aimes_row_issue(row: dict) -> dict | None:
         candidate = _order_id_from_factory_name(factory_name)
         suggested_order_id = _valid_aimes_order_id(candidate) if candidate else ""
     else:
-        if sales_order_name.startswith("PP") and int(sales_order_name[2:6]) < MINIMUM_PP_NUMBER:
-            # PP0035 以前属于明确排除的历史范围，不是数据异常。
-            if not reasons:
-                return None
         mismatch = factory_name_order_mismatch(factory_name, sales_order_name)
         if mismatch:
             prefix, order = mismatch
@@ -621,9 +672,13 @@ class OrderIndexStore:
     """Persistent order/factory/source index used by the order dashboard."""
 
     def __init__(self, path: Path, *, connection: sqlite3.Connection | None = None):
+        shared_connection = connection is None and _shared_workflow_connection(path) is not None
         if connection is None:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            connection = _shared_workflow_connection(path)
+            if connection is None:
+                path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
+        self._uses_shared_connection = shared_connection
         self._owns_connection = connection is None
         if connection is None:
             ensure_schema(path)
@@ -632,9 +687,11 @@ class OrderIndexStore:
             self.connection = connection
         self.connection.set_trace_callback(lambda statement: log_database_statement(self.path, statement))
         version = self.connection.execute("pragma user_version").fetchone()[0]
-        if version not in (0, 1, 2, 3, 4, 5, 6, 7, INDEX_SCHEMA_VERSION):
+        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, INDEX_SCHEMA_VERSION):
             self.connection.close()
             raise RuntimeError(f"订单索引数据库版本不受支持：{version}")
+        if self._uses_shared_connection:
+            return
         self.connection.executescript(
             f"""
             create table if not exists orders(
@@ -649,7 +706,11 @@ class OrderIndexStore:
                 last_server_seen text not null default '',
                 last_aimes_seen text not null default '',
                 updated_at text not null,
-                user_note text not null default ''
+                user_note text not null default '',
+                server_scan_policy text not null default '',
+                server_scan_aimes_fingerprint text not null default '',
+                server_scan_watch_until text not null default '',
+                server_scan_policy_updated_at text not null default ''
             );
             create table if not exists order_installation_days(
                 order_id text not null,
@@ -694,6 +755,16 @@ class OrderIndexStore:
                 content_fingerprint text not null default '',
                 last_seen text not null
             );
+            create table if not exists server_scan_xml_state(
+                path text primary key,
+                source_folder text not null,
+                kind text not null,
+                order_id text not null default '',
+                modified_at integer not null default 0,
+                last_seen text not null
+            );
+            create index if not exists idx_server_scan_xml_state_folder
+                on server_scan_xml_state(source_folder, kind);
             create table if not exists server_material_allocations(
                 id integer primary key,
                 source_material_id integer not null,
@@ -765,15 +836,6 @@ class OrderIndexStore:
                 split_time text not null default '',
                 last_seen text not null
             );
-            create table if not exists ignored_server_folders(
-                path text primary key,
-                order_id text not null default '',
-                folder_name text not null default '',
-                fingerprint text not null,
-                ignored_at text not null,
-                watch_until text not null,
-                permanent integer not null default 0
-            );
             create table if not exists active_issues(
                 issue_key text primary key,
                 kind text not null,
@@ -803,6 +865,9 @@ class OrderIndexStore:
                 processed_at text not null default '',
                 outbound_at text not null default '',
                 last_error text not null default '',
+                server_scan_policy text not null default '',
+                server_scan_watch_until text not null default '',
+                server_scan_policy_updated_at text not null default '',
                 updated_at text not null
             );
             create table if not exists batch_evidence(
@@ -838,6 +903,10 @@ class OrderIndexStore:
             create index if not exists idx_active_issues_status on active_issues(status, last_seen desc);
             """
         )
+        # The old one-month folder-ignore feature was removed. Drop its
+        # obsolete table from databases created by earlier App versions.
+        self.connection.execute("drop table if exists ignored_server_folders")
+        collapse_actual_installation_days(self.connection)
         # Versions before the incremental index stored nanoseconds in the
         # REAL-affinity column. Normalize those old values once so installing
         # the optimization does not force every existing report through a
@@ -879,6 +948,16 @@ class OrderIndexStore:
             self.connection.execute(
                 "alter table orders add column user_note text not null default ''"
             )
+        for column, definition in (
+            ("server_scan_policy", "text not null default ''"),
+            ("server_scan_aimes_fingerprint", "text not null default ''"),
+            ("server_scan_watch_until", "text not null default ''"),
+            ("server_scan_policy_updated_at", "text not null default ''"),
+        ):
+            if column not in order_columns:
+                self.connection.execute(
+                    f"alter table orders add column {column} {definition}"
+                )
         temporary_columns = {
             row[1] for row in self.connection.execute("pragma table_info(temporary_orders)").fetchall()
         }
@@ -887,6 +966,9 @@ class OrderIndexStore:
             ("traveler_include_hardware", "integer not null default 1"),
             ("traveler_status", "text not null default '未生成'"),
             ("traveler_generated_at", "text not null default ''"),
+            ("server_scan_policy", "text not null default ''"),
+            ("server_scan_watch_until", "text not null default ''"),
+            ("server_scan_policy_updated_at", "text not null default ''"),
         ):
             if column not in temporary_columns:
                 self.connection.execute(
@@ -1018,7 +1100,8 @@ class OrderIndexStore:
                    traveler_include_hardware, traveler_status, traveler_generated_at,
                    processing_status,
                    outbound_status, outbound_document, processed_at,
-                   outbound_at, last_error, updated_at
+                   outbound_at, last_error, server_scan_policy,
+                   server_scan_watch_until, server_scan_policy_updated_at, updated_at
             from temporary_orders where source_folder = ?
             """,
             (source_folder,),
@@ -1031,7 +1114,8 @@ class OrderIndexStore:
             "traveler_include_hardware", "traveler_status", "traveler_generated_at",
             "processing_status",
             "outbound_status", "outbound_document", "processed_at",
-            "outbound_at", "last_error", "updated_at",
+            "outbound_at", "last_error", "server_scan_policy",
+            "server_scan_watch_until", "server_scan_policy_updated_at", "updated_at",
         )
         return dict(zip(keys, row))
 
@@ -1054,6 +1138,9 @@ class OrderIndexStore:
         processed_at: str = "",
         outbound_at: str = "",
         last_error: str = "",
+        server_scan_policy: str = "",
+        server_scan_watch_until: str = "",
+        server_scan_policy_updated_at: str = "",
     ) -> None:
         previous = self.temporary_order(source_folder) or {}
         self.connection.execute(
@@ -1064,8 +1151,9 @@ class OrderIndexStore:
                 traveler_include_hardware, traveler_status, traveler_generated_at,
                 processing_status,
                 outbound_status, outbound_document, processed_at, outbound_at,
-                last_error, updated_at
-            ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                last_error, server_scan_policy, server_scan_watch_until,
+                server_scan_policy_updated_at, updated_at
+            ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             on conflict(source_folder) do update set
                 temporary_id=excluded.temporary_id,
                 folder_name=excluded.folder_name,
@@ -1082,6 +1170,9 @@ class OrderIndexStore:
                 processed_at=case when excluded.processed_at <> '' then excluded.processed_at else temporary_orders.processed_at end,
                 outbound_at=case when excluded.outbound_at <> '' then excluded.outbound_at else temporary_orders.outbound_at end,
                 last_error=excluded.last_error,
+                server_scan_policy=case when excluded.server_scan_policy <> '' then excluded.server_scan_policy else temporary_orders.server_scan_policy end,
+                server_scan_watch_until=case when excluded.server_scan_watch_until <> '' then excluded.server_scan_watch_until else temporary_orders.server_scan_watch_until end,
+                server_scan_policy_updated_at=case when excluded.server_scan_policy_updated_at <> '' then excluded.server_scan_policy_updated_at else temporary_orders.server_scan_policy_updated_at end,
                 updated_at=excluded.updated_at
             """,
             (
@@ -1101,6 +1192,9 @@ class OrderIndexStore:
                 processed_at or previous.get("processed_at", ""),
                 outbound_at or previous.get("outbound_at", ""),
                 last_error,
+                server_scan_policy or previous.get("server_scan_policy", ""),
+                server_scan_watch_until or previous.get("server_scan_watch_until", ""),
+                server_scan_policy_updated_at or previous.get("server_scan_policy_updated_at", ""),
                 _now(),
             ),
         )
@@ -1324,6 +1418,54 @@ class OrderIndexStore:
             ),
         )
 
+    def server_scan_policy(self, order_id: str) -> dict | None:
+        row = self.connection.execute(
+            """
+            select order_id, source_folder, server_scan_policy,
+                   server_scan_aimes_fingerprint, server_scan_watch_until,
+                   server_scan_policy_updated_at
+            from orders where order_id = ?
+            """,
+            (str(order_id or "").upper().strip(),),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "order_id": row[0],
+            "source_folder": row[1],
+            "policy": row[2],
+            "aimes_fingerprint": row[3],
+            "watch_until": row[4],
+            "updated_at": row[5],
+        }
+
+    def save_server_scan_policy(
+        self,
+        order_id: str,
+        *,
+        policy: str,
+        aimes_fingerprint: str,
+        watch_until: str = "",
+        updated_at: str = "",
+    ) -> None:
+        self.connection.execute(
+            """
+            update orders
+            set server_scan_policy = ?,
+                server_scan_aimes_fingerprint = ?,
+                server_scan_watch_until = ?,
+                server_scan_policy_updated_at = ?
+            where order_id = ?
+            """,
+            (
+                str(policy or "").strip(),
+                str(aimes_fingerprint or "").strip(),
+                str(watch_until or "").strip(),
+                str(updated_at or _now()).strip(),
+                str(order_id or "").upper().strip(),
+            ),
+        )
+
     def save_order_annotations(
         self,
         order_id: str,
@@ -1332,10 +1474,10 @@ class OrderIndexStore:
         planned_days: list[dict[str, str]],
         actual_days: list[dict[str, str]],
     ) -> dict:
-        """Save user-maintained order note and installation date facts.
+        """Save user-maintained order note and single-day installation facts.
 
-        Server/AIMES upserts never touch these fields.  Installation dates are
-        kept as explicit rows so non-consecutive workdays remain accurate.
+        Server/AIMES upserts never touch these fields.  Both planned and actual
+        installation are represented by at most one start-date row.
         """
         order_id = str(order_id or "").strip().upper()
         if not order_id:
@@ -1350,8 +1492,9 @@ class OrderIndexStore:
         for date_type, values in (("planned", planned_days), ("actual", actual_days)):
             if not isinstance(values, list):
                 raise ValueError(f"{date_type} 安装日期格式不正确")
-            if date_type == "planned" and len(values) > 1:
-                raise ValueError("计划安装日期只能填写一个开始日期")
+            if len(values) > 1:
+                label = "计划" if date_type == "planned" else "实际"
+                raise ValueError(f"{label}安装日期只能填写一个开始日期")
             rows: list[tuple[str, str]] = []
             seen_dates: set[str] = set()
             for value in values:
@@ -1790,77 +1933,6 @@ class OrderIndexStore:
             for row in rows
         ]
 
-    def ignored_server_folder(self, path: str) -> dict | None:
-        row = self.connection.execute(
-            """
-            select path, order_id, folder_name, fingerprint, ignored_at, watch_until, permanent
-            from ignored_server_folders where path = ?
-            """,
-            (path,),
-        ).fetchone()
-        if row is None:
-            return None
-        return {
-            "path": row[0],
-            "order_id": row[1],
-            "folder_name": row[2],
-            "fingerprint": row[3],
-            "ignored_at": row[4],
-            "watch_until": row[5],
-            "permanent": bool(row[6]),
-        }
-
-    def set_ignored_server_folder(
-        self,
-        path: str,
-        *,
-        order_id: str,
-        folder_name: str,
-        fingerprint: str,
-        ignored_at: str,
-        watch_until: str,
-    ) -> None:
-        self.connection.execute(
-            """
-            insert into ignored_server_folders(
-                path, order_id, folder_name, fingerprint, ignored_at, watch_until, permanent
-            ) values(?,?,?,?,?,?,0)
-            on conflict(path) do update set
-                order_id=excluded.order_id,
-                folder_name=excluded.folder_name,
-                fingerprint=excluded.fingerprint,
-                ignored_at=excluded.ignored_at,
-                watch_until=excluded.watch_until,
-                permanent=0
-            """,
-            (path, order_id.upper(), folder_name, fingerprint, ignored_at, watch_until),
-        )
-
-    def remove_ignored_server_folder(self, path: str) -> None:
-        self.connection.execute("delete from ignored_server_folders where path = ?", (path,))
-
-    def server_folder_ignore_state(self, path: Path, fingerprint: str) -> str:
-        """Return none, watching, permanent, or changed and update expiry state."""
-        row = self.ignored_server_folder(str(path))
-        if row is None:
-            return "none"
-        if row["permanent"]:
-            return "permanent"
-        try:
-            watch_until = datetime.fromisoformat(row["watch_until"])
-        except ValueError:
-            watch_until = datetime.min
-        if datetime.now() >= watch_until:
-            self.connection.execute(
-                "update ignored_server_folders set permanent = 1 where path = ?",
-                (str(path),),
-            )
-            return "permanent"
-        if row["fingerprint"] != fingerprint:
-            self.remove_ignored_server_folder(str(path))
-            return "changed"
-        return "watching"
-
     def delete_stale_factory_ownership_issues(self, initial_date: str) -> int:
         """Delete open ownership issues for factory orders before initial_date."""
         rows = self.connection.execute(
@@ -2046,6 +2118,70 @@ class OrderIndexStore:
     def latest_change_id(self) -> int:
         return int(self.connection.execute("select coalesce(max(id), 0) from sync_changes").fetchone()[0])
 
+    def server_scan_xml_state(self) -> list[dict[str, object]]:
+        rows = self.connection.execute(
+            """
+            select path, source_folder, kind, order_id, modified_at, last_seen
+            from server_scan_xml_state
+            order by source_folder, path
+            """
+        ).fetchall()
+        return [
+            {
+                "path": str(row[0] or ""),
+                "source_folder": str(row[1] or ""),
+                "kind": str(row[2] or ""),
+                "order_id": str(row[3] or ""),
+                "modified_at": int(row[4] or 0),
+                "last_seen": str(row[5] or ""),
+            }
+            for row in rows
+        ]
+
+    def save_server_scan_xml_baseline(
+        self,
+        folders: Iterable[Path],
+        entries: Iterable[dict[str, object]],
+        *,
+        observed_at: str,
+    ) -> None:
+        """Replace XML scan baselines for explicitly completed folders only."""
+        normalized_folders = sorted({str(Path(folder)) for folder in folders if str(folder)})
+        for folder in normalized_folders:
+            self.connection.execute(
+                "delete from server_scan_xml_state where source_folder = ?",
+                (folder,),
+            )
+        for item in entries:
+            kind = str(item.get("kind") or "")
+            source_folder = str(item.get("source_folder") or "")
+            path = str(item.get("path") or "")
+            if kind not in SERVER_SCAN_XML_KINDS or not source_folder or not path:
+                continue
+            if source_folder not in normalized_folders:
+                continue
+            self.connection.execute(
+                """
+                insert into server_scan_xml_state(
+                    path, source_folder, kind, order_id, modified_at, last_seen
+                ) values(?,?,?,?,?,?)
+                on conflict(path) do update set
+                    source_folder=excluded.source_folder,
+                    kind=excluded.kind,
+                    order_id=excluded.order_id,
+                    modified_at=excluded.modified_at,
+                    last_seen=excluded.last_seen
+                """,
+                (
+                    path,
+                    source_folder,
+                    kind,
+                    str(item.get("order_id") or ""),
+                    int(item.get("modified_at") or 0),
+                    observed_at,
+                ),
+            )
+
     def latest_changes(self, limit: int = 20, after_id: int | None = None) -> list[dict]:
         if after_id is None:
             rows = self.connection.execute(
@@ -2187,7 +2323,17 @@ class OrderIndexStore:
                 else ""
             )
             if is_temporary:
-                stage = "数据异常" if row[4] == "数据异常" else "待人工处理"
+                if row[4] == "数据异常":
+                    stage = "数据异常"
+                elif expected and shipped == expected:
+                    # A temporary folder can still represent a completed
+                    # order after manual processing.  Outbound facts are the
+                    # terminal business state; do not keep such an order in
+                    # the default unfinished list merely because its source
+                    # folder was non-standard.
+                    stage = "已出货"
+                else:
+                    stage = "待人工处理"
             elif row[4] == "数据异常" or unresolved:
                 stage = "数据异常" if row[4] == "数据异常" else "待确认"
             elif expected == 0:
@@ -2401,22 +2547,60 @@ def _selected_hardware_report_paths(
     return selected_paths
 
 
-def _optimization_artifacts(folder: Path) -> list[Path]:
-    """Return recognizable CNC optimization outputs under one order folder."""
-    result: list[Path] = []
+_OPTIMIZATION_ROOT_RELATIVE_PATHS = (
+    ("Optimize file",),
+    ("New Nesting", "Optimize file"),
+    ("Auo-Label-CNC", "Optimize file"),
+)
+
+_OPTIMIZATION_MARKER_RELATIVE_PATHS = (
+    ("Optimize file.xml",),
+    ("nesting_result.xml",),
+    ("layout file", "nesting_result.xml"),
+    ("layout file 2", "nesting_result.xml"),
+)
+
+
+def _optimization_artifact_paths(folder: Path) -> tuple[list[Path], bool]:
+    """Return marker files from the known AICNC layouts without file recursion.
+
+    An order folder may contain several AICNC workspaces, but each workspace
+    is either the order folder itself or one of its direct children.  The
+    marker files then live at one of the known relative paths below that
+    workspace.  Keeping discovery to these paths avoids walking PNG/NC/CSV
+    outputs on the network Server while still supporting the current New
+    Nesting and old Auo-Label-CNC layouts.
+    """
+    scopes = [folder]
+    scan_complete = True
     try:
-        paths = folder.rglob("*")
-        for path in paths:
-            if not path.is_file():
-                continue
-            parts = {part.casefold() for part in path.parts}
-            if "optimize file" not in parts:
-                continue
-            if path.name.casefold() in {"optimize file.xml", "nesting_result.xml"}:
-                result.append(path)
+        scopes.extend(
+            sorted(
+                (path for path in folder.iterdir() if path.is_dir()),
+                key=lambda path: str(path).casefold(),
+            )
+        )
     except OSError:
-        return []
-    return sorted(result)
+        scan_complete = False
+
+    result: set[Path] = set()
+    for scope in scopes:
+        for root_relative in _OPTIMIZATION_ROOT_RELATIVE_PATHS:
+            optimization_root = scope.joinpath(*root_relative)
+            for marker_relative in _OPTIMIZATION_MARKER_RELATIVE_PATHS:
+                marker = optimization_root.joinpath(*marker_relative)
+                try:
+                    if marker.is_file():
+                        result.add(marker)
+                except OSError:
+                    scan_complete = False
+    return sorted(result), scan_complete
+
+
+def _optimization_artifacts(folder: Path) -> list[Path]:
+    """Return recognizable CNC optimization outputs under known layouts."""
+    artifacts, _ = _optimization_artifact_paths(folder)
+    return artifacts
 
 
 def _optimization_result_artifacts(folder: Path) -> list[Path]:
@@ -2425,15 +2609,25 @@ def _optimization_result_artifacts(folder: Path) -> list[Path]:
 
 
 def _optimization_result_artifacts_checked(folder: Path) -> tuple[list[Path], bool]:
-    """Return result files plus whether the Server traversal completed."""
-    result: list[Path] = []
-    try:
-        for path in folder.rglob("nesting_result.xml"):
-            if path.is_file() and "optimize file" in {part.casefold() for part in path.parts}:
-                result.append(path)
-    except OSError:
-        return sorted(result), False
-    return sorted(result), True
+    """Return result files plus whether fixed-path discovery completed."""
+    artifacts, scan_complete = _optimization_artifact_paths(folder)
+    return [
+        path for path in artifacts
+        if path.name.casefold() == "nesting_result.xml"
+    ], scan_complete
+
+
+def _server_optimization_monitor_files(folder: Path) -> list[tuple[Path, str]]:
+    """Return the two XML files used as the lightweight Server change marker."""
+    result: list[tuple[Path, str]] = []
+    for path in _optimization_artifacts(folder):
+        kind = (
+            "optimization_input"
+            if path.name.casefold() == "optimize file.xml"
+            else "optimization_result"
+        )
+        result.append((path, kind))
+    return result
 
 
 def _optimization_factory_orders(path: Path) -> set[str]:
@@ -2697,6 +2891,8 @@ def _merge_cached_server_candidate(
 def _refresh_cached_optimization_artifacts(
     store: OrderIndexStore,
     validation_rows: list[tuple[str, str]],
+    *,
+    timing_sink: list[dict[str, object]] | None = None,
 ) -> int:
     """Persist exact AICNC optimization evidence and refresh factory state.
 
@@ -2726,10 +2922,21 @@ def _refresh_cached_optimization_artifacts(
         observed_at = _now()
         artifacts, scan_complete = _optimization_result_artifacts_checked(folder)
         for artifact in artifacts:
+            artifact_started = time.perf_counter()
+            artifact_error = ""
             try:
                 file_stat = artifact.stat()
             except OSError:
                 scan_complete = False
+                artifact_error = "文件无法读取"
+                if timing_sink is not None:
+                    timing_sink.append({
+                        "source_folder": str(folder),
+                        "path": str(artifact),
+                        "kind": "optimization",
+                        "duration_seconds": round(time.perf_counter() - artifact_started, 6),
+                        "error": artifact_error,
+                    })
                 continue
             modified_at = float(file_stat.st_mtime)
             created_at = float(getattr(file_stat, "st_birthtime", 0) or 0)
@@ -2757,6 +2964,15 @@ def _refresh_cached_optimization_artifacts(
                     artifact_factory_orders = _optimization_factory_orders(artifact)
                 except (OSError, ET.ParseError):
                     scan_complete = False
+                    artifact_error = "XML 无法解析"
+                    if timing_sink is not None:
+                        timing_sink.append({
+                            "source_folder": str(folder),
+                            "path": str(artifact),
+                            "kind": "optimization",
+                            "duration_seconds": round(time.perf_counter() - artifact_started, 6),
+                            "error": artifact_error,
+                        })
                     continue
             for factory_order in sorted(artifact_factory_orders):
                 store.connection.execute(
@@ -2776,6 +2992,14 @@ def _refresh_cached_optimization_artifacts(
                         int(file_stat.st_size),
                     ),
                 )
+            if timing_sink is not None:
+                timing_sink.append({
+                    "source_folder": str(folder),
+                    "path": str(artifact),
+                    "kind": "optimization",
+                    "duration_seconds": round(time.perf_counter() - artifact_started, 6),
+                    "error": artifact_error,
+                })
         # A complete readable scan may correct the historical blanket status.
         # Previously observed evidence remains durable even if an old Server
         # file is later archived, while a newly added AIMES factory starts at 0.
@@ -2849,7 +3073,9 @@ def _load_outbound_records(config: Config) -> list[dict]:
                     select od.document_number, od.document_type, od.order_id,
                            coalesce(odf.factory_order, od.factory_order) as matched_factory_order,
                            od.factory_order as document_remark,
-                           od.status, od.source, od.issued_at, od.source_path
+                           od.status, od.source, od.issued_at, od.source_path,
+                           od.document_url, od.items_json, od.raw_fingerprint,
+                           od.mapped_fingerprint
                     from outbound_documents od
                     left join outbound_document_factories odf
                       on odf.document_number = od.document_number
@@ -2861,33 +3087,10 @@ def _load_outbound_records(config: Config) -> list[dict]:
                     order by od.document_number, matched_factory_order
                     """
                 ).fetchall()
-                audit_by_document: dict[str, dict] = {}
-                audit_path = config.state_dir / "inventory-outbound-records.json"
-                try:
-                    audit_payload = json.loads(audit_path.read_text(encoding="utf-8"))
-                    audit_records = audit_payload.get("records", {})
-                    if isinstance(audit_records, dict):
-                        audit_by_document = {
-                            str(record.get("document_number", "")).strip(): record
-                            for record in audit_records.values()
-                            if isinstance(record, dict)
-                            and str(record.get("document_number", "")).strip()
-                        }
-                except (OSError, TypeError, json.JSONDecodeError):
-                    audit_by_document = {}
                 return [
                     {
                         "document_number": row[0],
-                        # Older/local SQLite rows may have an empty
-                        # document_type because the browser result did not
-                        # carry the document kind through to the DB write.
-                        # The local sync journal still has the authoritative
-                        # materials/hardware classification for the
-                        # confirmed document.  Preserve it here so a newer
-                        # factory-scoped hardware document can take
-                        # precedence over an older order-level materials
-                        # document during status reconciliation.
-                        "kind": audit_by_document.get(row[0], {}).get("kind", row[1]),
+                        "kind": row[1],
                         "order_id": row[2],
                         "factory_order": row[3],
                         "remark": row[3],
@@ -2900,25 +3103,19 @@ def _load_outbound_records(config: Config) -> list[dict]:
                         "source": row[6],
                         "synced_at": row[7],
                         "source_path": row[8],
-                        # SQLite is authoritative for document identity and
-                        # status; the audit JSON retains the source and
-                        # mapped fingerprints needed to detect a later
-                        # material or hardware change.
-                        "raw_fingerprint": audit_by_document.get(row[0], {}).get("raw_fingerprint", ""),
-                        "mapped_fingerprint": audit_by_document.get(row[0], {}).get("mapped_fingerprint", ""),
-                        "traveler_path": audit_by_document.get(row[0], {}).get("traveler_path", row[8]),
+                        "document_url": row[9],
+                        "items": json.loads(row[10] or "[]") if row[10] else [],
+                        "raw_fingerprint": row[11],
+                        "mapped_fingerprint": row[12],
+                        "traveler_path": row[8],
                     }
                     for row in rows
                 ]
         finally:
             connection.close()
-    path = config.state_dir / "inventory-outbound-records.json"
-    try:
-        values = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    records = values.get("records", {}) if isinstance(values, dict) else {}
-    return [record for record in records.values() if isinstance(record, dict)] if isinstance(records, dict) else []
+    # The storage cutover intentionally has no JSON fallback.  A missing
+    # central database means there is no authoritative outbound fact to use.
+    return []
 
 
 def _outbound_key(value: object) -> str:
@@ -3343,16 +3540,22 @@ def _orders_requiring_server_scan(
     scan before the next index write.
     """
     factories = _aimes_factory_records(store, aimes_rows)
-    records = _load_outbound_records(config)
     grouped: dict[str, list[dict]] = defaultdict(list)
     for factory in factories.values():
         grouped[factory["order_id"]].append(factory)
+    records = _load_outbound_records(config) if config.reconcile_outbound_on_read else None
     result: set[str] = set()
     for order_id, items in grouped.items():
-        statuses = {
-            _refresh_outbound_status(config, item, records, factory_group=items)[0]
-            for item in items
-        }
+        if config.reconcile_outbound_on_read:
+            statuses = {
+                _refresh_outbound_status(config, item, records or [], factory_group=items)[0]
+                for item in items
+            }
+        else:
+            # Outbound status is maintained transactionally when the inventory
+            # operation succeeds. A normal AIMES/Server scan consumes that
+            # fact; it does not reopen every outbound document to prove it.
+            statuses = {str(item.get("outbound_status") or "未查询") for item in items}
         if not statuses or statuses != {"已出库"}:
             result.add(order_id)
     return result
@@ -3405,6 +3608,237 @@ def _aimes_factory_records(
     return factories
 
 
+def _server_order_scan_allowed(
+    config: Config,
+    store: OrderIndexStore,
+    order_id: str,
+    folder: Path,
+    *,
+    requires_scan: set[str],
+    now: str,
+) -> bool:
+    """Return whether one order should remain in the automatic Server scan."""
+    normalized_order = str(order_id or "").upper().strip()
+    if not normalized_order:
+        return False
+    if store.server_scan_policy(normalized_order) is None:
+        store.upsert_order(
+            normalized_order,
+            order_type=_order_type(normalized_order),
+            source_folder=str(folder),
+        )
+    existing = store.server_scan_policy(normalized_order) or {}
+    fingerprint = _aimes_order_fingerprint(store, normalized_order)
+    legacy = _order_is_before_initial_date(config, store, normalized_order, folder)
+    fully_shipped = (
+        _order_has_active_aimes_mapping(store, normalized_order)
+        and normalized_order not in requires_scan
+    )
+    policy = str(existing.get("policy") or "").strip()
+    if not policy:
+        if legacy:
+            policy = "legacy"
+            watch_until = ""
+        elif fully_shipped:
+            policy = "watching"
+            watch_until = _order_shipped_watch_until(store, normalized_order, now)
+        else:
+            policy = "active"
+            watch_until = ""
+        store.save_server_scan_policy(
+            normalized_order,
+            policy=policy,
+            aimes_fingerprint=fingerprint,
+            watch_until=watch_until,
+            updated_at=now,
+        )
+        return policy not in {"legacy", "permanent"}
+
+    if fingerprint != str(existing.get("aimes_fingerprint") or ""):
+        # The changed AIMES identity is itself a scan trigger.  The baseline
+        # is updated only after the folder has actually been included in a
+        # scan, so a failed/unavailable scan cannot silently consume a change.
+        return True
+
+    if policy in {"legacy", "permanent"}:
+        return False
+    if policy == "watching":
+        try:
+            if _datetime_timestamp(existing.get("watch_until", "")) <= _datetime_timestamp(now):
+                store.save_server_scan_policy(
+                    normalized_order,
+                    policy="permanent",
+                    aimes_fingerprint=fingerprint,
+                    updated_at=now,
+                )
+                return False
+        except (OSError, OverflowError, ValueError):
+            # A malformed or missing watch deadline is repaired conservatively
+            # by starting a fresh seven-day observation window.
+            store.save_server_scan_policy(
+                normalized_order,
+                policy="watching",
+                aimes_fingerprint=fingerprint,
+                watch_until=_order_shipped_watch_until(store, normalized_order, now),
+                updated_at=now,
+            )
+    return True
+
+
+def _server_folder_scan_allowed(
+    config: Config,
+    store: OrderIndexStore,
+    folder: Path,
+    aimes_rows: list[dict] | None = None,
+) -> bool:
+    """Apply per-order historical and seven-day Server scan policies."""
+    order_ids = _server_folder_order_ids(folder)
+    if not order_ids:
+        return True
+    requires_scan = _orders_requiring_server_scan(config, store, aimes_rows)
+    now = _now()
+    return any(
+        _server_order_scan_allowed(
+            config,
+            store,
+            order_id,
+            folder,
+            requires_scan=requires_scan,
+            now=now,
+        )
+        for order_id in order_ids
+    )
+
+
+def _finalize_server_scan_policies(
+    config: Config,
+    store: OrderIndexStore,
+    folders: Iterable[Path],
+    scanned_at: str,
+) -> None:
+    """Commit AIMES baselines after the corresponding folders were scanned."""
+    requires_scan = _orders_requiring_server_scan(config, store)
+    for folder in folders:
+        order_ids = _server_folder_order_ids(folder)
+        for order_id in order_ids:
+            existing = store.server_scan_policy(order_id)
+            if existing is None:
+                continue
+            fingerprint = _aimes_order_fingerprint(store, order_id)
+            fingerprint_changed = fingerprint != str(existing.get("aimes_fingerprint") or "")
+            legacy = _order_is_before_initial_date(config, store, order_id, folder)
+            fully_shipped = (
+                _order_has_active_aimes_mapping(store, order_id)
+                and order_id not in requires_scan
+            )
+            if not fully_shipped:
+                policy = "active"
+                watch_until = ""
+            elif legacy:
+                policy = "legacy"
+                watch_until = ""
+            else:
+                policy = "watching"
+                watch_until = str(existing.get("watch_until") or "")
+                if fingerprint_changed or not watch_until:
+                    watch_until = _order_shipped_watch_until(store, order_id, scanned_at)
+            store.save_server_scan_policy(
+                order_id,
+                policy=policy,
+                aimes_fingerprint=fingerprint,
+                watch_until=watch_until,
+                updated_at=scanned_at,
+            )
+
+
+def _mark_initial_orders_shipped(config: Config, store: OrderIndexStore) -> int:
+    """Apply the user's historical shipment confirmation before scanning."""
+    updated = 0
+    for root in _available_server_roots(config):
+        try:
+            folders = list(root.iterdir())
+        except OSError:
+            continue
+        for folder in folders:
+            if not folder.is_dir() or not _is_standard_order_folder(folder.name):
+                continue
+            if _order_type(folder.name) != _server_root_order_type(root):
+                continue
+            order_id = folder.name.upper()
+            if not _order_is_before_initial_date(config, store, order_id, folder):
+                continue
+            now = _now()
+            store.upsert_order(
+                order_id,
+                order_type=_order_type(order_id),
+                source_folder=str(folder),
+                stage="已出货",
+            )
+            stale_validation = store.connection.execute(
+                "select validation_status from orders where order_id = ?",
+                (order_id,),
+            ).fetchone()
+            if stale_validation and stale_validation[0] == "数据异常":
+                # Historical folders are intentionally not re-read after the
+                # initial date. Keep material validation honest as pending,
+                # but do not let an old missing-report error override the
+                # user-confirmed shipped business stage.
+                store.connection.execute(
+                    "update orders set validation_status = '待校验', validation_message = '', updated_at = ? where order_id = ?",
+                    (now, order_id),
+                )
+                store.add_change(
+                    severity="info",
+                    kind="historical_validation_reconciled",
+                    order_id=order_id,
+                    path=str(folder),
+                    message=(
+                        f"历史订单 {order_id} 已按初始日期规则跳过 Server 校验；"
+                        "清理旧数据异常显示，材料状态保留为待校验"
+                    ),
+                    observed_at=now,
+                )
+            rows = store.connection.execute(
+                """
+                select factory_order, outbound_status, outbound_document, outbound_mode
+                from factory_orders
+                where order_id = ? or sales_order_name = ?
+                """,
+                (order_id, order_id),
+            ).fetchall()
+            for factory_order, status, document, mode in rows:
+                if status == "已出库":
+                    continue
+                resolved_mode = mode or ("inventory" if document else "historical_initial_date")
+                store.connection.execute(
+                    """
+                    update factory_orders
+                    set outbound_status = ?, outbound_mode = ?, updated_at = ?
+                    where factory_order = ?
+                    """,
+                    ("已出库", resolved_mode, now, factory_order),
+                )
+                updated += 1
+                store.add_change(
+                    severity="info",
+                    kind="historical_outbound_confirmed",
+                    order_id=order_id,
+                    factory_order=factory_order,
+                    path=str(folder),
+                    message=f"按初始日期规则确认早期工厂单 {factory_order} 已出库；未写入虚构出库单号或日期",
+                    observed_at=now,
+                )
+            store.save_server_scan_policy(
+                order_id,
+                policy="legacy",
+                aimes_fingerprint=_aimes_order_fingerprint(store, order_id),
+                updated_at=now,
+            )
+    if updated:
+        store.commit()
+    return updated
+
+
 def _server_folder_order_ids(folder: Path) -> set[str]:
     """Return order ids represented by a standard or mixed Server folder."""
     if _is_standard_order_folder(folder.name):
@@ -3436,8 +3870,17 @@ def _server_folder_is_fully_shipped(
         for factory in factories.values()
         if str(factory.get("order_id") or "").strip()
     }
-    if not order_ids.issubset(mapped_order_ids):
-        return False
+    unmapped = order_ids - mapped_order_ids
+    if unmapped:
+        # Historical folders confirmed as shipped by the user are allowed to
+        # remain permanently outside the ordinary AIMES mapping set.  A later
+        # AIMES row changes the fingerprint and reopens the folder through the
+        # dedicated scan-policy path.
+        if not all(
+            (store.server_scan_policy(order_id) or {}).get("policy") in {"legacy", "permanent"}
+            for order_id in unmapped
+        ):
+            return False
     return not (order_ids & _orders_requiring_server_scan(config, store, aimes_rows))
 
 
@@ -3617,7 +4060,8 @@ def sync_aimes_index(config: Config, *, force: bool = False, if_needed: bool = F
     operation_started = time.perf_counter()
     started = _now()
     store = OrderIndexStore(config.workflow_database)
-    reconcile_outbound_statuses(config, store)
+    if config.reconcile_outbound_on_read:
+        reconcile_outbound_statuses(config, store)
     today = date.today().isoformat()
     cached_source_rows = load_aimes_order_cache(config)
     cached_rows, cached_issues = _partition_aimes_rows(
@@ -3650,7 +4094,7 @@ def sync_aimes_index(config: Config, *, force: bool = False, if_needed: bool = F
             "ignored_aimes": store.ignored_aimes_factories(),
             "assigned_aimes": store.assigned_aimes_factories(),
             "database": str(store.path),
-            "aimes_source_file": str(config.aimes_orders_file),
+            "aimes_source_file": str(config.workflow_database),
             "operation_trace": {
                 "aimes": _aimes_trace(
                     config,
@@ -3724,7 +4168,7 @@ def sync_aimes_index(config: Config, *, force: bool = False, if_needed: bool = F
             "ignored_aimes": store.ignored_aimes_factories(),
             "assigned_aimes": store.assigned_aimes_factories(),
             "database": str(store.path),
-            "aimes_source_file": str(config.aimes_orders_file),
+            "aimes_source_file": str(config.workflow_database),
             "operation_trace": {
                 "aimes": _aimes_trace(
                     config,
@@ -3812,7 +4256,7 @@ def sync_aimes_index(config: Config, *, force: bool = False, if_needed: bool = F
         "ignored_aimes": store.ignored_aimes_factories(),
         "assigned_aimes": store.assigned_aimes_factories(),
         "database": str(store.path),
-        "aimes_source_file": str(config.aimes_orders_file),
+        "aimes_source_file": str(config.workflow_database),
         "operation_trace": {
             "aimes": _aimes_trace(
                 config,
@@ -3838,34 +4282,6 @@ def _temporary_folder_is_candidate(config: Config, store: OrderIndexStore, folde
         return False
     baseline = _server_scan_baseline(config)
 
-    ignored = store.ignored_server_folder(str(folder))
-    if ignored is not None:
-        # An explicitly watched folder is the exception to the cheap age
-        # filter: it must calculate a fingerprint so a post-ignore change can
-        # be surfaced.  Expired watches become permanent without touching the
-        # network reports first.
-        if ignored.get("permanent"):
-            return False
-        try:
-            watch_until = datetime.fromisoformat(str(ignored.get("watch_until", "")))
-            now = datetime.now(watch_until.tzinfo) if watch_until.tzinfo else datetime.now()
-            if now >= watch_until:
-                store.connection.execute(
-                    "update ignored_server_folders set permanent = 1 where path = ?",
-                    (str(folder),),
-                )
-                return False
-        except ValueError:
-            return False
-        try:
-            ignore_state = store.server_folder_ignore_state(
-                folder,
-                _server_folder_fingerprint(folder),
-            )
-        except OSError:
-            return False
-        return ignore_state == "changed"
-
     # Ordinary old temporary folders are excluded before any recursive report
     # enumeration.  This is intentionally before the fingerprint call above:
     # the age check is the inexpensive guard on a network-mounted Server.
@@ -3874,11 +4290,58 @@ def _temporary_folder_is_candidate(config: Config, store: OrderIndexStore, folde
 
     existing = store.temporary_order(str(folder))
     if existing and existing.get("outbound_status") == "已出库":
-        # A successful manual outbound records the current source baseline.
-        # Do not rescan an unchanged, already-shipped temporary order on every
-        # dashboard refresh; a newly approved/selected folder remains eligible
-        # through the normal processing action.
-        return False
+        # A processed temporary folder gets the same lightweight XML watch as
+        # a shipped standard order, but the watch is only three days. Excel
+        # reports are intentionally not consulted after processing.
+        policy = str(existing.get("server_scan_policy") or "").strip()
+        if policy == "permanent":
+            return False
+        marker_files = _server_optimization_monitor_files(folder)
+        if not marker_files:
+            # Without either approved XML marker there is no safe signal for
+            # the three-day observation window. Preserve the legacy shipped
+            # behavior instead of recursively reading report workbooks.
+            return False
+        watch_until = str(existing.get("server_scan_watch_until") or "").strip()
+        if not watch_until:
+            processed_at = str(existing.get("processed_at") or "").strip()
+            try:
+                base = datetime.fromisoformat(processed_at)
+            except (TypeError, ValueError):
+                base = datetime.now()
+            watch_until = (base + timedelta(days=TEMPORARY_SHIPPED_WATCH_DAYS)).isoformat(timespec="seconds")
+            store.upsert_temporary_order(
+                temporary_id=str(existing.get("temporary_id") or _temporary_order_id(folder)),
+                folder_name=folder.name,
+                source_folder=str(folder),
+                folder_created_at=float(existing.get("folder_created_at") or 0),
+                content_fingerprint=str(existing.get("content_fingerprint") or ""),
+                server_scan_policy="watching",
+                server_scan_watch_until=watch_until,
+                server_scan_policy_updated_at=_now(),
+                processing_status=str(existing.get("processing_status") or "Traveler 已生成"),
+                outbound_status="已出库",
+                last_error="",
+            )
+        try:
+            if datetime.fromisoformat(watch_until) <= datetime.now():
+                store.upsert_temporary_order(
+                    temporary_id=str(existing.get("temporary_id") or _temporary_order_id(folder)),
+                    folder_name=folder.name,
+                    source_folder=str(folder),
+                    folder_created_at=float(existing.get("folder_created_at") or 0),
+                    content_fingerprint=str(existing.get("content_fingerprint") or ""),
+                    server_scan_policy="permanent",
+                    server_scan_watch_until=watch_until,
+                    server_scan_policy_updated_at=_now(),
+                    processing_status=str(existing.get("processing_status") or "Traveler 已生成"),
+                    outbound_status="已出库",
+                    last_error="",
+                )
+                return False
+        except (TypeError, ValueError):
+            return False
+        return True
 
     recent_cutoff = max(
         time.time() - timedelta(days=30).total_seconds(),
@@ -3889,16 +4352,6 @@ def _temporary_folder_is_candidate(config: Config, store: OrderIndexStore, folde
         (str(folder),),
     ).fetchone() is not None
     return created_at >= recent_cutoff or not processed
-
-
-def _server_folder_is_suppressed(store: OrderIndexStore, folder: Path) -> bool:
-    try:
-        return store.server_folder_ignore_state(
-            folder,
-            _server_folder_fingerprint(folder),
-        ) in {"watching", "permanent"}
-    except OSError:
-        return False
 
 
 def _temporary_folders_before_server_baseline(config: Config, root: Path) -> set[str]:
@@ -3948,6 +4401,69 @@ def _temporary_order_id(folder: Path) -> str:
     return "TMP:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
 
 
+def _reconcile_temporary_order_projections(store: OrderIndexStore) -> int:
+    """Remove the old temporary-folder projection from the formal order table.
+
+    Temporary/rework folders are identified by their source path and live in
+    ``temporary_orders``.  Older sync code also inserted their parsed order
+    number into ``orders``; because ``orders.order_id`` is the formal-order
+    primary key, that projection could overwrite the formal order's type and
+    source folder.  Keep a formal row when AIMES confirms the order, otherwise
+    remove the orphan projection so the task is represented only by the
+    pending-center ledger.
+    """
+    rows = store.connection.execute(
+        "select order_id, source_folder from orders where order_type = 'temporary'"
+    ).fetchall()
+    reconciled = 0
+    for order_id, source_folder in rows:
+        order_id = str(order_id or "").upper().strip()
+        formal_sources = [
+            str(row[0] or "")
+            for row in store.connection.execute(
+                """
+                select source_folder
+                from factory_orders
+                where order_id = ? and aimes_status = 'active'
+                  and name_source = 'AIMES' and sales_order_name = ?
+                order by source_folder
+                """,
+                (order_id, order_id),
+            ).fetchall()
+            if str(row[0] or "")
+        ]
+        formal_source = next(
+            (
+                path for path in formal_sources
+                if _is_standard_order_folder(Path(path).name)
+            ),
+            "",
+        )
+        if formal_sources:
+            if not formal_source and _is_standard_order_folder(Path(str(source_folder)).name):
+                formal_source = str(source_folder)
+            store.connection.execute(
+                """
+                update orders
+                set order_type = ?,
+                    source_folder = case when ? <> '' then ? else source_folder end,
+                    updated_at = ?
+                where order_id = ?
+                """,
+                (_order_type(order_id), formal_source, formal_source, _now(), order_id),
+            )
+        else:
+            store.connection.execute(
+                "delete from order_installation_days where order_id = ?",
+                (order_id,),
+            )
+            store.connection.execute("delete from orders where order_id = ?", (order_id,))
+        reconciled += 1
+    if reconciled:
+        store.commit()
+    return reconciled
+
+
 def _temporary_folder_fingerprint(folder: Path) -> str:
     """Fingerprint the folder's relevant workbooks for duplicate-outbound protection."""
     entries = []
@@ -3966,6 +4482,23 @@ def _temporary_folder_fingerprint(folder: Path) -> str:
         stat = path.stat()
         entries.append((str(path.relative_to(folder)), stat.st_size, digest.hexdigest()))
     return hashlib.sha256(json.dumps(entries, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _temporary_xml_baseline_matches(store: OrderIndexStore, folder: Path) -> bool:
+    """Return whether a processed temporary folder still has its XML baseline."""
+    current = {
+        str(item.get("path") or ""): int(item.get("modified_at") or 0)
+        for item in _server_scan_xml_entries([folder])
+        if str(item.get("path") or "")
+    }
+    previous = {
+        str(row[0] or ""): int(row[1] or 0)
+        for row in store.connection.execute(
+            "select path, modified_at from server_scan_xml_state where source_folder = ?",
+            (str(folder),),
+        ).fetchall()
+    }
+    return bool(current) and current == previous
 
 
 def _temporary_aimes_match(store: OrderIndexStore, folder: Path) -> dict | None:
@@ -4050,6 +4583,14 @@ def record_temporary_outbound(config: Config, traveler_path: Path, outbound: dic
     })
     store = OrderIndexStore(config.workflow_database)
     previous = store.temporary_order(str(source_folder)) or {}
+    processed_at = previous.get("processed_at", "") or _now()
+    watch_until = ""
+    if _server_optimization_monitor_files(source_folder):
+        watch_until = (
+            datetime.fromisoformat(processed_at)
+            + timedelta(days=TEMPORARY_SHIPPED_WATCH_DAYS)
+        ).isoformat(timespec="seconds")
+    outbound_at = _now()
     store.upsert_temporary_order(
         temporary_id=previous.get("temporary_id") or _temporary_order_id(source_folder),
         folder_name=source_folder.name,
@@ -4060,14 +4601,105 @@ def record_temporary_outbound(config: Config, traveler_path: Path, outbound: dic
         processing_status="Traveler 已生成",
         outbound_status="已出库",
         outbound_document="、".join(documents),
-        processed_at=previous.get("processed_at", "") or _now(),
-        outbound_at=_now(),
+        processed_at=processed_at,
+        outbound_at=outbound_at,
         last_error="",
+        server_scan_policy="watching" if watch_until else "",
+        server_scan_watch_until=watch_until,
+        server_scan_policy_updated_at=outbound_at if watch_until else "",
     )
     _record_server_baseline(store, source_folder, order_id=source_folder.name.upper())
+    store.save_server_scan_xml_baseline(
+        [source_folder],
+        _server_scan_xml_entries([source_folder]),
+        observed_at=outbound_at,
+    )
     store.resolve_active_issue(f"temporary_processing:{source_folder}")
     store.commit()
     store.close()
+
+
+def mark_temporary_folder_manual(config: Config, folder: Path) -> dict:
+    """Record a temporary Server folder that was completed outside the App.
+
+    Manual handling is an outbound fact and starts the three-day XML-only
+    watch. It is not a reminder-suppression action.
+    """
+    roots = _available_server_roots(config)
+    if not roots:
+        from .order_workflow import resolve_source_root
+        resolve_source_root(config.source_root)
+        roots = _available_server_roots(config)
+    selected_resolved = folder.expanduser().resolve()
+    root = next((candidate for candidate in roots if _path_is_within(selected_resolved, candidate)), None)
+    if not selected_resolved.is_dir() or root is None:
+        raise ValueError("所选 Server 文件夹无法访问或不在 Server 根目录内")
+    selected = root / selected_resolved.relative_to(root.resolve())
+    if _is_standard_order_folder(selected.name) or _is_mixed_order_folder(selected):
+        raise ValueError("已人工处理只适用于普通临时文件夹")
+
+    marker_files = _server_optimization_monitor_files(selected)
+    if not marker_files:
+        raise ValueError("该临时文件夹没有 Optimize file.xml 或 nesting_result.xml，无法建立三天 XML 观察基线")
+
+    now = _now()
+    watch_until = (
+        datetime.fromisoformat(now) + timedelta(days=TEMPORARY_SHIPPED_WATCH_DAYS)
+    ).isoformat(timespec="seconds")
+    store = OrderIndexStore(config.workflow_database)
+    try:
+        path = str(selected)
+        previous = store.temporary_order(path) or {}
+        fingerprint = _temporary_folder_fingerprint(selected)
+        store.upsert_temporary_order(
+            temporary_id=previous.get("temporary_id") or _temporary_order_id(selected),
+            folder_name=selected.name,
+            source_folder=path,
+            folder_created_at=_folder_created_at(selected),
+            content_fingerprint=fingerprint,
+            traveler_path=previous.get("traveler_path", ""),
+            traveler_fingerprint=previous.get("traveler_fingerprint", ""),
+            traveler_include_hardware=previous.get("traveler_include_hardware"),
+            traveler_status=previous.get("traveler_status", ""),
+            traveler_generated_at=previous.get("traveler_generated_at", ""),
+            processing_status="已人工处理",
+            outbound_status="已出库",
+            outbound_document=previous.get("outbound_document", ""),
+            processed_at=previous.get("processed_at", "") or now,
+            outbound_at=now,
+            last_error="",
+            server_scan_policy="watching",
+            server_scan_watch_until=watch_until,
+            server_scan_policy_updated_at=now,
+        )
+        _record_server_baseline(store, selected, order_id=selected.name.upper())
+        store.save_server_scan_xml_baseline(
+            [selected], _server_scan_xml_entries([selected]), observed_at=now
+        )
+        store.resolve_active_issue(f"temporary_processing:{selected}")
+        store.resolve_active_issue(f"server_missing_report:{selected}")
+        store.add_change(
+            severity="info",
+            kind="temporary_manual_outbound_reconciled",
+            path=path,
+            message=(
+                f"用户确认临时文件夹 {selected.name} 已人工处理并出库；"
+                "已记录当前文件基线，未来三天只观察两个 XML 文件"
+            ),
+            observed_at=now,
+        )
+        store.commit()
+        return {
+            "ok": True,
+            "temporary_manual_handled": path,
+            "outbound_status": "已出库",
+            "server_scan_policy": "watching",
+            "server_scan_watch_until": watch_until,
+            "pending_server_changes": [],
+            "current_issues": store.active_issues(),
+        }
+    finally:
+        store.close()
 
 
 def _temporary_order_ids(folder: Path) -> list[str]:
@@ -4101,6 +4733,10 @@ def _process_temporary_folder(
         existing_record
         and existing_record.get("outbound_status") == "已出库"
         and existing_record.get("content_fingerprint") == fingerprint
+        and (
+            not _server_optimization_monitor_files(folder)
+            or _temporary_xml_baseline_matches(store, folder)
+        )
     ):
         return {
             "folder": str(folder),
@@ -4178,6 +4814,10 @@ def _process_temporary_folder(
                 include_hardware=include_hardware,
                 temporary_factory_order=aimes_match["factory_order"] if aimes_match else "",
                 temporary_factory_name=aimes_match["factory_name"] if aimes_match else folder.name,
+                # A rework/replacement task is tracked by temporary_orders and
+                # the pending center. Its materials must not overwrite the
+                # formal order's central material/hardware facts.
+                persist_facts=False,
             )
             traveler = find_existing_traveler(config, order_id)
             if traveler is None:
@@ -4210,6 +4850,13 @@ def _process_temporary_folder(
             if str(item.get("documentNumber", "")).strip()
         })
         traveler_path = str(traveler)
+        processed_at = _now()
+        watch_until = ""
+        if _server_optimization_monitor_files(folder):
+            watch_until = (
+                datetime.fromisoformat(processed_at)
+                + timedelta(days=TEMPORARY_SHIPPED_WATCH_DAYS)
+            ).isoformat(timespec="seconds")
         store.upsert_temporary_order(
             temporary_id=temporary_id,
             folder_name=folder.name,
@@ -4224,9 +4871,12 @@ def _process_temporary_folder(
             processing_status="Traveler 已生成",
             outbound_status="已出库",
             outbound_document="、".join(documents),
-            processed_at=_now(),
-            outbound_at=_now(),
+            processed_at=processed_at,
+            outbound_at=processed_at,
             last_error="",
+            server_scan_policy="watching" if watch_until else "",
+            server_scan_watch_until=watch_until,
+            server_scan_policy_updated_at=processed_at if watch_until else "",
         )
         processed.append({
             "order_id": order_id,
@@ -4244,8 +4894,14 @@ def _process_temporary_folder(
     }
 
 
-def _server_snapshot_folder(folder: Path) -> dict[str, dict]:
+def _server_snapshot_folder(
+    folder: Path | tuple[Path, bool],
+) -> tuple[dict[str, dict], dict[str, object]]:
     """Build one read-only Server folder snapshot without touching SQLite."""
+    xml_only = False
+    if isinstance(folder, tuple):
+        folder, xml_only = folder
+    folder_started = time.perf_counter()
     is_order_folder = _is_standard_order_folder(folder.name)
     is_mixed_folder = _is_mixed_order_folder(folder)
     folder_order_ids = (
@@ -4253,11 +4909,25 @@ def _server_snapshot_folder(folder: Path) -> dict[str, dict]:
         if is_mixed_folder
         else ([folder.name.upper()] if is_order_folder else [])
     )
-    report_files = _report_files(folder)
+    # Standard AICNC order folders use the two XML markers as their complete
+    # change signal. Temporary and mixed folders do not have that contract:
+    # their Excel reports are the only way to discover/ retry the manual
+    # workflow, so retain the legacy report metadata scan for those folders.
+    optimization_files = _server_optimization_monitor_files(folder)
+    monitor_files = (
+        optimization_files
+        if is_order_folder or xml_only
+        else _report_files(folder) + optimization_files
+    )
     try:
         folder_stat = folder.stat()
     except OSError:
-        return {}
+        return {}, {
+            "source_folder": str(folder),
+            "duration_seconds": round(time.perf_counter() - folder_started, 6),
+            "files": [],
+            "error": "文件夹无法读取",
+        }
     manual_only = not (is_order_folder or is_mixed_folder)
     display_order_id = "、".join(folder_order_ids)
     snapshot = {
@@ -4272,10 +4942,20 @@ def _server_snapshot_folder(folder: Path) -> dict[str, dict]:
             "mixed_order": is_mixed_folder,
         }
     }
-    for path, kind in report_files:
+    file_timings: list[dict[str, object]] = []
+    for path, kind in monitor_files:
+        file_started = time.perf_counter()
+        file_error = ""
         try:
             stat = path.stat()
         except OSError:
+            file_error = "文件无法读取"
+            file_timings.append({
+                "path": str(path),
+                "kind": kind,
+                "duration_seconds": round(time.perf_counter() - file_started, 6),
+                "error": file_error,
+            })
             continue
         snapshot[str(path)] = {
             "source_folder": str(folder),
@@ -4287,16 +4967,48 @@ def _server_snapshot_folder(folder: Path) -> dict[str, dict]:
             "manual_only": manual_only,
             "mixed_order": is_mixed_folder,
         }
-    return snapshot
+        file_timings.append({
+            "path": str(path),
+            "kind": kind,
+            "duration_seconds": round(time.perf_counter() - file_started, 6),
+            "error": file_error,
+        })
+    return snapshot, {
+        "source_folder": str(folder),
+        # ``duration_seconds`` is the accounted folder total shown to the
+        # user: it is deliberately the exact sum of the per-file timings.
+        # Keep the wall-clock measurement separately because folder.stat(),
+        # directory iteration, and thread scheduling are not file processing.
+        "duration_seconds": round(
+            sum(float(item.get("duration_seconds", 0) or 0) for item in file_timings),
+            6,
+        ),
+        "wall_duration_seconds": round(time.perf_counter() - folder_started, 6),
+        "unaccounted_seconds": round(
+            max(
+                0.0,
+                (time.perf_counter() - folder_started)
+                - sum(float(item.get("duration_seconds", 0) or 0) for item in file_timings),
+            ),
+            6,
+        ),
+        "files": file_timings,
+        "error": "",
+    }
 
 
-def _server_snapshot(config: Config, store: OrderIndexStore) -> tuple[Path, dict[str, dict]]:
-    # Automatic scans deliberately exclude standard orders whose known AIMES
-    # factory orders are all shipped.  A standard folder without a persisted
-    # AIMES mapping remains a candidate: it may be a freshly cleaned order
-    # whose identity must be recovered from the next Server read.  Manual
-    # folder selection does not use this snapshot path and therefore remains
-    # an explicit override.
+def _server_snapshot(
+    config: Config,
+    store: OrderIndexStore,
+    *,
+    timing_sink: list[dict[str, object]] | None = None,
+) -> tuple[Path, dict[str, dict]]:
+    # Automatic scans apply the persisted per-order policy: historical orders
+    # are skipped unless AIMES changes, while a newly fully-shipped order is
+    # watched for seven days before it becomes permanent. Manual folder
+    # selection does not use this snapshot path and remains an explicit
+    # override.
+    _mark_initial_orders_shipped(config, store)
     roots = _available_server_roots(config)
     if not roots:
         from .order_workflow import resolve_source_root
@@ -4311,18 +5023,12 @@ def _server_snapshot(config: Config, store: OrderIndexStore) -> tuple[Path, dict
             if is_order_folder:
                 if _order_type(folder.name) != _server_root_order_type(server_root):
                     continue
-                if _server_folder_is_fully_shipped(config, store, folder):
+                if not _server_folder_scan_allowed(config, store, folder):
                     continue
             if (
                 not is_order_folder
                 and _is_mixed_order_folder(folder)
-                and _server_folder_is_fully_shipped(config, store, folder)
-            ):
-                continue
-            if (
-                not is_order_folder
-                and _is_mixed_order_folder(folder)
-                and _server_folder_is_suppressed(store, folder)
+                and not _server_folder_scan_allowed(config, store, folder)
             ):
                 continue
             if not is_order_folder and not _is_mixed_order_folder(folder) and not _temporary_folder_is_candidate(config, store, folder):
@@ -4332,11 +5038,36 @@ def _server_snapshot(config: Config, store: OrderIndexStore) -> tuple[Path, dict
     snapshot: dict[str, dict] = {}
     if not folders:
         return root, snapshot
-    worker_count = min(SERVER_SNAPSHOT_MAX_WORKERS, len(folders))
+    xml_only_folders = {
+        str(folder)
+        for folder in folders
+        if not _is_standard_order_folder(folder.name)
+        and (store.temporary_order(str(folder)) or {}).get("server_scan_policy") == "watching"
+    }
+    scan_targets = [
+        (folder, str(folder) in xml_only_folders)
+        for folder in folders
+    ]
+    worker_count = min(SERVER_SNAPSHOT_MAX_WORKERS, len(scan_targets))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        for folder_snapshot in executor.map(_server_snapshot_folder, folders):
+        for folder_snapshot, folder_timing in executor.map(_server_snapshot_folder, scan_targets):
             snapshot.update(folder_snapshot)
+            if timing_sink is not None:
+                timing_sink.append(folder_timing)
     return root, snapshot
+
+
+def _server_scan_xml_entries(folders: Iterable[Path]) -> list[dict[str, object]]:
+    """Read the current XML marker metadata for completed Server scopes."""
+    entries: list[dict[str, object]] = []
+    for folder in folders:
+        snapshot, _ = _server_snapshot_folder((Path(folder), True))
+        entries.extend(
+            dict(item, path=path)
+            for path, item in snapshot.items()
+            if item.get("kind") in SERVER_SCAN_XML_KINDS
+        )
+    return entries
 
 
 def _server_scan_snapshot_path(config: Config) -> Path:
@@ -4419,7 +5150,11 @@ def _server_change_message(change_type: str, item: dict, path: str) -> str:
         if item["kind"] == "folder":
             return f"Server 临时订单文件夹{action}：{folder_name}{order_suffix}（路径：{path}），点击自动处理后将校验文件格式、准备材料并尝试出库"
         return f"Server 临时订单报表{action}：{Path(path).name}{order_suffix}（路径：{path}），点击自动处理后将校验并尝试出库"
-    subject = "订单文件夹" if item["kind"] == "folder" else "报表"
+    subject = (
+        _source_file_data_label(item["kind"])
+        if item["kind"] in SERVER_SCAN_XML_KINDS
+        else ("订单文件夹" if item["kind"] == "folder" else "报表")
+    )
     return f"Server {subject}{action}：{Path(path).name}{order_suffix}（路径：{path}）"
 
 
@@ -4521,13 +5256,6 @@ def _rebase_server_folder_paths(store: "OrderIndexStore", pairs: list[tuple[str,
             )
         except sqlite3.OperationalError:
             pass
-        try:
-            store.connection.execute(
-                "update ignored_server_folders set folder_path=? where folder_path=?",
-                (new_folder, old_folder),
-            )
-        except sqlite3.OperationalError:
-            pass
         store.add_change(
             severity="info",
             kind="server_folder_renamed",
@@ -4561,6 +5289,8 @@ def _source_file_data_label(kind: str) -> str:
         "board": "板材信息",
         "fittings": "五金信息",
         "folder": "工厂单文件夹和报表目录",
+        "optimization_input": "优化输入 XML",
+        "optimization_result": "优化结果 XML",
     }.get(kind, "报表数据")
 
 
@@ -4675,19 +5405,19 @@ def _aimes_trace(
     if error:
         return [
             f"从 AIMES 读取最近 {AIMES_BULK_FETCH_LIMIT} 条工厂单信息失败：{error}；"
-            f"改为从本地文件 {config.aimes_orders_file} 读取订单号 {order_count} 个、"
+            f"改为从本地数据库缓存读取订单号 {order_count} 个、"
             f"工厂单号 {factory_count} 个的缓存信息。",
-            f"写入到了 {config.state_dir / 'order-index.sqlite3'} 的同步失败记录。",
+            f"写入到了 {config.workflow_database} 的同步失败记录。",
         ]
     if source == "cache":
         return [
-            f"从本地文件 {config.aimes_orders_file} 读取订单号 {order_count} 个、"
+            f"从本地数据库缓存读取订单号 {order_count} 个、"
             f"工厂单号 {factory_count} 个的 AIMES 工厂单名称、销售单名称和拆单时间；"
             "本次已跳过在线获取。",
         ]
     writes = [str(config.workflow_database)]
     if wrote_cache:
-        writes.extend([str(config.aimes_orders_file), str(config.factory_names_file)])
+        writes.append(str(config.workflow_database))
     trace = [
         f"从 AIMES 读取最近 {AIMES_BULK_FETCH_LIMIT} 条工厂单信息，得到订单号 {order_count} 个、"
         f"工厂单号 {factory_count} 个的工厂单名称、销售单名称和拆单时间；",
@@ -4712,21 +5442,49 @@ def _aimes_trace(
     return trace
 
 
-def _server_scan_trace(stats: dict[str, int | float], roots: list[str] | None = None) -> list[str]:
+def _server_scan_trace(
+    stats: dict[str, int | float],
+    roots: list[str] | None = None,
+    folder_timings: list[dict[str, object]] | None = None,
+) -> list[str]:
     root_detail = f"（目录：{'、'.join(roots)}）" if roots else ""
-    return [
-        f"快速检查 {stats['quick_checked_file_count']} 个相关 Excel 文件，"
+    excel_detail = ""
+    if int(stats.get("related_excel_count", 0) or 0):
+        excel_detail = f"，临时/混单文件夹相关 Excel 文件 {stats['related_excel_count']} 个"
+    checked_label = "相关 XML 文件" if not excel_detail else "相关文件"
+    trace = [
+        f"快速检查 {stats['quick_checked_file_count']} 个{checked_label}，"
         f"复用 {stats['reused_folder_count']} 个订单文件夹，"
         f"深度扫描 {stats['deep_scanned_folder_count']} 个订单文件夹，"
         f"总用时 {stats['duration_seconds']:.2f} 秒。",
         f"扫描范围：订单文件夹 {stats['order_folder_count']} 个，"
-        f"相关 Excel 文件 {stats['related_excel_count']} 个{root_detail}。",
+        f"相关 XML 文件 {stats['related_xml_count']} 个{excel_detail}{root_detail}。",
         f"变化统计：新增 {stats['added_count']} 个，修改 {stats['modified_count']} 个，删除 {stats['deleted_count']} 个，改名 {stats.get('renamed_count', 0)} 个。",
         "阶段耗时："
         f"读取并比对 Server 文件 {float(stats.get('metadata_scan_seconds', 0)):.2f} 秒；"
         f"解析并校验变化材料文件 {float(stats.get('material_validation_seconds', 0)):.2f} 秒；"
         f"写入扫描元数据和快照 {float(stats.get('finalize_seconds', 0)):.2f} 秒。",
     ]
+    if folder_timings:
+        trace.append("文件级扫描明细：")
+        for folder in sorted(
+            folder_timings,
+            key=lambda item: str(item.get("source_folder", "")).casefold(),
+        ):
+            folder_path = str(folder.get("source_folder") or "")
+            files = [item for item in folder.get("files", []) if isinstance(item, dict)]
+            folder_seconds = float(folder.get("duration_seconds", 0) or 0)
+            trace.append(
+                f"文件夹 {folder_path}：共 {len(files)} 个 XML 文件，"
+                f"文件夹扫描用时 {folder_seconds:.6f} 秒。"
+            )
+            for item in sorted(files, key=lambda value: str(value.get("path", "")).casefold()):
+                error = f"，{item.get('error')}" if item.get("error") else ""
+                trace.append(
+                    f"文件 {item.get('path', '')}："
+                    f"{float(item.get('duration_seconds', 0) or 0):.6f} 秒{error}。"
+                )
+    return trace
 
 
 def _validate_materials_during_server_scan(
@@ -4804,13 +5562,58 @@ def scan_server_changes(config: Config) -> dict:
     scanned_at = _now()
     scan_started = time.perf_counter()
     store = OrderIndexStore(config.workflow_database)
+    server_folder_timings: list[dict[str, object]] = []
+    optimization_file_timings: list[dict[str, object]] = []
     _clear_stale_server_pending_state(config, store)
-    root, current = _server_snapshot(config, store)
+    root, current = _server_snapshot(
+        config,
+        store,
+        timing_sink=server_folder_timings,
+    )
     _resolve_fully_shipped_server_issues(config, store)
     store.commit()
     scan_roots = _available_server_roots(config)
     current_folders = {item["source_folder"] for item in current.values()}
+    current_xml = {
+        path: item
+        for path, item in current.items()
+        if item.get("kind") in SERVER_SCAN_XML_KINDS
+    }
+    temporary_xml_watch_folders = {
+        str(item.get("source_folder") or "")
+        for item in current.values()
+        if item.get("kind") == "folder"
+        and not _is_standard_order_folder(Path(str(item.get("source_folder") or "")).name)
+        and (store.temporary_order(str(item.get("source_folder") or "")) or {}).get("outbound_status") == "已出库"
+        and (store.temporary_order(str(item.get("source_folder") or "")) or {}).get("server_scan_policy") == "watching"
+    }
+    legacy_folders = {
+        str(item.get("source_folder") or "")
+        for item in current.values()
+        if item.get("kind") == "folder"
+        and not _is_standard_order_folder(Path(str(item.get("source_folder") or "")).name)
+        and str(item.get("source_folder") or "") not in temporary_xml_watch_folders
+    }
+    current_legacy = {
+        path: item
+        for path, item in current.items()
+        if item.get("source_folder") in legacy_folders
+        and item.get("kind") not in SERVER_SCAN_XML_KINDS
+    }
+    previous_xml_rows = store.server_scan_xml_state()
     previous_all = {
+        row["path"]: {
+            "source_folder": row["source_folder"],
+            "kind": row["kind"],
+            "order_id": row["order_id"],
+            "modified_at": row["modified_at"],
+            "size": 0,
+            "manual_only": False,
+            "mixed_order": False,
+        }
+        for row in previous_xml_rows
+    }
+    previous_legacy = {
         row[0]: {
             "source_folder": row[1],
             "kind": row[2],
@@ -4821,7 +5624,6 @@ def scan_server_changes(config: Config) -> dict:
             ),
             "modified_at": row[3],
             "size": row[4],
-            "content_fingerprint": row[6] or "",
             "manual_only": bool(
                 row[1]
                 and Path(row[1]).is_dir()
@@ -4833,37 +5635,62 @@ def scan_server_changes(config: Config) -> dict:
             ),
         }
         for row in store.connection.execute(
-            "select path, source_folder, kind, modified_at, size, order_id, content_fingerprint from source_files"
+            "select path, source_folder, kind, modified_at, size, order_id from source_files"
         ).fetchall()
-        if root is None or any(_path_is_within(Path(row[1]), scan_root) for scan_root in scan_roots)
+        if row[1] in legacy_folders
     }
-    rename_pairs = _server_folder_rename_pairs(previous_all, current)
-    renamed_old = {old for old, _ in rename_pairs}
-    renamed_new = {new for _, new in rename_pairs}
+    # Existing processed folders already have a folder baseline in source_files.
+    # Seed the new XML-only baseline for those folders without turning the first
+    # post-migration scan into a false batch of new changes.
+    known_folders = {
+        str(row[0])
+        for row in store.connection.execute(
+            "select path from source_files where kind = 'folder'"
+        ).fetchall()
+    }
+    bootstrap_folders = {
+        folder for folder in current_folders
+        if folder in known_folders
+        and not any(item.get("source_folder") == folder for item in previous_all.values())
+    }
+    bootstrap_entries = [
+        dict(item, path=path)
+        for path, item in current_xml.items()
+        if item.get("source_folder") in bootstrap_folders
+    ]
+    if bootstrap_folders:
+        store.save_server_scan_xml_baseline(
+            [Path(folder) for folder in bootstrap_folders],
+            bootstrap_entries,
+            observed_at=scanned_at,
+        )
+        store.commit()
+        previous_all.update({
+            str(item["path"]): {
+                "source_folder": str(item["source_folder"]),
+                "kind": str(item["kind"]),
+                "order_id": str(item.get("order_id") or ""),
+                "modified_at": int(item.get("modified_at") or 0),
+                "size": 0,
+                "manual_only": False,
+                "mixed_order": False,
+            }
+            for item in bootstrap_entries
+        })
+    previous_all = {
+        path: item for path, item in previous_all.items()
+        if root is None or any(
+            _path_is_within(Path(item["source_folder"]), scan_root)
+            for scan_root in scan_roots
+        )
+    }
     previous = {
         path: item for path, item in previous_all.items()
-        if item.get("source_folder") in current_folders or item.get("source_folder") in renamed_old
+        if item.get("source_folder") in current_folders
     }
     changes: list[dict] = []
-    for old_folder, new_folder in rename_pairs:
-        item = current[new_folder]
-        changes.append({
-            "id": f"renamed:{old_folder}:{new_folder}",
-            "change_type": "renamed",
-            "kind": "folder",
-            "order_id": item["order_id"],
-            "path": new_folder,
-            "old_path": old_folder,
-            "message": f"Server 订单文件夹改名：{Path(old_folder).name} → {Path(new_folder).name}（路径：{new_folder}）",
-            "source_folder": new_folder,
-            "manual_only": bool(item.get("manual_only")),
-            "mixed_order": bool(item.get("mixed_order")),
-            "event_time": _display_timestamp(item["modified_at"] / 1_000),
-        })
-    for path in sorted(current.keys() - previous.keys()):
-        if any(path == new or path.startswith(new + "/") for new in renamed_new):
-            continue
-        item = current[path]
+    for path in sorted(current_xml.keys() - previous.keys()):
+        item = current_xml[path]
         changes.append({
             "id": f"added:{path}",
             "change_type": "added",
@@ -4876,15 +5703,10 @@ def scan_server_changes(config: Config) -> dict:
             "mixed_order": bool(item.get("mixed_order")),
             "event_time": _display_timestamp(item["created_at"]),
         })
-    for path in sorted(current.keys() & previous.keys()):
+    for path in sorted(current_xml.keys() & previous.keys()):
         before = previous[path]
         after = current[path]
-        if (before["modified_at"], before["size"]) == (after["modified_at"], after["size"]):
-            continue
-        if before["kind"] == "folder" and after["kind"] == "folder":
-            # Directory mtime is not a business signal.  Folder path-set
-            # changes are still handled by the added/removed comparisons above;
-            # recognized report changes are emitted as their own entries.
+        if before["modified_at"] == after["modified_at"]:
             continue
         changes.append({
             "id": f"modified:{path}",
@@ -4898,9 +5720,7 @@ def scan_server_changes(config: Config) -> dict:
             "mixed_order": bool(after.get("mixed_order")),
             "event_time": _display_timestamp(after["modified_at"] / 1_000),
         })
-    for path in sorted(previous.keys() - current.keys()):
-        if any(path == old or path.startswith(old + "/") for old in renamed_old):
-            continue
+    for path in sorted(previous.keys() - current_xml.keys()):
         item = previous[path]
         changes.append({
             "id": f"removed:{path}",
@@ -4914,10 +5734,59 @@ def scan_server_changes(config: Config) -> dict:
             "mixed_order": bool(item.get("mixed_order")),
             "event_time": _display_timestamp(item["modified_at"] / 1_000),
         })
+    # Temporary and mixed folders retain the report-metadata workflow. Their
+    # reports are deliberately outside the XML-only standard-order contract.
+    for path in sorted(current_legacy.keys() - previous_legacy.keys()):
+        item = current_legacy[path]
+        changes.append({
+            "id": f"added:{path}",
+            "change_type": "added",
+            "kind": item["kind"],
+            "order_id": item.get("order_id", ""),
+            "path": path,
+            "message": _server_change_message("added", item, path),
+            "source_folder": item["source_folder"],
+            "manual_only": bool(item.get("manual_only")),
+            "mixed_order": bool(item.get("mixed_order")),
+            "event_time": _display_timestamp(item["created_at"]),
+        })
+    for path in sorted(current_legacy.keys() & previous_legacy.keys()):
+        before = previous_legacy[path]
+        after = current_legacy[path]
+        if before["kind"] == "folder" and after["kind"] == "folder":
+            continue
+        if (before["modified_at"], before["size"]) == (after["modified_at"], after["size"]):
+            continue
+        changes.append({
+            "id": f"modified:{path}",
+            "change_type": "modified",
+            "kind": after["kind"],
+            "order_id": after.get("order_id", ""),
+            "path": path,
+            "message": _server_change_message("modified", after, path),
+            "source_folder": after["source_folder"],
+            "manual_only": bool(after.get("manual_only")),
+            "mixed_order": bool(after.get("mixed_order")),
+            "event_time": _display_timestamp(after["modified_at"] / 1_000),
+        })
+    for path in sorted(previous_legacy.keys() - current_legacy.keys()):
+        item = previous_legacy[path]
+        changes.append({
+            "id": f"removed:{path}",
+            "change_type": "removed",
+            "kind": item["kind"],
+            "order_id": item.get("order_id", ""),
+            "path": path,
+            "message": _server_change_message("removed", item, path),
+            "source_folder": item["source_folder"],
+            "manual_only": bool(item.get("manual_only")),
+            "mixed_order": bool(item.get("mixed_order")),
+            "event_time": _display_timestamp(item["modified_at"] / 1_000),
+        })
     # A mixed-order folder is recognized from its name before report parsing.
-    # Keep it in the unified pending center when it has no usable report, but
-    # do not classify it as an automatically processable Server change.
-    for path, item in sorted(current.items()):
+    # Keep it actionable when no usable report exists, but leave the actual
+    # workbook parsing to the explicit preview/processing step.
+    for path, item in sorted(current_legacy.items()):
         if item["kind"] != "folder" or not item.get("mixed_order"):
             continue
         folder = Path(path)
@@ -4934,18 +5803,22 @@ def scan_server_changes(config: Config) -> dict:
             message=issue_message,
             seen_at=scanned_at,
         )
-        changes.append({
-            "id": f"missing_report:{path}",
-            "change_type": "missing_report",
-            "kind": "folder",
-            "order_id": item.get("order_id", ""),
-            "path": path,
-            "message": issue_message,
-            "source_folder": item.get("source_folder", path),
-            "manual_only": False,
-            "mixed_order": True,
-            "event_time": _display_timestamp(item["modified_at"] / 1_000),
-        })
+        if not any(
+            change.get("change_type") == "missing_report" and change.get("path") == path
+            for change in changes
+        ):
+            changes.append({
+                "id": f"missing_report:{path}",
+                "change_type": "missing_report",
+                "kind": "folder",
+                "order_id": item.get("order_id", ""),
+                "path": path,
+                "message": issue_message,
+                "source_folder": item.get("source_folder", path),
+                "manual_only": False,
+                "mixed_order": True,
+                "event_time": _display_timestamp(item["modified_at"] / 1_000),
+            })
     # A failed temporary-order processing run must remain actionable, but it
     # must not erase the metadata baseline.  Keep the original source paths as
     # the comparison baseline and surface a virtual pending change from the
@@ -4986,7 +5859,8 @@ def scan_server_changes(config: Config) -> dict:
                 "event_time": str(issue.get("last_seen") or scanned_at),
             })
     order_folder_count = sum(item["kind"] == "folder" for item in current.values())
-    related_excel_count = sum(item["kind"] != "folder" for item in current.values())
+    related_xml_count = len(current_xml)
+    related_legacy_count = sum(item["kind"] != "folder" for item in current_legacy.values())
     metadata_finished = time.perf_counter()
     scan_stats: dict[str, int | float] = {
         # Keep this distinct from the full scan total below.  The Server scan
@@ -4994,54 +5868,24 @@ def scan_server_changes(config: Config) -> dict:
         # only the metadata traversal as the total was misleading.
         "metadata_scan_seconds": round(metadata_finished - scan_started, 6),
         "order_folder_count": order_folder_count,
-        "related_excel_count": related_excel_count,
-        # The current scanner checks known report metadata only after recursively
-        # enumerating every included order folder.  Keep these fields explicit so
-        # the UI reports today's real behavior and future folder-level snapshot
-        # reuse can update the same stable contract without changing its wording.
-        "quick_checked_file_count": related_excel_count,
+        # The current scanner checks only the two optimization XML markers in
+        # each included folder. Report workbooks are parsed later only when a
+        # user opens the preview.
+        "quick_checked_file_count": related_xml_count + related_legacy_count,
         "reused_folder_count": 0,
         "deep_scanned_folder_count": order_folder_count,
+        "related_xml_count": related_xml_count,
+        # Keep the old key for clients that decode older scan payloads. It no
+        # longer represents the files considered by this Server scan.
+        "related_excel_count": related_legacy_count,
         "added_count": sum(item["change_type"] == "added" for item in changes),
         "modified_count": sum(item["change_type"] == "modified" for item in changes),
         "deleted_count": sum(item["change_type"] == "removed" for item in changes),
         "renamed_count": sum(item["change_type"] == "renamed" for item in changes),
     }
-    existing_issues = store.active_issues()
-    changed_paths = {str(item.get("path") or "") for item in changes}
-    material_folders = {
-        str(item.get("source_folder") or "")
-        for path, item in current.items()
-        if item.get("kind") == "material"
-        and (path in changed_paths or any(
-            issue.get("kind") == "material_validation"
-            and str(issue.get("path") or "") == path
-            for issue in existing_issues
-        ))
-    }
-    material_folders.update(
-        str(item.get("source_folder") or "")
-        for item in changes
-        if item.get("kind") == "material" and item.get("source_folder")
-    )
-    material_folders = {path for path in material_folders if path}
-    for folder_path, item in current.items():
-        if item.get("kind") != "folder":
-            continue
-        if any(
-            issue.get("kind") == "material_validation"
-            and _path_is_within(Path(str(issue.get("path") or "")), Path(folder_path))
-            for issue in existing_issues
-        ):
-            material_folders.add(folder_path)
     store.commit()
     store.close()
     validation_started = time.perf_counter()
-    _validate_materials_during_server_scan(
-        config,
-        [Path(path) for path in sorted(material_folders) if Path(path).is_dir()],
-        scanned_at,
-    )
     validation_finished = time.perf_counter()
     store = OrderIndexStore(config.workflow_database)
     optimization_started = time.perf_counter()
@@ -5060,7 +5904,77 @@ def scan_server_changes(config: Config) -> dict:
           )
         """
     ).fetchall()
-    optimization_refreshed = _refresh_cached_optimization_artifacts(store, optimization_rows)
+    optimization_refreshed = _refresh_cached_optimization_artifacts(
+        store,
+        optimization_rows,
+        timing_sink=optimization_file_timings,
+    )
+    folder_timing_by_path = {
+        str(item.get("source_folder") or ""): item
+        for item in server_folder_timings
+        if item.get("source_folder")
+    }
+    for item in optimization_file_timings:
+        folder_path = str(item.get("source_folder") or "")
+        if not folder_path:
+            continue
+        folder = folder_timing_by_path.setdefault(
+            folder_path,
+            {
+                "source_folder": folder_path,
+                "duration_seconds": 0.0,
+                "files": [],
+                "error": "",
+            },
+        )
+        files = folder.setdefault("files", [])
+        existing = next(
+            (
+                value for value in files
+                if isinstance(value, dict)
+                and str(value.get("path") or "") == str(item.get("path") or "")
+            ),
+            None,
+        )
+        if existing is None:
+            files.append(item)
+        else:
+            existing["duration_seconds"] = round(
+                float(existing.get("duration_seconds", 0) or 0)
+                + float(item.get("duration_seconds", 0) or 0),
+                6,
+            )
+            if item.get("error"):
+                existing["error"] = item["error"]
+        # Recalculate from the final file list so rounding and same-path
+        # aggregation cannot make the folder total differ from its files.
+        folder["duration_seconds"] = round(
+            sum(
+                float(value.get("duration_seconds", 0) or 0)
+                for value in folder.get("files", [])
+                if isinstance(value, dict)
+            ),
+            6,
+        )
+    for folder in folder_timing_by_path.values():
+        folder["duration_seconds"] = round(
+            sum(
+                float(value.get("duration_seconds", 0) or 0)
+                for value in folder.get("files", [])
+                if isinstance(value, dict)
+            ),
+            6,
+        )
+    _finalize_server_scan_policies(
+        config,
+        store,
+        [
+            Path(path)
+            for path, item in current.items()
+            if item.get("kind") == "folder"
+        ],
+        scanned_at,
+    )
     current_issues = store.active_issues()
     orders = store.summaries()
     store.commit()
@@ -5120,6 +6034,10 @@ def scan_server_changes(config: Config) -> dict:
             "change_count": len(changes),
             "changes": changes,
             "scan_stats": scan_stats,
+            "folder_file_timings": sorted(
+                folder_timing_by_path.values(),
+                key=lambda item: str(item.get("source_folder", "")).casefold(),
+            ),
             "snapshot_path": snapshot_path,
         },
         "current_issues": current_issues,
@@ -5128,6 +6046,7 @@ def scan_server_changes(config: Config) -> dict:
             "server": _server_scan_trace(
                 scan_stats,
                 [str(item) for item in _available_server_roots(config)],
+                list(folder_timing_by_path.values()),
             ),
         },
         "operation_timing": {
@@ -5182,7 +6101,6 @@ def _server_folders_for_sync(
             close_store = True
         else:
             close_store = False
-        order_ids = _orders_requiring_server_scan(config, store, aimes_rows)
         folders = []
         for server_root in roots:
             folders.extend(
@@ -5192,12 +6110,12 @@ def _server_folders_for_sync(
                 and (
                     (
                         _is_standard_order_folder(folder.name)
-                        and _server_folder_matches_root(folder, server_root, order_ids)
+                        and _order_type(folder.name) == _server_root_order_type(server_root)
+                        and _server_folder_scan_allowed(config, store, folder, aimes_rows)
                     )
                     or (
                         _is_mixed_order_folder(folder)
-                        and not _server_folder_is_fully_shipped(config, store, folder, aimes_rows)
-                        and not _server_folder_is_suppressed(store, folder)
+                        and _server_folder_scan_allowed(config, store, folder, aimes_rows)
                     )
                     or (
                         not _is_standard_order_folder(folder.name)
@@ -5385,6 +6303,8 @@ def sync_order_index(
     # workflow database.  Initialize it before OrderIndexStore starts its
     # schema transaction, and reuse it throughout this sync.
     store = OrderIndexStore(config.workflow_database, connection=config.workflow_connection)
+    _mark_initial_orders_shipped(config, store)
+    _reconcile_temporary_order_projections(store)
     if reconcile_outbound:
         reconcile_outbound_statuses(config, store)
     _clear_stale_server_pending_state(config, store)
@@ -5661,9 +6581,10 @@ def sync_order_index(
                     else _folder_order_ids(folder)
                 )
             display_order_id = "、".join(folder_order_ids)
-            server_order_ids.update(order_id.upper() for order_id in folder_order_ids if order_id)
-            for folder_order_id in folder_order_ids:
-                authoritative_material_folders[folder_order_id.upper()].add(str(folder))
+            if not manual_folder:
+                server_order_ids.update(order_id.upper() for order_id in folder_order_ids if order_id)
+                for folder_order_id in folder_order_ids:
+                    authoritative_material_folders[folder_order_id.upper()].add(str(folder))
             if standard_folder:
                 for folder_order_id in folder_order_ids:
                     if folder.name.casefold() == folder_order_id.casefold():
@@ -5691,28 +6612,35 @@ def sync_order_index(
                     ),
                     path=str(folder),
                 )
-            for order_id in folder_order_ids:
-                store.upsert_order(
-                    order_id,
-                    # A standard or mixed Server folder is authoritative
-                    # evidence that a previously temporary-looking order is
-                    # now a normal owned/cut-to-size order.  Passing None
-                    # here used to retain a stale ``temporary`` flag forever,
-                    # which also forced the derived stage to ``待人工处理``.
-                    order_type="temporary" if manual_folder else _order_type(order_id),
-                    source_folder=str(folder),
-                    server_seen=server_seen,
-                )
+            if not manual_folder:
+                for order_id in folder_order_ids:
+                    store.upsert_order(
+                        order_id,
+                        # A standard or mixed Server folder is authoritative
+                        # evidence that a previously temporary-looking order
+                        # is now a normal owned/cut-to-size order.
+                        order_type=_order_type(order_id),
+                        source_folder=str(folder),
+                        server_seen=server_seen,
+                    )
             if server_snapshot_entries is not None:
                 report_files = sorted(
                     [
                         (Path(path), str(item["kind"]), item)
                         for path, item in server_snapshot_entries.items()
                         if item.get("source_folder") == str(folder)
-                        and item.get("kind") != "folder"
+                        and item.get("kind") in {"material", "board", "fittings"}
                     ],
                     key=lambda item: str(item[0]).casefold(),
                 )
+                # The lightweight scan snapshot intentionally contains only
+                # the XML change markers. Explicit preview/confirmation still
+                # needs the current Excel reports, so discover those files
+                # only after the user has selected the folder for processing.
+                if not report_files:
+                    report_files = [
+                        (path, kind, None) for path, kind in _report_files(folder)
+                    ]
             else:
                 report_files = [(path, kind, None) for path, kind in _report_files(folder)]
             fittings_paths = [path for path, kind, _ in report_files if kind == "fittings"]
@@ -5748,17 +6676,6 @@ def sync_order_index(
                         path=str(folder),
                         observed_at=server_seen,
                     )
-            if (
-                config.storage_prepared
-                and should_select_fittings
-                and not fittings_selection_error
-                and fittings_paths
-            ):
-                placeholders = ",".join("?" for _ in fittings_paths)
-                store.connection.execute(
-                    f"delete from hardware_items where source_type='aicnc' and source_path in ({placeholders})",
-                    [str(path) for path in fittings_paths],
-                )
             for path, kind, file_metadata in report_files:
                 server_read_items.append((str(path), str(folder), kind))
                 file_change_type = store.upsert_source_file(
@@ -5777,6 +6694,12 @@ def sync_order_index(
                         (str(path),),
                     )
                 seen_source_paths.add(str(path))
+                # Temporary/rework reports are actionable only through the
+                # pending-center approval flow. Keep their metadata baseline,
+                # but never parse or project business facts into the formal
+                # order index during this sync.
+                if manual_folder:
+                    continue
                 if file_change_type:
                     changed_order_ids.update(
                         order_id.upper() for order_id in folder_order_ids if order_id
@@ -6083,15 +7006,6 @@ def sync_order_index(
                             mappings = inventory_mappings
                             if mappings is None:
                                 raise RuleError("hardware_mapping", "库存映射数据库尚未准备好")
-                            # A Fittingslist can be copied into a folder whose
-                            # name is no longer its AIMES owner. Clear the old
-                            # projection for this source before rebuilding it;
-                            # each factory block is then assigned from the
-                            # active AIMES factory-order identity below.
-                            store.connection.execute(
-                                "delete from hardware_items where source_type='aicnc' and source_path=?",
-                                (str(path),),
-                            )
                             if (
                                 not fittings_selection_error
                                 and selected_groups
@@ -6144,6 +7058,16 @@ def sync_order_index(
                                         observed_at=server_seen,
                                     )
                                     continue
+                                # Replace this source only after parsing and
+                                # resolving every selected item successfully.
+                                # Unchanged reports take the cached branch
+                                # above and therefore retain their facts; a
+                                # mapping failure must also retain the prior
+                                # valid projection instead of deleting it.
+                                store.connection.execute(
+                                    "delete from hardware_items where source_type='aicnc' and source_path=?",
+                                    (str(path),),
+                                )
                                 accepted_index = 0
                                 for factory_order, items in selected_groups:
                                     current_aimes_owner = next(
@@ -6545,6 +7469,16 @@ def sync_order_index(
             current_issue_keys,
             scoped_folders=scanned_server_folders,
         )
+        try:
+            store.save_server_scan_xml_baseline(
+                server_folders,
+                _server_scan_xml_entries(server_folders),
+                observed_at=server_seen,
+            )
+        except OSError:
+            # The business sync can still complete when a network folder
+            # disappears during this optional scan-baseline refresh.
+            pass
     finished = _now()
     store.record_run(
         started,
@@ -6598,7 +7532,7 @@ def sync_order_index(
         "ignored_aimes": store.ignored_aimes_factories(),
         "assigned_aimes": store.assigned_aimes_factories(),
         "database": str(store.path),
-        "aimes_source_file": str(config.aimes_orders_file),
+        "aimes_source_file": str(config.workflow_database),
         "operation_trace": {
             "aimes": aimes_trace,
             "server": server_trace,
@@ -7161,6 +8095,8 @@ def _server_preview_payload(
     owns_store = preview_store is None
     store = preview_store or OrderIndexStore(preview_path)
     current = sqlite3.connect(config.workflow_database)
+    from .inventory import InventoryMappings
+    display_mappings = InventoryMappings(config.workflow_database, connection=current)
     folder_paths = [str(folder) for folder in folders]
     order_ids: set[str] = set()
     source_rows = store.connection.execute(
@@ -7218,6 +8154,9 @@ def _server_preview_payload(
                 {
                     "product_code": str(item[0] or ""),
                     "name": str(item[1] or ""),
+                    "display_name": display_mappings.display_name_for_hardware(
+                        str(item[0] or ""), str(item[1] or "")
+                    ),
                     "spec": str(item[2] or ""),
                     "quantity": float(item[3] or 0),
                     "unit": str(item[4] or ""),
@@ -7308,6 +8247,15 @@ def _server_preview_payload(
                 _server_hardware_changes(current, store.connection, factory_order)
                 if include_hardware else []
             )
+            factory_hardware_changes = [
+                {
+                    **change,
+                    "display_name": display_mappings.display_name_for_hardware(
+                        str(change.get("product_code", "")), str(change.get("name", ""))
+                    ),
+                }
+                for change in factory_hardware_changes
+            ]
             for change in factory_hardware_changes:
                 hardware_changes.append({"factory_order": factory_order, **change})
             if identity_changed or factory_hardware_changes:
@@ -7408,11 +8356,30 @@ def _server_preview_payload(
         "source_folders": folder_paths,
         "materials": material_sources,
         "orders": orders,
+        "has_business_changes": any(
+            bool(order.get("material_changes"))
+            or bool(order.get("factories"))
+            or bool(order.get("hardware_changes"))
+            for order in orders
+        ),
         "write_records": write_records,
     }
     if token:
         result["token"] = token
     return result
+
+
+def _server_preview_has_business_changes(payload: dict) -> bool:
+    """Return whether a Server preview contains a real business delta."""
+    if "has_business_changes" in payload:
+        return bool(payload.get("has_business_changes"))
+    return any(
+        bool(order.get("material_changes"))
+        or bool(order.get("factories"))
+        or bool(order.get("hardware_changes"))
+        for order in payload.get("orders", [])
+        if isinstance(order, dict)
+    )
 
 
 def _server_preview_hardware_source_items(
@@ -7944,6 +8911,57 @@ def _confirm_memory_preview(
             f"五金跳过选择包含本次预览之外的订单：{'、'.join(sorted(invalid_skips))}",
         )
 
+    validation_finished = time.perf_counter()
+
+    if (
+        not _server_preview_has_business_changes(payload)
+        and not payload.get("hardware_mapping_requirements")
+    ):
+        baseline_folders = [
+            Path(str(folder))
+            for folder in payload.get("source_folders", [])
+            if str(folder).strip()
+        ]
+        baseline_entries = _server_scan_xml_entries(baseline_folders)
+        production = OrderIndexStore(config.workflow_database)
+        try:
+            production.save_server_scan_xml_baseline(
+                baseline_folders,
+                baseline_entries,
+                observed_at=_now(),
+            )
+            production.commit()
+        finally:
+            production.close()
+        finished = time.perf_counter()
+        return {
+            "server_write_confirmed": True,
+            "server_write_skipped": True,
+            "server_write_skip_reason": "板材、五金和工厂单信息没有实际变化，仅更新 Server XML 扫描基线",
+            "server_material_write_confirmed": False,
+            "server_factory_hardware_write_confirmed": False,
+            "orders": sorted(selected_order_ids),
+            "factory_orders": sorted(selected_factory_ids),
+            "hardware_count": 0,
+            "hardware_skipped_orders": sorted(skipped_orders),
+            "database": str(config.workflow_database),
+            "operation_timing": {
+                "total_seconds": round(finished - timing_started, 6),
+                "stages": [
+                    {
+                        "stage": "validate_preview",
+                        "label": "校验内存预览与五金映射",
+                        "duration_seconds": round(validation_finished - timing_started, 6),
+                    },
+                    {
+                        "stage": "scan_baseline_commit",
+                        "label": "更新 Server XML 扫描基线",
+                        "duration_seconds": round(finished - validation_finished, 6),
+                    },
+                ],
+            },
+        }
+
     _materialize_memory_hardware(
         config, payload, records, selected_factory_ids, skipped_orders
     )
@@ -7969,7 +8987,6 @@ def _confirm_memory_preview(
     if not order_rows and not factory_rows and not material_rows:
         raise ValueError("本次预览没有可写入的订单、材料或工厂单")
 
-    validation_finished = time.perf_counter()
     production = OrderIndexStore(config.workflow_database)
     try:
         production.connection.execute("begin")
@@ -8057,6 +9074,16 @@ def _confirm_memory_preview(
             production.connection,
             "production_batches",
             [row for row in records.get("production_batches", []) if str(row.get("batch_number", "")) in batch_numbers],
+        )
+        baseline_folders = [
+            Path(str(folder))
+            for folder in payload.get("source_folders", [])
+            if str(folder).strip()
+        ]
+        production.save_server_scan_xml_baseline(
+            baseline_folders,
+            _server_scan_xml_entries(baseline_folders),
+            observed_at=_now(),
         )
         production.connection.commit()
     except Exception:
@@ -8901,76 +9928,11 @@ def resolve_current_issue(config: Config, issue_key: str, order_id: str = "", fa
     return result
 
 
-def ignore_server_folder(config: Config, folder: Path) -> dict:
-    """Watch a non-standard Server folder for 30 days, then ignore it permanently."""
-    roots = _available_server_roots(config)
-    if not roots:
-        from .order_workflow import resolve_source_root
-        resolve_source_root(config.source_root)
-    selected_resolved = folder.expanduser().resolve()
-    root = next((candidate for candidate in roots if _path_is_within(selected_resolved, candidate)), None)
-    if not selected_resolved.is_dir() or root is None:
-        raise ValueError("所选 Server 文件夹无法访问或不在 Server 根目录内")
-    # Keep the same lexical path form as the Server scanner.  On macOS a
-    # temporary-directory symlink can make resolve() return /private/... while
-    # the configured root is traversed as /var/..., which would split one
-    # folder into two ignore keys.
-    selected = root / selected_resolved.relative_to(root.resolve())
-    mixed_order = _is_mixed_order_folder(selected)
-    if _is_standard_order_folder(selected.name):
-        raise ValueError("标准订单文件夹不能使用此忽略操作")
-    report_files, folder_order_ids, folder_fingerprint = _server_folder_ignore_metadata(selected)
-    if mixed_order and report_files:
-        raise ValueError("该文件夹已经出现报表，请重新扫描并处理，不需要忽略")
-
-    ignored_at = datetime.now()
-    store = OrderIndexStore(config.workflow_database)
-    path = str(selected)
-    order_id = "、".join(folder_order_ids)
-    store.set_ignored_server_folder(
-        path,
-        order_id=order_id,
-        folder_name=selected.name,
-        fingerprint=folder_fingerprint,
-        ignored_at=ignored_at.isoformat(timespec="seconds"),
-        watch_until=(ignored_at + timedelta(days=SERVER_FOLDER_IGNORE_WATCH_DAYS)).isoformat(timespec="seconds"),
-    )
-    store.upsert_source_file(
-        selected,
-        source_folder=selected,
-        kind="folder",
-        order_id=order_id,
-        changed_at=ignored_at.isoformat(timespec="seconds"),
-    )
-    store.resolve_active_issue(f"server_missing_report:{path}")
-    store.resolve_active_issue(f"temporary_processing:{path}")
-    folder_label = "无报表混单" if mixed_order else "临时"
-    store.add_change(
-        severity="info",
-        kind="server_folder_ignored",
-        order_id=order_id,
-        path=path,
-        message=(
-            f"已忽略{folder_label}文件夹 {selected.name}；未来 {SERVER_FOLDER_IGNORE_WATCH_DAYS} 天内若发生变化，系统会重新提醒。"
-        ),
-    )
-    store.commit()
-    current_issues = store.active_issues()
-    store.close()
-    return {
-        "ok": True,
-        "ignored_folder": path,
-        "watch_until": (ignored_at + timedelta(days=SERVER_FOLDER_IGNORE_WATCH_DAYS)).isoformat(timespec="seconds"),
-        # The caller already has the pending Server snapshot in memory. Do
-        # not rescan both Server roots merely to redisplay that snapshot.
-        "pending_server_changes": [],
-        "current_issues": current_issues,
-    }
-
-
 def list_order_index(config: Config) -> dict:
     store = OrderIndexStore(config.workflow_database)
-    reconcile_outbound_statuses(config, store)
+    _reconcile_temporary_order_projections(store)
+    if config.reconcile_outbound_on_read:
+        reconcile_outbound_statuses(config, store)
     cached_source_rows = load_aimes_order_cache(config)
     _, aimes_warnings = _partition_aimes_rows(
         cached_source_rows,
@@ -8987,7 +9949,7 @@ def list_order_index(config: Config) -> dict:
         "ignored_aimes": store.ignored_aimes_factories(),
         "assigned_aimes": store.assigned_aimes_factories(),
         "database": str(store.path),
-        "aimes_source_file": str(config.aimes_orders_file),
+        "aimes_source_file": str(config.workflow_database),
         "operation_trace": {
             "aimes": _aimes_trace(
                 config,

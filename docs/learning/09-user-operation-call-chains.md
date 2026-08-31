@@ -258,7 +258,7 @@ scanDashboardServer()
       → 返回 changes / active issues / scan_stats / stage durations
 ```
 
-输入：设置中的 Server 根目录、AIMES 当前工厂单范围、已出库状态、上次处理基线和忽略规则。
+输入：设置中的 Server 根目录、AIMES 当前工厂单范围、已出库状态和上次处理基线；普通临时文件夹的人工处理通过独立的三天 XML 观察策略登记。
 
 写入边界：扫描不会把普通 material/Report 当作已确认生产事实，也不会推进它们的已处理基线；它可以清理失效待处理状态，并持久化来源中含精确工厂单身份的优化证据。对变化 material 的校验会读取内容，但不等同于用户确认写入。
 
@@ -313,22 +313,22 @@ confirmServerWrite(...)
 
 下一跳：`confirm_server_material_preview_memory()` → `_confirm_memory_preview()`。写入订单级板材/封边与对应工厂单五金；来料加工订单可在本次确认中显式跳过五金。
 
-### 7.5 忽略一个 Server 文件夹
+### 7.5 登记临时文件夹已人工处理
 
-入口：`ignoreServerFolder(folderPath)`。
+入口：`markTemporaryFolderManual(folderPath)`。
 
 ```text
-ignoreServerFolder(path)
-  → order ignore-server-folder --folder <path>
-  → order_index.ignore_server_folder(config,Path(path))
-      → 读取该文件夹当前 fingerprint/观察期状态
-      → OrderIndexStore.set_ignored_server_folder(...)
+markTemporaryFolderManual(path)
+  → order mark-temporary-manual --folder <path>
+  → order_index.mark_temporary_folder_manual(config, Path(path))
+      → temporary_orders 写入“已人工处理/已出库”和三天观察截止时间
+      → 记录当前报表基线与两个 XML 的 mtime 基线
+      → 清除该文件夹的临时处理提醒
       → commit()
-      → 返回最新 issues
-  → Swift serverChangesExcludingFolder(pending, path)
+  → Swift 从待处理快照中移除目标文件夹
 ```
 
-只从当前 UI 移除被点击的文件夹；其余待处理文件夹保留。观察期内 fingerprint 改变会重新提醒，期满后按持久忽略规则处理。
+该入口只登记用户已经在外部完成的出库事实，不会打开库存系统或创建出库单。
 
 ## 8. 待处理中心与人工归属
 
@@ -613,7 +613,6 @@ generate_database_order_traveler(config,order_id)
 | `confirm-server-material-preview-memory` | stdin/skip list | `confirm_server_material_preview_memory()` | `--confirm-write` 后写入 |
 | `sync-aimes` | `--refresh-aimes` 或 `--aimes-if-needed` | `sync_aimes_index()` | 读取 AIMES并写身份事实 |
 | `scan-server` | 无 | `scan_server_changes()` | 发现变化；普通报表不确认写入 |
-| `ignore-server-folder` | `--folder` | `ignore_server_folder()` | 写忽略事实 |
 | `ignore-aimes` | `--ignore-key*` | `ignore_aimes_factories()` | 写 |
 | `restore-aimes-ignore` | `--ignore-key*` | `restore_aimes_factories()` | 写 |
 | `assign-aimes-order` | 单个 key + order | `assign_aimes_factory_order()` | 写 |

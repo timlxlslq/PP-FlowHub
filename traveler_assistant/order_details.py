@@ -138,10 +138,17 @@ def order_detail(config: Config, order_id: str) -> dict:
             """, (order_id.upper(),)
         ).fetchall()
         mappings = InventoryMappings(config.workflow_database)
-        hardware = [
-            row for row in hardware_rows
-            if ignored_hardware_reason(mappings, row[4], row[2], row[3]) is None
-        ]
+        hardware = []
+        for row in hardware_rows:
+            if ignored_hardware_reason(mappings, row[4], row[2], row[3]) is not None:
+                continue
+            record = dict(row)
+            # This is a read-time projection only.  The raw hardware_items
+            # columns remain the source name, source code and canonical SKU.
+            record["display_name"] = mappings.display_name_for_hardware(
+                str(row[2] or ""), str(row[4] or ""), str(row[3] or "")
+            )
+            hardware.append(record)
         outbound = connection.execute(
             """
             select od.document_number, od.document_type,
@@ -170,7 +177,7 @@ def order_detail(config: Config, order_id: str) -> dict:
             "installation": installation,
             "factory_orders": [dict(row) for row in factories],
             "materials": material_records,
-            "hardware": [dict(row) for row in hardware],
+            "hardware": hardware,
             "outbound_documents": [dict(row) for row in outbound],
             "issues": [dict(row) for row in issues],
         }

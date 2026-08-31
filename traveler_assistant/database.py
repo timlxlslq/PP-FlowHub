@@ -60,6 +60,14 @@ def ensure_outbound_document_factory_links(
         "select 1 from sqlite_master where type='table' and name='outbound_document_factories'"
     ).fetchone() is None:
         return 0
+    # InventorySyncStore can also be exercised against the standalone
+    # outbound ledger schema, where the order-index tables do not exist.  In
+    # that case there is no factory identity to resolve; the header row is
+    # still a valid durable outbound fact.
+    if connection.execute(
+        "select 1 from sqlite_master where type='table' and name='factory_orders'"
+    ).fetchone() is None:
+        return 0
     now = updated_at or _now()
     candidates: set[str] = set()
     for token in _outbound_factory_tokens(factory_value):
@@ -250,6 +258,10 @@ def ensure_schema(path: Path) -> None:
                 source text not null default '',
                 issued_at text not null default '',
                 source_path text not null default '',
+                document_url text not null default '',
+                items_json text not null default '[]',
+                raw_fingerprint text not null default '',
+                mapped_fingerprint text not null default '',
                 updated_at text not null
             );
             create index if not exists idx_outbound_documents_order on outbound_documents(order_id, factory_order);
@@ -298,6 +310,7 @@ def ensure_schema(path: Path) -> None:
                 source_name text not null,
                 normalized_name text not null unique,
                 product_code text,
+                display_name text not null default '',
                 reason text not null default '',
                 created_at text not null,
                 updated_at text not null,
@@ -334,6 +347,15 @@ def ensure_schema(path: Path) -> None:
         if "source_code" not in hardware_columns:
             connection.execute(
                 "alter table hardware_items add column source_code text not null default ''"
+            )
+        inventory_rule_columns = {
+            row[1] for row in connection.execute(
+                "pragma table_info(inventory_resolution_rules)"
+            ).fetchall()
+        }
+        if "display_name" not in inventory_rule_columns:
+            connection.execute(
+                "alter table inventory_resolution_rules add column display_name text not null default ''"
             )
         if {"factory_order", "scope"}.intersection(material_columns):
             connection.execute("drop index if exists idx_material_items_order")
@@ -377,6 +399,19 @@ def ensure_schema(path: Path) -> None:
             "select 1 from sqlite_master where type='table' and name='factory_orders'"
         ).fetchone()
         if factory_table is not None:
+            outbound_columns = {
+                row[1] for row in connection.execute("pragma table_info(outbound_documents)").fetchall()
+            }
+            for column, definition in (
+                ("document_url", "text not null default ''"),
+                ("items_json", "text not null default '[]'"),
+                ("raw_fingerprint", "text not null default ''"),
+                ("mapped_fingerprint", "text not null default ''"),
+            ):
+                if column not in outbound_columns:
+                    connection.execute(
+                        f"alter table outbound_documents add column {column} {definition}"
+                    )
             factory_columns = {
                 row[1] for row in connection.execute("pragma table_info(factory_orders)").fetchall()
             }
@@ -386,9 +421,18 @@ def ensure_schema(path: Path) -> None:
                 ("aimes_last_verified_at", "text not null default ''"),
             ):
                 if column not in factory_columns:
-                    connection.execute(
-                        f"alter table factory_orders add column {column} {definition}"
-                    )
+                    try:
+                        connection.execute(
+                            f"alter table factory_orders add column {column} {definition}"
+                        )
+                    except sqlite3.OperationalError as exc:
+                        # Two independent one-shot commands can prepare the
+                        # same fresh state directory concurrently.  The first
+                        # transaction may add the column after this caller's
+                        # pragma snapshot; that is a successful race, not a
+                        # schema failure.
+                        if "duplicate column name" not in str(exc).lower():
+                            raise
             for document_number, order_id, factory_value, updated_at in connection.execute(
                 "select document_number, order_id, factory_order, updated_at from outbound_documents"
             ).fetchall():
@@ -402,6 +446,48 @@ def ensure_schema(path: Path) -> None:
         connection.commit()
     finally:
         connection.close()
+
+
+def collapse_actual_installation_days(connection: sqlite3.Connection) -> int:
+    """Keep only the earliest actual installation date for each order.
+
+    The table remains date-type based for compatibility with existing
+    databases and the planned start-date row.  Actual installation is now an
+    order-level start date, so older rows after the earliest date are removed
+    while the installer attached to the earliest row is preserved.
+    """
+    table = connection.execute(
+        "select 1 from sqlite_master where type='table' and name='order_installation_days'"
+    ).fetchone()
+    if table is None:
+        return 0
+    cursor = connection.execute(
+        """
+        delete from order_installation_days
+        where date_type = 'actual'
+          and exists (
+              select 1
+              from order_installation_days earliest
+              where earliest.order_id = order_installation_days.order_id
+                and earliest.date_type = 'actual'
+                and (
+                    earliest.install_date < order_installation_days.install_date
+                    or (
+                        earliest.install_date = order_installation_days.install_date
+                        and earliest.rowid < order_installation_days.rowid
+                    )
+                )
+          )
+        """
+    )
+    connection.execute(
+        """
+        create unique index if not exists idx_order_installation_actual_start
+        on order_installation_days(order_id)
+        where date_type = 'actual'
+        """
+    )
+    return max(cursor.rowcount, 0)
 
 
 def _normalize_inventory_rule_name(value: str) -> str:
@@ -557,17 +643,22 @@ def _copy_table(source: sqlite3.Connection, target: sqlite3.Connection, table: s
 
 
 def migrate_legacy_databases(state_dir: Path) -> dict[str, Any]:
-    """Merge the old order-index DB into the central DB without deletion.
+    """Merge old local facts into the central DB and archive source files.
 
-    The operation is idempotent.  Legacy files are copied to a timestamped
-    archive only after their data has been committed to the central database.
+    The operation is idempotent. Legacy files are moved to a timestamped
+    archive only after their data has been committed to the central database;
+    runtime code therefore has one canonical storage path after cutover.
     """
     central = database_path(state_dir)
     ensure_schema(central)
     legacy_paths = [state_dir / "order-index.sqlite3"]
     existing = [path for path in legacy_paths if path.is_file() and path != central]
     outbound_json = state_dir / "inventory-outbound-records.json"
-    if not existing and not outbound_json.is_file():
+    cache_sources = {
+        "aimes_orders": state_dir / "aimes-orders.json",
+        "factory_names": state_dir / "factory-names.json",
+    }
+    if not existing and not outbound_json.is_file() and not any(path.is_file() for path in cache_sources.values()):
         return {"central": str(central), "migrated": [], "status": "no_legacy_files"}
 
     connection = sqlite3.connect(central)
@@ -579,7 +670,7 @@ def migrate_legacy_databases(state_dir: Path) -> dict[str, Any]:
                 tables = [
                     "orders", "factory_orders", "source_files", "sync_runs", "sync_changes",
                     "ignored_aimes_factory_orders", "aimes_order_assignments", "aimes_review_rows",
-                    "ignored_server_folders", "active_issues", "temporary_orders",
+                    "active_issues", "temporary_orders",
                 ]
                 for table in tables:
                     # Existing central tables are preserved; row-level merge is
@@ -628,13 +719,44 @@ def migrate_legacy_databases(state_dir: Path) -> dict[str, Any]:
                 if not document:
                     continue
                 connection.execute(
-                    """insert or ignore into outbound_documents(
-                        document_number,document_type,order_id,factory_order,status,source,issued_at,source_path,updated_at
-                    ) values(?,?,?,?,?,?,?,?,?)""",
+                    """insert into outbound_documents(
+                        document_number,document_type,order_id,factory_order,status,source,issued_at,source_path,
+                        document_url,items_json,raw_fingerprint,mapped_fingerprint,updated_at
+                    ) values(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    on conflict(document_number) do update set
+                        document_type=case when excluded.document_type <> '' then excluded.document_type else outbound_documents.document_type end,
+                        order_id=case when excluded.order_id <> '' then excluded.order_id else outbound_documents.order_id end,
+                        factory_order=case when excluded.factory_order <> '' then excluded.factory_order else outbound_documents.factory_order end,
+                        status=case when excluded.status <> '' then excluded.status else outbound_documents.status end,
+                        issued_at=case when excluded.issued_at <> '' then excluded.issued_at else outbound_documents.issued_at end,
+                        source_path=case when excluded.source_path <> '' then excluded.source_path else outbound_documents.source_path end,
+                        document_url=case when excluded.document_url <> '' then excluded.document_url else outbound_documents.document_url end,
+                        items_json=case when excluded.items_json <> '[]' then excluded.items_json else outbound_documents.items_json end,
+                        raw_fingerprint=case when excluded.raw_fingerprint <> '' then excluded.raw_fingerprint else outbound_documents.raw_fingerprint end,
+                        mapped_fingerprint=case when excluded.mapped_fingerprint <> '' then excluded.mapped_fingerprint else outbound_documents.mapped_fingerprint end,
+                        updated_at=excluded.updated_at""",
                     (document, str(record.get("kind", "")), str(record.get("order_id", "")),
                      str(record.get("remark", "")), str(record.get("status", "已出库")), "legacy-json",
-                     str(record.get("synced_at", "")), str(record.get("traveler_path", "")), _now()),
+                     str(record.get("synced_at", "")), str(record.get("traveler_path", "")),
+                     str(record.get("document_url", "")), json.dumps(record.get("items", []), ensure_ascii=False, separators=(",", ":")),
+                     str(record.get("raw_fingerprint", "")), str(record.get("mapped_fingerprint", "")), _now()),
                 )
+        for cache_name, source_path in cache_sources.items():
+            if not source_path.is_file():
+                continue
+            try:
+                value = json.loads(source_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            encoded = json.dumps(value, ensure_ascii=False, sort_keys=True)
+            connection.execute(
+                """insert into business_cache(cache_name,cache_key,value_json,updated_at)
+                   values(?,?,?,?)
+                   on conflict(cache_name,cache_key) do update set
+                     value_json=case when business_cache.value_json in ('', 'null', '{}', '[]') then excluded.value_json else business_cache.value_json end,
+                     updated_at=excluded.updated_at""",
+                (cache_name, "value", encoded, _now()),
+            )
         for document_number, order_id, factory_value, updated_at in connection.execute(
             "select document_number, order_id, factory_order, updated_at from outbound_documents"
         ).fetchall():
@@ -652,10 +774,14 @@ def migrate_legacy_databases(state_dir: Path) -> dict[str, Any]:
     archive = state_dir / "migration-archives" / datetime.now().strftime("%Y%m%d-%H%M%S")
     archive.mkdir(parents=True, exist_ok=True)
     archived: list[str] = []
-    for legacy in existing:
+    archive_sources = [*existing]
+    if outbound_json.is_file():
+        archive_sources.append(outbound_json)
+    archive_sources.extend(path for path in cache_sources.values() if path.is_file())
+    for legacy in archive_sources:
         destination = archive / legacy.name
         if not destination.exists():
-            shutil.copy2(legacy, destination)
+            shutil.move(str(legacy), str(destination))
             archived.append(str(destination))
     return {"central": str(central), "migrated": migrated, "archived": archived, "status": "completed"}
 

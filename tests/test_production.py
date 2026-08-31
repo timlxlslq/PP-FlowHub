@@ -125,9 +125,16 @@ class ProductionTransactionTests(unittest.TestCase):
             connection.execute(
                 """insert into outbound_documents(
                        document_number, document_type, order_id, factory_order,
-                       status, source, updated_at
-                   ) values(?,?,?,?,?,?,?)""",
-                ("QTCK-HISTORY", "", "CS010", "CS010", "已出库", "金蝶", "now"),
+                       status, source, items_json, updated_at
+                   ) values(?,?,?,?,?,?,?,?)""",
+                (
+                    "QTCK-HISTORY", "materials", "CS010", "CS010", "已出库", "金蝶",
+                    json.dumps([
+                        {"productCode": "M0019", "quantity": 4},
+                        {"productCode": "M0020", "quantity": 102},
+                    ]),
+                    "now",
+                ),
             )
             connection.execute(
                 """insert into outbound_document_factories(
@@ -137,25 +144,6 @@ class ProductionTransactionTests(unittest.TestCase):
             )
             store.commit()
             store.close()
-
-            (config.state_dir / "inventory-outbound-records.json").write_text(
-                json.dumps({
-                    "version": 2,
-                    "records": {
-                        "history": {
-                            "document_number": "QTCK-HISTORY",
-                            "order_id": "CS010",
-                            "kind": "materials",
-                            "status": "已出库",
-                            "items": [
-                                {"productCode": "M0019", "quantity": 4},
-                                {"productCode": "M0020", "quantity": 102},
-                            ],
-                        }
-                    },
-                }, ensure_ascii=False),
-                encoding="utf-8",
-            )
 
             preview = production_preview(config, "CS010", ["F1011"])
             remaining = {item["material_type"]: item["remaining_quantity"] for item in preview["materials"]}

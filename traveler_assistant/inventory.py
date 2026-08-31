@@ -67,6 +67,18 @@ INVENTORY_DOMAIN_SUFFIX = ".jdy.com"
 # operation is not cancelled merely because the first document took time.
 INVENTORY_DOCUMENT_TIMEOUT_SECONDS = 90
 
+# These are presentation defaults for hardware whose source codes are stable
+# across reports.  They are deliberately keyed by canonical inventory SKU so
+# aliases such as Hinge/TestFullHinge and left/right rail source names share
+# one customer-facing name.  They never participate in material mapping or
+# inventory outbound payload construction.
+HARDWARE_PRODUCT_DISPLAY_NAMES = {
+    "M1001": "Hinge",
+    "M1002": "H-Rail",
+    "M1003": "L-Rail",
+    "M1013": "Shelf Holder",
+}
+
 
 @dataclass
 class TravelerItem:
@@ -1839,12 +1851,17 @@ class InventoryMappings:
             else path
         )
         self.manual: dict[str, str] = {}
+        self.manual_display_names: dict[str, str] = {}
         self.ignored: dict[str, str] = {}
         if self._legacy_path is not None:
             if path.is_file():
                 try:
                     data = json.loads(path.read_text(encoding="utf-8"))
                     self.manual = {_normalize_name(k): str(v) for k, v in data.get("manual", {}).items()}
+                    self.manual_display_names = {
+                        _normalize_name(k): str(v)
+                        for k, v in data.get("manual_display_names", {}).items()
+                    }
                     self.ignored = {_normalize_name(k): str(v) for k, v in data.get("ignored", {}).items()}
                 except (OSError, json.JSONDecodeError) as exc:
                     raise RuleError("inventory_mapping", f"库存商品映射无法读取：{path}") from exc
@@ -1858,12 +1875,12 @@ class InventoryMappings:
         try:
             if rule_type:
                 return connection.execute(
-                    "select source_name, normalized_name, product_code, reason from inventory_resolution_rules "
+                    "select source_name, normalized_name, product_code, display_name, reason from inventory_resolution_rules "
                     "where rule_type=? order by source_name",
                     (rule_type,),
                 ).fetchall()
             return connection.execute(
-                "select source_name, normalized_name, product_code, reason from inventory_resolution_rules "
+                "select source_name, normalized_name, product_code, display_name, reason from inventory_resolution_rules "
                 "order by source_name"
             ).fetchall()
         finally:
@@ -1873,12 +1890,29 @@ class InventoryMappings:
     def entries(self) -> tuple[list[dict], list[dict]]:
         if self._legacy_path is not None:
             return (
-                [{"name": name, "product_code": code} for name, code in sorted(self.manual.items())],
+                [
+                    {
+                        "name": name,
+                        "product_code": code,
+                        "display_name": self.manual_display_names.get(name, "").strip()
+                        or HARDWARE_PRODUCT_DISPLAY_NAMES.get(code.strip().upper(), "")
+                        or name,
+                    }
+                    for name, code in sorted(self.manual.items())
+                ],
                 [{"name": name, "reason": reason} for name, reason in sorted(self.ignored.items())],
             )
         rows = self._rows()
         manual = [
-            {"name": str(row["source_name"]), "product_code": str(row["product_code"] or "")}
+            {
+                "name": str(row["source_name"]),
+                "product_code": str(row["product_code"] or ""),
+                "display_name": self._effective_display_name(
+                    str(row["product_code"] or ""),
+                    str(row["source_name"] or ""),
+                    str(row["display_name"] or ""),
+                ),
+            }
             for row in rows if row["product_code"]
         ]
         ignored = [
@@ -1886,6 +1920,49 @@ class InventoryMappings:
             for row in rows if not row["product_code"]
         ]
         return manual, ignored
+
+    def _effective_display_name(
+        self, product_code: str, source_name: str = "", stored_name: str = ""
+    ) -> str:
+        """Return the user-facing name without changing any source fact."""
+        explicit = stored_name.strip()
+        if explicit:
+            return explicit
+        code = product_code.strip().upper()
+        if self._legacy_path is not None:
+            legacy_name = self.manual_display_names.get(_normalize_name(source_name), "").strip()
+            return legacy_name or HARDWARE_PRODUCT_DISPLAY_NAMES.get(code, "") or source_name.strip()
+        connection = self._connection or sqlite3.connect(self.database_path)
+        try:
+            row = connection.execute(
+                """select display_name from inventory_resolution_rules
+                   where rule_type='mapping' and product_code=? and trim(display_name)<>''
+                   order by updated_at desc, id desc limit 1""",
+                (code,),
+            ).fetchone()
+            if row and str(row[0] or "").strip():
+                return str(row[0]).strip()
+        finally:
+            if self._connection is None:
+                connection.close()
+        return HARDWARE_PRODUCT_DISPLAY_NAMES.get(code, "") or source_name.strip()
+
+    def display_name_for_product(self, product_code: str, source_name: str = "") -> str:
+        return self._effective_display_name(product_code, source_name)
+
+    def display_name_for_hardware(
+        self, product_code: str, source_name: str = "", source_code: str = ""
+    ) -> str:
+        """Resolve a hardware display label by SKU, then stable source aliases."""
+        code = product_code.strip().upper()
+        name = self._effective_display_name(code, source_name)
+        if name and name != source_name.strip():
+            return name
+        source_display = (
+            HARDWARE_NAME_DISPLAY_NAMES.get(_normalize_name(source_name))
+            or HARDWARE_DISPLAY_NAMES.get(_normalize_name(source_code))
+        )
+        return source_display or name or source_code.strip() or source_name.strip()
 
     def ignored_reason(self, name: str) -> str | None:
         normalized = _normalize_name(name)
@@ -1928,7 +2005,7 @@ class InventoryMappings:
             return
         self._upsert("ignore", name.strip(), normalized, None, value)
 
-    def save_manual(self, name: str, product_code: str) -> None:
+    def save_manual(self, name: str, product_code: str, display_name: str = "") -> None:
         normalized = _normalize_name(name)
         if not normalized:
             raise RuleError("inventory_mapping", "映射材料名称不能为空")
@@ -1937,10 +2014,21 @@ class InventoryMappings:
             raise RuleError("inventory_mapping", "映射商品 SKU 不能为空")
         if self._legacy_path is not None:
             self.manual[normalized] = code
+            self.manual_display_names[normalized] = (
+                display_name.strip()
+                or self.display_name_for_hardware(code, name, "")
+                or name.strip()
+            )
             self.ignored.pop(normalized, None)
             self._save()
             return
-        self._upsert("mapping", name.strip(), normalized, code, "")
+        effective_display_name = (
+            display_name.strip()
+            or self.display_name_for_product(code, name)
+            or name.strip()
+        )
+        self._upsert("mapping", name.strip(), normalized, code, "", effective_display_name)
+        self._set_product_display_name(code, effective_display_name)
 
     def remove_ignored(self, name: str) -> None:
         normalized = _normalize_name(name)
@@ -1958,25 +2046,54 @@ class InventoryMappings:
             return
         self._delete(normalized, "mapping")
 
-    def _upsert(self, rule_type: str, source_name: str, normalized: str, product_code: str | None, reason: str) -> None:
+    def _upsert(
+        self,
+        rule_type: str,
+        source_name: str,
+        normalized: str,
+        product_code: str | None,
+        reason: str,
+        display_name: str = "",
+    ) -> None:
         connection = sqlite3.connect(self.database_path)
         try:
             connection.execute(
                 """insert into inventory_resolution_rules(
-                    rule_type, source_name, normalized_name, product_code, reason, created_at, updated_at
-                ) values(?,?,?,?,?,?,?)
+                    rule_type, source_name, normalized_name, product_code, display_name, reason, created_at, updated_at
+                ) values(?,?,?,?,?,?,?,?)
                 on conflict(normalized_name) do update set
                     rule_type=excluded.rule_type,
                     source_name=excluded.source_name,
                     product_code=excluded.product_code,
+                    display_name=case when excluded.rule_type='mapping' then excluded.display_name else '' end,
                     reason=excluded.reason,
                     updated_at=excluded.updated_at""",
-                (rule_type, source_name, normalized, product_code, reason, datetime.now().astimezone().isoformat(timespec="seconds"), datetime.now().astimezone().isoformat(timespec="seconds")),
+                (rule_type, source_name, normalized, product_code, display_name, reason, datetime.now().astimezone().isoformat(timespec="seconds"), datetime.now().astimezone().isoformat(timespec="seconds")),
             )
             connection.commit()
         except sqlite3.Error as exc:
             connection.rollback()
             raise RuleError("inventory_mapping", f"库存规则无法保存：{source_name}") from exc
+        finally:
+            connection.close()
+
+    def _set_product_display_name(self, product_code: str, display_name: str) -> None:
+        """Keep every source alias of one SKU on the same display label."""
+        if self._legacy_path is not None:
+            for normalized, code in self.manual.items():
+                if code.strip().upper() == product_code.strip().upper():
+                    self.manual_display_names[normalized] = display_name
+            self._save()
+            return
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                """update inventory_resolution_rules
+                   set display_name=?, updated_at=?
+                   where rule_type='mapping' and product_code=?""",
+                (display_name, datetime.now().astimezone().isoformat(timespec="seconds"), product_code.strip().upper()),
+            )
+            connection.commit()
         finally:
             connection.close()
 
@@ -1993,7 +2110,12 @@ class InventoryMappings:
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"version": 1, "manual": self.manual, "ignored": self.ignored}
+        payload = {
+            "version": 1,
+            "manual": self.manual,
+            "manual_display_names": self.manual_display_names,
+            "ignored": self.ignored,
+        }
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(self.path)
@@ -2501,6 +2623,7 @@ def list_inventory_mappings(config: Config) -> dict:
     return {
         "ok": True,
         "manual": {item["name"]: item["product_code"] for item in manual},
+        "manual_display_names": {item["name"]: item["display_name"] for item in manual},
         "ignored": {item["name"]: item["reason"] for item in ignored},
     }
 
@@ -2521,14 +2644,17 @@ def search_inventory_products(config: Config, query: str) -> dict:
     return {"query": query, "products": [asdict(product) for product in matches[:50]]}
 
 
-def save_manual_mapping(config: Config, name: str, product_code: str) -> dict:
+def save_manual_mapping(
+    config: Config, name: str, product_code: str, display_name: str = ""
+) -> dict:
     with ProductDatabase(bootstrap_product_database(config)) as catalog:
         product = catalog.require_code(product_code)
     mappings = InventoryMappings(config.workflow_database)
-    mappings.save_manual(name, product.code)
+    mappings.save_manual(name, product.code, display_name)
     return {
         "ok": True,
         "traveler_name": name,
+        "display_name": mappings.display_name_for_hardware(product.code, name),
         "product": asdict(product),
     }
 
@@ -2539,7 +2665,9 @@ def remove_manual_mapping(config: Config, name: str) -> dict:
     return {"ok": True, "traveler_name": name, "removed": True}
 
 
-def update_manual_mapping(config: Config, old_name: str, name: str, product_code: str) -> dict:
+def update_manual_mapping(
+    config: Config, old_name: str, name: str, product_code: str, display_name: str = ""
+) -> dict:
     mappings = InventoryMappings(config.workflow_database)
     old_normalized = _normalize_name(old_name)
     new_normalized = _normalize_name(name)
@@ -2549,11 +2677,12 @@ def update_manual_mapping(config: Config, old_name: str, name: str, product_code
         product = catalog.require_code(product_code)
     if old_normalized != new_normalized:
         mappings.remove_manual(old_name)
-    mappings.save_manual(name, product.code)
+    mappings.save_manual(name, product.code, display_name)
     return {
         "ok": True,
         "old_name": old_name,
         "traveler_name": name,
+        "display_name": mappings.display_name_for_hardware(product.code, name),
         "product": asdict(product),
     }
 
@@ -2690,14 +2819,13 @@ class InventoryOperationJournal:
 
 class InventorySyncStore:
     def __init__(self, path: Path, backup_root: Path):
+        # Outbound facts moved to workflow.sqlite3. ``path`` is retained only
+        # as the old filename passed by callers; it is no longer opened or
+        # written, so archived legacy JSON cannot silently become authoritative.
         self.path = path
+        self.database = path.parent / "workflow.sqlite3"
         self.backup_root = backup_root / "Inventory Sync Records"
-        self.data = {"version": 2, "records": {}}
-        if path.is_file():
-            try:
-                self.data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise RuleError("inventory_sync", f"库存同步记录无法读取：{path}") from exc
+        ensure_schema(self.database)
 
     @staticmethod
     def key(order_id: str, remark: str) -> str:
@@ -2726,13 +2854,64 @@ class InventorySyncStore:
             )
         })
 
+    def _records(self) -> list[dict]:
+        connection = sqlite3.connect(self.database)
+        try:
+            rows = connection.execute(
+                """select document_number, document_type, order_id, factory_order,
+                          status, issued_at, source_path, document_url, items_json,
+                          raw_fingerprint, mapped_fingerprint
+                   from outbound_documents order by document_number"""
+            ).fetchall()
+            records: list[dict] = []
+            for row in rows:
+                links = [
+                    str(item[0]).strip()
+                    for item in connection.execute(
+                        "select factory_order from outbound_document_factories where document_number=? order by factory_order",
+                        (row[0],),
+                    ).fetchall()
+                    if str(item[0]).strip()
+                ]
+                remarks = links or [str(row[3] or row[2] or "").strip()]
+                try:
+                    items = json.loads(row[8] or "[]")
+                except (TypeError, json.JSONDecodeError):
+                    items = []
+                for remark in remarks:
+                    records.append({
+                        "document_number": row[0],
+                        "kind": row[1],
+                        "order_id": row[2],
+                        "remark": remark,
+                        "status": row[4],
+                        "synced_at": row[5],
+                        "traveler_path": row[6],
+                        "document_url": row[7],
+                        "items": items,
+                        "raw_fingerprint": row[9],
+                        "mapped_fingerprint": row[10],
+                    })
+            return records
+        finally:
+            connection.close()
+
     def record_for_document(self, order_id: str, remark: str) -> dict | None:
-        return self.data.get("records", {}).get(self.key(order_id, remark))
+        order_key = _normalize_name(order_id)
+        remark_key = _normalize_name(remark)
+        return next(
+            (
+                record for record in self._records()
+                if _normalize_name(record.get("order_id", "")) == order_key
+                and _normalize_name(record.get("remark", "")) == remark_key
+            ),
+            None,
+        )
 
     def records_for_order(self, order_id: str) -> list[dict]:
         normalized = _normalize_name(order_id)
         return [
-            record for record in self.data.get("records", {}).values()
+            record for record in self._records()
             if _normalize_name(str(record.get("order_id", ""))) == normalized
         ]
 
@@ -2840,145 +3019,86 @@ class InventorySyncStore:
     ) -> None:
         self._backup_current()
         prepared = {item["remark"]: item for item in self.prepare_documents(preview)}
-        for result in results:
-            if not result.get("saved") and not result.get("unchanged"):
-                continue
-            remark = str(result.get("remark", ""))
-            plan = prepared.get(remark)
-            if not plan:
-                continue
-            is_production_material_commit = (
-                production_draft is not None
-                and preview.source_type == "database"
-                and _normalize_name(remark) == _normalize_name(preview.traveler.order_id)
-            )
-            key = self.key(preview.traveler.order_id, remark)
-            self.data.setdefault("records", {})[key] = {
-                "traveler_path": str(preview.traveler.path),
-                "order_id": preview.traveler.order_id,
-                "remark": remark,
-                # Production material consumption is an order-level inventory
-                # document, not a factory-order shipment. Keep an explicit
-                # kind so later reconciliation cannot mistake stale factory
-                # links for real shipment evidence.
-                "kind": "production_materials" if is_production_material_commit else plan["kind"],
-                "raw_fingerprint": plan["rawFingerprint"],
-                "mapped_fingerprint": plan["mappedFingerprint"],
-                "document_number": str(result.get("documentNumber", "")),
-                "document_url": str(result.get("url", "")),
-                "status": "已出库",
-                "items": plan["items"],
-                "synced_at": datetime.now().isoformat(timespec="seconds"),
-            }
-        self.data["version"] = 2
-        # The sync JSON and the authoritative workflow database live in the
-        # same state directory (normally ``data``).  Using parent.parent here
-        # silently bypasses the central database after the storage cutover.
-        central = self.path.parent / "workflow.sqlite3"
-        if central.is_file() or production_draft is not None or operation_id:
-            ensure_schema(central)
-            connection = sqlite3.connect(central)
-            try:
-                for result in results:
-                    if not result.get("saved") and not result.get("unchanged"):
-                        continue
-                    remark = str(result.get("remark", ""))
-                    document_number = str(result.get("documentNumber", "")).strip()
-                    if not document_number:
-                        continue
-                    factory = connection.execute(
-                        "select factory_order from factory_orders where order_id=? and (factory_name=? or factory_order=?) limit 1",
-                        (preview.traveler.order_id, remark, remark),
-                    ).fetchone()
-                    # Production consumes order-level materials, but it does
-                    # not ship the selected factory orders. Keep the
-                    # inventory document and completed production batch as
-                    # separate facts; only a factory-scoped shipment may
-                    # populate outbound_document_factories.
-                    is_production_material_commit = (
-                        production_draft is not None
-                        and preview.source_type == "database"
+        connection = sqlite3.connect(self.database)
+        try:
+            for result in results:
+                if not result.get("saved") and not result.get("unchanged"):
+                    continue
+                remark = str(result.get("remark", ""))
+                plan = prepared.get(remark)
+                document_number = str(result.get("documentNumber", "")).strip()
+                if not plan or not document_number:
+                    continue
+                has_factory_orders = connection.execute(
+                    "select 1 from sqlite_master where type='table' and name='factory_orders'"
+                ).fetchone() is not None
+                factory = connection.execute(
+                    "select factory_order from factory_orders where order_id=? and (factory_name=? or factory_order=?) limit 1",
+                    (preview.traveler.order_id, remark, remark),
+                ).fetchone() if has_factory_orders else None
+                is_production_material_commit = (
+                    production_draft is not None
+                    and preview.source_type == "database"
+                    and _normalize_name(remark) == _normalize_name(preview.traveler.order_id)
+                )
+                linked_factory_values = (
+                    () if is_production_material_commit else preview.selected_factory_orders
+                    if (
+                        preview.source_type == "database"
                         and _normalize_name(remark) == _normalize_name(preview.traveler.order_id)
-                    )
-                    # For an ordinary order-center material outbound, an
-                    # explicit factory selection remains the identity of the
-                    # covered factory orders. Do not infer/broadcast an
-                    # order-only record when there is no explicit selection.
-                    linked_factory_values = (
-                        ()
-                        if is_production_material_commit
-                        else preview.selected_factory_orders
-                        if (
-                            preview.source_type == "database"
-                            and _normalize_name(remark) == _normalize_name(preview.traveler.order_id)
-                            and preview.selected_factory_orders
-                        )
-                        else (factory[0],) if factory else (remark,)
-                    )
+                        and preview.selected_factory_orders
+                    ) else (factory[0],) if factory else (remark,)
+                )
+                now = datetime.now().astimezone().isoformat(timespec="seconds")
+                connection.execute(
+                    """insert into outbound_documents(
+                        document_number,document_type,order_id,factory_order,status,source,issued_at,source_path,
+                        document_url,items_json,raw_fingerprint,mapped_fingerprint,updated_at
+                    ) values(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    on conflict(document_number) do update set
+                        document_type=excluded.document_type, order_id=excluded.order_id,
+                        factory_order=excluded.factory_order, status=excluded.status,
+                        source=excluded.source, issued_at=excluded.issued_at,
+                        source_path=excluded.source_path, document_url=excluded.document_url,
+                        items_json=excluded.items_json, raw_fingerprint=excluded.raw_fingerprint,
+                        mapped_fingerprint=excluded.mapped_fingerprint, updated_at=excluded.updated_at""",
+                    (
+                        document_number,
+                        "production_materials" if is_production_material_commit else str(result.get("kind", "")),
+                        preview.traveler.order_id,
+                        factory[0] if factory else remark,
+                        "已出库", "金蝶", str(result.get("syncedAt", "")), str(preview.traveler.path),
+                        str(result.get("url", "")), json.dumps(plan["items"], ensure_ascii=False, separators=(",", ":")),
+                        plan["rawFingerprint"], plan["mappedFingerprint"], now,
+                    ),
+                )
+                if is_production_material_commit:
                     connection.execute(
-                        """insert into outbound_documents(
-                            document_number,document_type,order_id,factory_order,status,source,issued_at,source_path,updated_at
-                        ) values(?,?,?,?,?,?,?,?,?)
-                        on conflict(document_number) do update set
-                            document_type=excluded.document_type, order_id=excluded.order_id,
-                            factory_order=excluded.factory_order, status=excluded.status,
-                            source=excluded.source, issued_at=excluded.issued_at,
-                            source_path=excluded.source_path, updated_at=excluded.updated_at""",
-                        (
-                            document_number,
-                            "production_materials" if is_production_material_commit else str(result.get("kind", "")),
-                            preview.traveler.order_id,
-                         factory[0] if factory else remark, "已出库", "金蝶", str(result.get("syncedAt", "")),
-                            str(preview.traveler.path), datetime.now().isoformat(timespec="seconds"),
-                        ),
+                        "delete from outbound_document_factories where document_number=?",
+                        (document_number,),
                     )
-                    if is_production_material_commit:
-                        # A previous runtime or migration may have attached
-                        # this order-level document to factory orders. Make
-                        # the production boundary idempotent and remove such
-                        # stale links before reconciliation sees them.
-                        connection.execute(
-                            "delete from outbound_document_factories where document_number=?",
-                            (document_number,),
-                        )
-                    for linked_factory_value in linked_factory_values:
-                        ensure_outbound_document_factory_links(
-                            connection,
-                            document_number,
-                            preview.traveler.order_id,
-                            linked_factory_value,
-                        )
-                if production_draft is not None:
-                    from .production import record_completed_production
-
-                    record_completed_production(connection, production_draft)
-                if operation_id and commit_operation:
-                    updated = connection.execute(
-                        """update inventory_operations
-                           set status='local_committed', last_error='', updated_at=?
-                           where operation_id=?""",
-                        (datetime.now().astimezone().isoformat(timespec="seconds"), operation_id),
-                    ).rowcount
-                    if updated != 1:
-                        raise RuleError(
-                            "inventory_operation_missing",
-                            "库存操作恢复记录不存在，已停止本地业务提交",
-                        )
-                connection.commit()
-            finally:
-                connection.close()
-        # Keep the human-readable audit file in sync with the authoritative
-        # SQLite record.  The central database branch above used to skip this
-        # write, so a later outbound retry could treat a confirmed document
-        # as new and try to edit it again in JDY.
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(self.data, ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+                for linked_factory_value in linked_factory_values:
+                    ensure_outbound_document_factory_links(
+                        connection, document_number, preview.traveler.order_id, linked_factory_value
+                    )
+            if production_draft is not None:
+                from .production import record_completed_production
+                record_completed_production(connection, production_draft)
+            if operation_id and commit_operation:
+                updated = connection.execute(
+                    """update inventory_operations
+                       set status='local_committed', last_error='', updated_at=?
+                       where operation_id=?""",
+                    (datetime.now().astimezone().isoformat(timespec="seconds"), operation_id),
+                ).rowcount
+                if updated != 1:
+                    raise RuleError("inventory_operation_missing", "库存操作恢复记录不存在，已停止本地业务提交")
+            connection.commit()
+        finally:
+            connection.close()
 
     def _backup_current(self) -> None:
-        if not self.path.is_file():
+        if not self.database.is_file():
             return
         backup_root = self.backup_root
         try:
@@ -2989,9 +3109,9 @@ class InventorySyncStore:
             # keep a recoverable copy beside the local workflow database.
             backup_root = self.path.parent / "database-backups" / "Inventory Sync Records"
             backup_root.mkdir(parents=True, exist_ok=True)
-        destination = backup_root / f"inventory-sync {datetime.now():%Y-%m-%d %H%M%S.%f}.json"
+        destination = backup_root / f"workflow-before-outbound {datetime.now():%Y-%m-%d %H%M%S.%f}.sqlite3"
         try:
-            shutil.copy2(self.path, destination)
+            shutil.copy2(self.database, destination)
         except OSError:
             # Some SMB/macOS mounts reject the metadata pass in copy2() even
             # though the file contents are writable.  A backup failure must
@@ -3000,9 +3120,9 @@ class InventorySyncStore:
             destination.unlink(missing_ok=True)
             backup_root = self.path.parent / "database-backups" / "Inventory Sync Records"
             backup_root.mkdir(parents=True, exist_ok=True)
-            destination = backup_root / f"inventory-sync {datetime.now():%Y-%m-%d %H%M%S.%f}.json"
-            shutil.copyfile(self.path, destination)
-        backups = sorted(backup_root.glob("inventory-sync *.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+            destination = backup_root / f"workflow-before-outbound {datetime.now():%Y-%m-%d %H%M%S.%f}.sqlite3"
+            shutil.copyfile(self.database, destination)
+        backups = sorted(backup_root.glob("workflow-before-outbound *.sqlite3"), key=lambda item: item.stat().st_mtime, reverse=True)
         for old in backups[50:]:
             old.unlink()
 
@@ -3037,7 +3157,7 @@ def _catalog_info(config: Config) -> dict:
 
 
 def _sync_path(config: Config) -> Path:
-    return config.state_dir / "inventory-outbound-records.json"
+    return config.workflow_database
 
 
 def _persist_completed_outbound_results(
@@ -3212,7 +3332,7 @@ def list_traveler_names(config: Config) -> dict:
     store = InventorySyncStore(_sync_path(config), config.backup_root)
     records_by_path = {
         str(Path(record.get("traveler_path", "")).resolve()): record
-        for record in store.data.get("records", {}).values()
+        for record in store._records()
         if record.get("traveler_path")
     }
     entries = []
@@ -4267,6 +4387,7 @@ def inventory_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--folder", default="")
     parser.add_argument("--query", default="")
     parser.add_argument("--product-code", default="")
+    parser.add_argument("--display-name", default="")
     parser.add_argument("--include-hardware", action="store_true")
     parser.add_argument("--room-material", action="store_true")
     parser.add_argument("--production-batch", default="")
@@ -4347,12 +4468,12 @@ def inventory_main(argv: list[str] | None = None) -> int:
             item_names = args.item_name or args.traveler_name
             if not item_names or not args.product_code:
                 raise RuleError("inventory_argument", "保存映射必须提供材料名称和商品编号")
-            result = save_manual_mapping(config, item_names[0], args.product_code)
+            result = save_manual_mapping(config, item_names[0], args.product_code, args.display_name)
         elif args.action == "update-mapping":
             item_names = args.item_name or args.traveler_name
             if not args.old_name or not item_names or not args.product_code:
                 raise RuleError("inventory_argument", "update-mapping 需要 --old-name、材料名称和商品编号")
-            result = update_manual_mapping(config, args.old_name, item_names[0], args.product_code)
+            result = update_manual_mapping(config, args.old_name, item_names[0], args.product_code, args.display_name)
         elif args.action == "remove-mapping":
             item_names = args.item_name or args.traveler_name
             if not item_names:

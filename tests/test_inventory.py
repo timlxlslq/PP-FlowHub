@@ -600,6 +600,9 @@ class InventoryTests(unittest.TestCase):
         self.assertIn("saveSettingsManualMapping", swift)
         self.assertIn("updateSettingsManualMapping", swift)
         self.assertIn("removeSettingsManualMapping", swift)
+        self.assertIn("manual_display_names", swift)
+        self.assertIn("displayName: String", swift)
+        self.assertIn("显示名称（可选）", swift)
         settings = swift.split("struct SettingsView", 1)[1].split(
             "struct OperationLogViewerView", 1
         )[0]
@@ -1312,7 +1315,7 @@ class InventoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = Config(state_dir=root / "state", order_root=root / "orders")
-            store = OrderIndexStore(config.state_dir / "order-index.sqlite3")
+            store = OrderIndexStore(config.workflow_database)
             store.upsert_order("CS005", validation_status="正常")
             store.upsert_factory(
                 "F2608120222",
@@ -1719,6 +1722,27 @@ class InventoryTests(unittest.TestCase):
             remove_manual_mapping(config, "Cabinet Hinge")
             self.assertEqual(list_inventory_mappings(config)["manual"], {})
 
+    def test_hardware_display_name_is_shared_by_sku_aliases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(state_dir=root / "state")
+            config.prepare_storage()
+            make_catalog(config.state_dir / "inventory" / "current-products.xlsx")
+
+            save_manual_mapping(config, "Hinge", "M1001", "柜门铰链")
+            save_manual_mapping(config, "TestFullHinge", "M1001")
+
+            mappings = InventoryMappings(config.workflow_database)
+            manual = list_inventory_mappings(config)
+            self.assertEqual(manual["manual"]["Hinge"], "M1001")
+            self.assertEqual(manual["manual"]["TestFullHinge"], "M1001")
+            self.assertEqual(manual["manual_display_names"]["Hinge"], "柜门铰链")
+            self.assertEqual(manual["manual_display_names"]["TestFullHinge"], "柜门铰链")
+            self.assertEqual(
+                mappings.display_name_for_hardware("M1001", "TestFullHinge", "71T950A"),
+                "柜门铰链",
+            )
+
     def test_sync_status_changes_with_traveler_fingerprint(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1729,7 +1753,7 @@ class InventoryTests(unittest.TestCase):
             make_catalog(catalog_path)
             mapping_path.write_text('{"manual": {}, "ignored": {}}', encoding="utf-8")
             preview = build_preview(path, catalog_path, mapping_path)
-            store = InventorySyncStore(root / "sync.json", root / "backups")
+            store = InventorySyncStore(root / "workflow.sqlite3", root / "backups")
             store.save_success(preview, [{
                 "remark": "PP0099",
                 "saved": True,
@@ -1737,7 +1761,7 @@ class InventoryTests(unittest.TestCase):
             }])
             self.assertEqual(store.status_for(parse_traveler(path))[0], "已出库")
             make_traveler(path, [("18mm--Plywood", 3)])
-            reloaded = InventorySyncStore(root / "sync.json", root / "backups")
+            reloaded = InventorySyncStore(root / "workflow.sqlite3", root / "backups")
             self.assertEqual(reloaded.status_for(parse_traveler(path))[0], "需要更新")
 
     def test_order_material_outbound_links_only_selected_split_factories(self):
@@ -1796,11 +1820,12 @@ class InventoryTests(unittest.TestCase):
                     traveler=traveler,
                     outbound_items=[outbound_item],
                     selected_factory_orders=(factory_order,),
+                    partial_scope=True,
                     source_type="database",
                 )
 
             sync = InventorySyncStore(
-                config.state_dir / "inventory-outbound-records.json",
+                config.workflow_database,
                 config.backup_root,
             )
             sync.save_success(preview("F-KITCHEN"), [{
@@ -1818,7 +1843,7 @@ class InventoryTests(unittest.TestCase):
             # document; it must append its explicit identity without creating
             # another inventory document.
             sync = InventorySyncStore(
-                config.state_dir / "inventory-outbound-records.json",
+                config.workflow_database,
                 config.backup_root,
             )
             sync.save_success(preview("F-VANITY"), [{
@@ -1920,7 +1945,7 @@ class InventoryTests(unittest.TestCase):
                 "materials": [{"material_type": "plywood", "color": "", "thickness": "18", "edge": "", "unit": "张", "quantity": 2}],
             }
             sync = InventorySyncStore(
-                config.state_dir / "inventory-outbound-records.json",
+                config.workflow_database,
                 config.backup_root,
             )
             sync.save_success(
@@ -2004,7 +2029,7 @@ class InventoryTests(unittest.TestCase):
                 "materials": [{"material_type": "plywood", "color": "", "thickness": "18", "edge": "", "unit": "张", "quantity": 2}],
             }
             sync = InventorySyncStore(
-                config.state_dir / "inventory-outbound-records.json",
+                config.workflow_database,
                 config.backup_root,
             )
             sync.save_success(
@@ -2053,7 +2078,7 @@ class InventoryTests(unittest.TestCase):
             make_catalog(catalog_path)
             mapping_path.write_text('{"manual": {"Hinge": "M1001"}, "ignored": {}}', encoding="utf-8")
             preview = build_preview(path, catalog_path, mapping_path)
-            store = InventorySyncStore(root / "sync.json", root / "backups")
+            store = InventorySyncStore(root / "workflow.sqlite3", root / "backups")
             plans = store.prepare_documents(preview)
             results = [
                 {
@@ -2067,23 +2092,26 @@ class InventoryTests(unittest.TestCase):
             make_traveler(path, [])
             empty_preview = build_preview(path, catalog_path, mapping_path)
             with self.assertRaisesRegex(RuleError, "人工删除或作废"):
-                InventorySyncStore(root / "sync.json", root / "backups").prepare_documents(empty_preview)
+                InventorySyncStore(root / "workflow.sqlite3", root / "backups").prepare_documents(empty_preview)
 
     def test_hardware_shipment_ignores_previous_order_material_document(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            sync_path = root / "sync.json"
+            sync_path = root / "workflow.sqlite3"
             store = InventorySyncStore(sync_path, root / "backups")
-            store.data["records"][store.key("PP0072", "PP0072")] = {
-                "order_id": "PP0072",
-                "remark": "PP0072",
-                "kind": "materials",
-                "document_number": "QTCK20260822001",
-                "raw_fingerprint": "materials-source",
-                "mapped_fingerprint": "materials-mapped",
-            }
-            sync_path.parent.mkdir(parents=True, exist_ok=True)
-            sync_path.write_text(json.dumps(store.data, ensure_ascii=False), encoding="utf-8")
+            connection = sqlite3.connect(store.database)
+            connection.execute(
+                """insert into outbound_documents(
+                       document_number, document_type, order_id, factory_order,
+                       status, source, raw_fingerprint, mapped_fingerprint, updated_at
+                   ) values(?,?,?,?,?,?,?,?,?)""",
+                (
+                    "QTCK20260822001", "materials", "PP0072", "PP0072",
+                    "已出库", "金蝶", "materials-source", "materials-mapped", "now",
+                ),
+            )
+            connection.commit()
+            connection.close()
 
             hardware_item = TravelerItem(1, "五金", "Hinge", 2, "PP0072-OFFICE")
             traveler = TravelerData(
@@ -2175,17 +2203,19 @@ class InventoryTests(unittest.TestCase):
                 """
                 insert into outbound_documents(
                     document_number, document_type, order_id, factory_order,
-                    status, source, issued_at, updated_at
-                ) values(?,?,?,?,?,?,?,?)
+                    status, source, issued_at, raw_fingerprint, mapped_fingerprint, updated_at
+                ) values(?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     "QTCK-HARDWARE",
-                    "",
+                    "hardware",
                     "PP0072",
                     "F2608190232",
                     "已出库",
                     "金蝶",
                     "2026-08-21T22:09:24",
+                    "hardware-source",
+                    "hardware-mapped",
                     "2026-08-21T22:09:24",
                 ),
             )
@@ -2201,29 +2231,6 @@ class InventoryTests(unittest.TestCase):
             )
             connection.commit()
             connection.close()
-            sync_path = config.state_dir / "inventory-outbound-records.json"
-            sync_path.write_text(
-                json.dumps(
-                    {
-                        "version": 2,
-                        "records": {
-                            "hardware": {
-                                "order_id": "PP0072",
-                                "remark": "PP0072-HALLWAY",
-                                "kind": "hardware",
-                                "document_number": "QTCK-HARDWARE",
-                                "raw_fingerprint": "hardware-source",
-                                "mapped_fingerprint": "hardware-mapped",
-                                "status": "已出库",
-                                "traveler_path": str(config.workflow_database),
-                            }
-                        },
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-
             records = _load_outbound_records(config)
             self.assertEqual(records[0]["kind"], "hardware")
             self.assertEqual(reconcile_outbound_statuses(config), 1)

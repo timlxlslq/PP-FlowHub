@@ -28,6 +28,70 @@ let orderDashboardFactorySelectionColumnWidth: CGFloat = 54
 let orderDashboardOperationColumnWidth: CGFloat = 136
 let orderDashboardFactoryCountColumnWidth: CGFloat = 90
 let orderDashboardUpdatedAtColumnWidth: CGFloat = 176
+private let orderDashboardLeadingColumnWidth: CGFloat = 40
+private let orderDashboardFlexibleColumnCount = 6
+private let orderDashboardScrollIndicatorReservation: CGFloat = 16
+private let orderDashboardDataHeaderTitles: Set<String> = [
+    "订单",
+    "状态",
+    "工厂单",
+    "材料",
+    "优化进度",
+    "生产进度",
+    "出货进度",
+]
+private let orderDashboardDataHeaderOffset: CGFloat = 2
+
+private struct OrderDashboardTableLayout {
+    let flexibleColumnWidth: CGFloat
+    let totalWidth: CGFloat
+    let containerWidth: CGFloat
+
+    init(totalWidth: CGFloat) {
+        self.containerWidth = totalWidth
+        let fixedWidth = orderDashboardLeadingColumnWidth
+            + orderDashboardFactoryCountColumnWidth
+            + orderDashboardUpdatedAtColumnWidth
+            + orderDashboardOperationColumnWidth
+        let contentWidth = max(0, totalWidth - orderDashboardScrollIndicatorReservation)
+        self.flexibleColumnWidth = max(
+            100,
+            (contentWidth - fixedWidth) / CGFloat(orderDashboardFlexibleColumnCount)
+        )
+        self.totalWidth = max(
+            contentWidth,
+            fixedWidth + flexibleColumnWidth * CGFloat(orderDashboardFlexibleColumnCount)
+        )
+    }
+
+    var dataWidth: CGFloat {
+        totalWidth - orderDashboardOperationColumnWidth
+    }
+
+    var trailingSpacerWidth: CGFloat {
+        max(0, containerWidth - totalWidth)
+    }
+
+    var columns: [GridItem] {
+        [
+            orderDashboardLeadingColumnWidth,
+            flexibleColumnWidth,
+            flexibleColumnWidth,
+            orderDashboardFactoryCountColumnWidth,
+            flexibleColumnWidth,
+            flexibleColumnWidth,
+            flexibleColumnWidth,
+            flexibleColumnWidth,
+            orderDashboardUpdatedAtColumnWidth,
+            orderDashboardOperationColumnWidth,
+        ].map { GridItem(.fixed($0), spacing: 0) }
+    }
+
+    var dataColumns: [GridItem] {
+        Array(columns.dropLast())
+    }
+}
+
 let dashboardMessageVisibleRowCount = 3
 let dashboardMessageRowHeight: CGFloat = 74
 let dashboardMessageViewportHeight = CGFloat(dashboardMessageVisibleRowCount) * dashboardMessageRowHeight
@@ -665,12 +729,8 @@ func orderInstallationDisplayDate(_ value: String) -> String {
 }
 
 func orderInstallationDateSummary(_ days: [OrderInstallationDay]) -> String {
-    let dates = days.map(\.date).sorted()
-    guard let first = dates.first, let last = dates.last else { return "" }
-    let range = first == last
-        ? orderInstallationDisplayDate(first)
-        : "\(orderInstallationDisplayDate(first))–\(orderInstallationDisplayDate(last))"
-    return "\(range) · \(dates.count)天"
+    guard let date = days.map(\.date).sorted().first else { return "" }
+    return orderInstallationDisplayDate(date)
 }
 
 func orderInstallationPlannedDateSummary(_ days: [OrderInstallationDay]) -> String {
@@ -1749,55 +1809,63 @@ struct OrderDashboardView: View {
     }
 
     private var orderTable: some View {
-        AppSurfaceCard(padding: 0) {
-            VStack(spacing: 0) {
-                orderTableHeader
-                Divider()
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        if filteredOrders.isEmpty {
-                            VStack(spacing: 8) {
-                                Image(systemName: "magnifyingglass")
-                                    .font(.title2)
-                                    .foregroundColor(.secondary)
-                                Text("没有符合条件的订单").fontWeight(.semibold)
-                                Text("请调整搜索或状态筛选条件").font(.caption).foregroundColor(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, minHeight: 220)
-                        } else {
-                            ForEach(Array(filteredOrders.enumerated()), id: \.element.id) { index, item in
-                                let isLastRow = index == filteredOrders.count - 1
-                                orderRow(item, isLastRow: isLastRow)
-                                if !isLastRow { Divider() }
+        GeometryReader { geometry in
+            let layout = OrderDashboardTableLayout(totalWidth: geometry.size.width)
+            AppSurfaceCard(padding: 0) {
+                VStack(spacing: 0) {
+                    orderTableHeader(layout: layout)
+                    Divider()
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            if filteredOrders.isEmpty {
+                                VStack(spacing: 8) {
+                                    Image(systemName: "magnifyingglass")
+                                        .font(.title2)
+                                        .foregroundColor(.secondary)
+                                    Text("没有符合条件的订单").fontWeight(.semibold)
+                                    Text("请调整搜索或状态筛选条件").font(.caption).foregroundColor(.secondary)
+                                }
+                                .frame(maxWidth: .infinity, minHeight: 220)
+                            } else {
+                                ForEach(Array(filteredOrders.enumerated()), id: \.element.id) { index, item in
+                                    let isLastRow = index == filteredOrders.count - 1
+                                    orderRow(item, isLastRow: isLastRow, layout: layout)
+                                    if !isLastRow { Divider() }
+                                }
                             }
                         }
+                        .frame(width: layout.containerWidth, alignment: .leading)
                     }
+                    .frame(maxHeight: .infinity)
                 }
-                .frame(maxHeight: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous))
             }
+            .frame(width: layout.containerWidth, alignment: .leading)
+            .frame(maxHeight: .infinity, alignment: .topLeading)
             .clipShape(RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous))
+            .mask(RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous))
         }
         .frame(maxHeight: .infinity)
-        .clipShape(RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous))
-        .mask(RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous))
     }
 
-    private var orderTableHeader: some View {
+    private func orderTableHeader(layout: OrderDashboardTableLayout) -> some View {
         HStack(spacing: 0) {
-            Text("").frame(width: 40)
-            tableHeader("订单")
-            tableHeader("状态")
-            tableHeader("工厂单")
-                .frame(width: orderDashboardFactoryCountColumnWidth)
-            tableHeader("材料")
-            tableHeader("优化进度")
-            tableHeader("生产进度")
-            tableHeader("出货进度")
-            tableHeader("更新时间")
-                .frame(width: orderDashboardUpdatedAtColumnWidth)
-            tableHeader("操作")
-                .frame(width: orderDashboardOperationColumnWidth)
+            LazyVGrid(columns: layout.columns, spacing: 0) {
+                Color.clear
+                tableHeader("订单", width: layout.flexibleColumnWidth)
+                tableHeader("状态", width: layout.flexibleColumnWidth)
+                tableHeader("工厂单", width: orderDashboardFactoryCountColumnWidth)
+                tableHeader("材料", width: layout.flexibleColumnWidth)
+                tableHeader("优化进度", width: layout.flexibleColumnWidth)
+                tableHeader("生产进度", width: layout.flexibleColumnWidth)
+                tableHeader("出货进度", width: layout.flexibleColumnWidth)
+                tableHeader("更新时间", width: orderDashboardUpdatedAtColumnWidth)
+                tableHeader("操作", width: orderDashboardOperationColumnWidth)
+            }
+            .frame(width: layout.totalWidth)
+            Color.clear.frame(width: layout.trailingSpacerWidth)
         }
+        .frame(width: layout.containerWidth, alignment: .leading)
         .font(.caption.weight(.semibold))
         .foregroundColor(.secondary)
         .padding(.vertical, 11)
@@ -1813,9 +1881,15 @@ struct OrderDashboardView: View {
                 style: .continuous
             )
         )
+        // Do not let the table's flexible height proposal stretch the header.
+        .fixedSize(horizontal: true, vertical: true)
     }
 
-    private func orderRow(_ item: OrderDashboardItem, isLastRow: Bool = false) -> some View {
+    private func orderRow(
+        _ item: OrderDashboardItem,
+        isLastRow: Bool = false,
+        layout: OrderDashboardTableLayout
+    ) -> some View {
         let isExpanded = expandedOrderID == item.orderId
         let isSelected = model.selectedOrderId.caseInsensitiveCompare(item.orderId) == .orderedSame
             && model.selectedOrderPath == item.sourceFolder
@@ -1831,16 +1905,13 @@ struct OrderDashboardView: View {
         )
         return VStack(spacing: 0) {
             HStack(spacing: 0) {
-                OrderDashboardClickContainer(
-                    onSingleClick: { toggleExpanded(item) },
-                    onDoubleClick: { openOrderDetail(item) }
-                ) {
-                HStack(spacing: 0) {
+                ZStack(alignment: .leading) {
+                    LazyVGrid(columns: layout.dataColumns, spacing: 0) {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .frame(width: 28, height: 28)
-                        .frame(width: 40)
+                        .frame(width: orderDashboardLeadingColumnWidth)
 
-                    tableCell {
+                    tableCell(width: layout.flexibleColumnWidth) {
                         VStack(spacing: 3) {
                             Text(item.orderId).font(.headline).foregroundColor(AppPalette.accent)
                             Text(item.orderType == "cutToSize" ? "来料加工" : (item.orderType == "temporary" ? "临时任务" : "自有订单"))
@@ -1866,25 +1937,24 @@ struct OrderDashboardView: View {
                             }
                         }
                     }
-                    tableCell {
+                    tableCell(width: layout.flexibleColumnWidth) {
                         AppStatusBadge(text: status, kind: statusKind(status))
                             .help(orderDashboardStatusHelp(
                                 status: status,
                                 validationMessage: item.validationMessage
                             ))
                     }
-                    tableCell {
+                    tableCell(width: orderDashboardFactoryCountColumnWidth) {
                         Text(item.factoryCount > 0 ? "\(item.factoryCount)" : "—")
                             .fontWeight(.semibold)
                     }
-                    .frame(width: orderDashboardFactoryCountColumnWidth)
-                    tableCell {
+                    tableCell(width: layout.flexibleColumnWidth) {
                         VStack(spacing: 4) {
                             Text(item.materialStatus)
                             if !item.validationStatus.isEmpty { Text(item.validationStatus).font(.caption2).foregroundColor(.secondary) }
                         }
                     }
-                    tableCell {
+                    tableCell(width: layout.flexibleColumnWidth) {
                         VStack(spacing: 4) {
                             Text(item.optimizationProgress)
                                 .fontWeight(.semibold)
@@ -1896,7 +1966,7 @@ struct OrderDashboardView: View {
                             }
                         }
                     }
-                    tableCell {
+                    tableCell(width: layout.flexibleColumnWidth) {
                         VStack(spacing: 4) {
                             Text(item.productionProgress)
                                 .fontWeight(.semibold)
@@ -1909,7 +1979,7 @@ struct OrderDashboardView: View {
                             }
                         }
                     }
-                    tableCell {
+                    tableCell(width: layout.flexibleColumnWidth) {
                         VStack(spacing: 3) {
                             Text(item.outboundProgress)
                             if item.factoryCount > 0 {
@@ -1921,18 +1991,25 @@ struct OrderDashboardView: View {
                             }
                         }
                     }
-                    tableCell {
+                    tableCell(width: orderDashboardUpdatedAtColumnWidth) {
                         Text(item.modifiedAt.isEmpty ? "—" : appDisplayTimestamp(item.modifiedAt)).lineLimit(1)
                     }
-                    .frame(width: orderDashboardUpdatedAtColumnWidth)
+                    }
+                    .frame(width: layout.dataWidth, alignment: .leading)
+                    OrderDashboardClickContainer(
+                        onSingleClick: { toggleExpanded(item) },
+                        onDoubleClick: { openOrderDetail(item) }
+                    ) {
+                        Color.clear
+                    }
+                    .frame(width: layout.dataWidth, alignment: .leading)
+                    .frame(maxHeight: .infinity)
                 }
-                .frame(maxWidth: .infinity)
+                .frame(width: layout.dataWidth, alignment: .leading)
                 .padding(.vertical, 11)
-            }
-            .frame(maxWidth: .infinity)
 
                 // Keep action buttons outside the row-level gesture recognizers.
-                tableCell {
+                tableCell(width: orderDashboardOperationColumnWidth) {
                     HStack(spacing: 8) {
                         Button("详情") {
                             openOrderDetail(item)
@@ -1950,7 +2027,9 @@ struct OrderDashboardView: View {
                 }
                 .frame(width: orderDashboardOperationColumnWidth)
                 .padding(.vertical, 11)
+                Color.clear.frame(width: layout.trailingSpacerWidth)
             }
+            .frame(width: layout.containerWidth, alignment: .leading)
             .background(isSelected ? AppPalette.accent.opacity(0.045) : AppPalette.surface)
             .clipShape(rowShape)
             .contentShape(rowShape)
@@ -2011,16 +2090,18 @@ struct OrderDashboardView: View {
         model.requestedOrderCenterOrderID = ""
         searchText = item.orderId
         statusFilter = item.stage == "已出货" ? "已出货" : "未完成订单"
-        openOrderDetail(item)
+        expandedOrderID = nil
     }
 
-    private func tableHeader(_ title: String) -> some View {
-        Text(title).frame(maxWidth: .infinity, alignment: .center)
+    private func tableHeader(_ title: String, width: CGFloat) -> some View {
+        Text(title)
+            .frame(minWidth: width, idealWidth: width, maxWidth: width, alignment: .center)
+            .offset(x: orderDashboardDataHeaderTitles.contains(title) ? orderDashboardDataHeaderOffset : 0)
     }
 
-    private func tableCell<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+    private func tableCell<Content: View>(width: CGFloat, @ViewBuilder content: () -> Content) -> some View {
         content()
-            .frame(maxWidth: .infinity, alignment: .center)
+            .frame(minWidth: width, idealWidth: width, maxWidth: width, alignment: .center)
             .multilineTextAlignment(.center)
     }
 
@@ -2236,7 +2317,9 @@ struct OrderDashboardDetailPage: View {
                 } else {
                     ForEach(rows) { row in
                         orderDetailCard(
-                            name: row.name.isEmpty ? row.code : row.name,
+                            name: row.displayName.isEmpty
+                                ? (row.name.isEmpty ? row.code : row.name)
+                                : row.displayName,
                             subtitle: "",
                             value: row.quantity.formatted()
                         )
@@ -2374,7 +2457,7 @@ private struct OrderAnnotationsEditor: View {
         _plannedDays = State(initialValue: order.plannedInstallationDays.map {
             OrderInstallationDraft(date: orderInstallationDraftDate($0.date), installer: $0.installer)
         })
-        _actualDays = State(initialValue: order.actualInstallationDays.map {
+        _actualDays = State(initialValue: order.actualInstallationDays.sorted { $0.date < $1.date }.prefix(1).map {
             OrderInstallationDraft(date: orderInstallationDraftDate($0.date), installer: $0.installer)
         })
         _datePickerRowID = State(initialValue: nil)
@@ -2403,8 +2486,8 @@ private struct OrderAnnotationsEditor: View {
                         }
                     }
 
-                installationRows(title: "计划安装日期", rows: $plannedDays, allowsMultiple: false)
-                installationRows(title: "实际安装日期", rows: $actualDays, allowsMultiple: true)
+                installationRows(title: "计划安装日期", rows: $plannedDays)
+                installationRows(title: "实际安装开始日期", rows: $actualDays)
 
                 HStack(spacing: 10) {
                     if !status.isEmpty {
@@ -2426,18 +2509,17 @@ private struct OrderAnnotationsEditor: View {
     @ViewBuilder
     private func installationRows(
         title: String,
-        rows: Binding<[OrderInstallationDraft]>,
-        allowsMultiple: Bool
+        rows: Binding<[OrderInstallationDraft]>
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(title).font(.subheadline.weight(.semibold))
                 Spacer(minLength: 0)
-                if allowsMultiple || rows.wrappedValue.isEmpty {
+                if rows.wrappedValue.isEmpty {
                     Button {
                         rows.wrappedValue.append(OrderInstallationDraft(date: Date(), installer: ""))
                     } label: {
-                        Label(allowsMultiple ? "添加日期" : "选择开始日期", systemImage: "plus")
+                        Label("选择开始日期", systemImage: "plus")
                     }
                     .buttonStyle(.borderless)
                 }
@@ -2520,21 +2602,15 @@ private struct OrderAnnotationsEditor: View {
                         .foregroundColor(AppPalette.danger)
                     }
                 }
-                let summaries = rows.wrappedValue.map {
+                let summaries = rows.wrappedValue.prefix(1).map {
                     OrderInstallationDay(
                         date: orderInstallationDraftValue($0.date),
                         installer: $0.installer
                     )
                 }
-                if allowsMultiple {
-                    Text("开始：\(orderInstallationDisplayDate(summaries.map(\.date).sorted().first ?? "—"))；结束：\(orderInstallationDisplayDate(summaries.map(\.date).sorted().last ?? "—"))；共 \(Set(summaries.map(\.date)).count) 天")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else {
-                    Text("开始：\(orderInstallationDisplayDate(summaries.map(\.date).sorted().first ?? "—"))")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+                Text("开始：\(orderInstallationDisplayDate(summaries.map(\.date).sorted().first ?? "—"))")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
         }
     }
@@ -2546,7 +2622,7 @@ private struct OrderAnnotationsEditor: View {
                 installer: $0.installer.trimmingCharacters(in: .whitespacesAndNewlines)
             )
         }
-        let actual = actualDays.map {
+        let actual = actualDays.sorted { $0.date < $1.date }.prefix(1).map {
             OrderInstallationDay(
                 date: orderInstallationDraftValue($0.date),
                 installer: $0.installer.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3025,7 +3101,9 @@ struct OrderShipmentConfirmationSheet: View {
                                     HStack(spacing: 8) {
                                         Text(fitting.orderName.isEmpty ? fitting.factoryOrder : fitting.orderName)
                                             .frame(width: 150, alignment: .leading)
-                                        Text(fitting.name.isEmpty ? fitting.code : fitting.name)
+                                        Text(fitting.displayName.isEmpty
+                                            ? (fitting.name.isEmpty ? fitting.code : fitting.name)
+                                            : fitting.displayName)
                                             .frame(maxWidth: .infinity, alignment: .leading)
                                         Text(fitting.quantity.formatted())
                                             .frame(width: 70, alignment: .trailing)
@@ -3348,12 +3426,12 @@ struct PendingCenterSheet: View {
                     }
                     if group.manualOnly {
                         HStack(spacing: 8) {
-                            Text("这是临时文件夹；忽略后观察一个月，期间发生变化会重新提醒。")
+                            Text("这是临时文件夹；确认已在外部手工完成出库后，系统会记录当前基线，未来三天只观察两个 XML 文件。")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                             Spacer()
-                            Button("忽略此文件夹（观察一个月）") {
-                                model.ignoreServerFolder(group.folderPath)
+                            Button("已人工处理") {
+                                model.markTemporaryFolderManual(group.folderPath)
                             }
                             .buttonStyle(.glassProminent)
                             .disabled(model.orderRunning)
@@ -3408,10 +3486,6 @@ struct PendingCenterSheet: View {
                     Button("确认归属") { model.resolveCurrentIssue(issue, orderID: orderIDs[issue.id] ?? "") }
                         .buttonStyle(.glassProminent)
                         .disabled(model.orderRunning || (orderIDs[issue.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                } else if issue.kind == "server_missing_report" {
-                    Button("忽略此文件夹（观察一个月）") { model.ignoreServerFolder(issue.path) }
-                        .buttonStyle(.glassProminent)
-                        .disabled(model.orderRunning)
                 } else if currentIssueRequiresInventoryMapping(issue) {
                     Button("处理订单文件映射") { model.requestInventoryMapping(folderPath: issue.path, message: issue.message) }
                         .buttonStyle(.glassProminent)
@@ -4131,8 +4205,8 @@ struct ServerChangesSheet: View {
                                 .buttonStyle(.plain)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 if group.manualOnly {
-                                    Button("忽略此文件夹（观察一个月）") {
-                                        model.ignoreServerFolder(group.folderPath)
+                                    Button("已人工处理") {
+                                        model.markTemporaryFolderManual(group.folderPath)
                                     }
                                     .buttonStyle(.glassProminent)
                                     .disabled(model.orderRunning)
@@ -4468,7 +4542,7 @@ struct ServerWriteConfirmationSheet: View {
                                         .foregroundColor(.secondary)
                                     ForEach(factory.hardware) { hardware in
                                         HStack(spacing: 8) {
-                                            Text(hardware.name)
+                                            Text(hardware.displayName.isEmpty ? hardware.name : hardware.displayName)
                                                 .frame(maxWidth: .infinity, alignment: .leading)
                                                 .lineLimit(1)
                                             Text(hardware.productCode.isEmpty ? "SKU 已通过名称匹配" : "来源编码 \(hardware.productCode) · SKU 已校验")
@@ -4623,7 +4697,9 @@ struct ServerWriteConfirmationSheet: View {
                 .font(.caption.monospaced())
                 .frame(width: 90, alignment: .leading)
                 .lineLimit(1)
-            Text(hardware.name).frame(maxWidth: .infinity, alignment: .leading).lineLimit(1)
+            Text(hardware.displayName.isEmpty ? hardware.name : hardware.displayName)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(1)
             Text(serverHardwareUnitText(hardware.unit))
                 .font(.caption)
                 .foregroundColor(hardware.unit.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .secondary : .primary)

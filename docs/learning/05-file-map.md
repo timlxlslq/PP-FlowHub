@@ -4,7 +4,7 @@
 
 ## 1. 覆盖范围
 
-- 当前 Git 共追踪 **344** 个文件；连同本次新增但可能尚未进入 Git 索引的文档，共登记 **350** 个文件。
+- 当前 Git 共追踪 **351** 个文件；连同本次新增但可能尚未进入 Git 索引的文档，共登记 **351** 个文件。
 - `vendor/` 是固定打包的第三方依赖：保留逐文件登记，但不把其内部函数当作 PP FlowHub 业务代码解释。
 - `data/`、`.env.local`、构建目录和安装版属于本机运行状态，通常不受 Git 追踪；只登记文件用途，不读取其内容。
 - `outputs/` 是历史诊断或交付证据，不属于正式 App 运行链路。
@@ -18,6 +18,7 @@
 | `"outputs/pp0018-material-cost/previews/\346\235\220\346\226\231\346\210\220\346\234\254\346\261\207\346\200\273.png"` | 项目配置、资源或辅助文件。 | 0 |
 | `.gitignore` | Git 忽略规则：排除本地状态、构建产物和敏感配置。 | 0 |
 | `AGENTS.md` | 项目协作规则：规定判断、验证、发布和汇报要求。 | 0 |
+| `CHANGELOG.md` | 项目配置、资源或辅助文件。 | 0 |
 | `README.md` | 项目总入口：介绍用途、安装、运行方式和文档导航。 | 0 |
 | `assets/icon-candidates/app-icon-previous-backup.png` | App 图标或界面视觉候选资源。 | 0 |
 | `assets/icon-candidates/work-assistant-1-blue-check.png` | App 图标或界面视觉候选资源。 | 0 |
@@ -51,10 +52,10 @@
 | `docs/project-handoff-log.md` | 项目文档：项目交接记录。 | 0 |
 | `docs/project-static-context.md` | 项目文档：PP FlowHub 静态上下文。 | 0 |
 | `docs/release-testing.md` | 项目文档：发布测试与安装流程。 | 0 |
-| `macos/AssistantView.swift` | 助手页面、语音输入、任务队列和业务进度轨道。 | 70 |
+| `macos/AssistantView.swift` | 助手页面、语音输入、任务队列和业务进度轨道。 | 73 |
 | `macos/Info.plist` | macOS App 的权限声明、Bundle 配置和系统元数据。 | 0 |
 | `macos/OperationLog.swift` | App 端操作日志读取、展示、脱敏和清理。 | 23 |
-| `macos/OrderDashboardView.swift` | 订单看板、待处理中心、订单详情及生产/出库交互。 | 244 |
+| `macos/OrderDashboardView.swift` | 订单看板、待处理中心、订单详情及生产/出库交互。 | 250 |
 | `macos/TravelerAssistant.swift` | App 入口与 AppModel：全局状态、页面、子进程和业务编排。 | 383 |
 | `outputs/019fe269-fc5a-7fa2-aa70-62173698f0c7/PP0067-material-final/Sheet1.png` | 历史诊断、工作簿或视觉核对产物，用于保留交付证据。 | 0 |
 | `outputs/019fe269-fc5a-7fa2-aa70-62173698f0c7/build_material_template.mjs` | 历史诊断/交付过程的一次性辅助脚本，不属于正式运行链路。 | 0 |
@@ -141,7 +142,7 @@
 | `tests/test_macos_ui.swift` | 自动化测试：验证 `macos_ui` 模块或业务场景。 | 56 |
 | `tests/test_operation_log.py` | 自动化测试：验证 `operation_log` 模块或业务场景。 | 4 |
 | `tests/test_order_details.py` | 自动化测试：验证 `order_details` 模块或业务场景。 | 2 |
-| `tests/test_order_index.py` | 自动化测试：验证 `order_index` 模块或业务场景。 | 104 |
+| `tests/test_order_index.py` | 自动化测试：验证 `order_index` 模块或业务场景。 | 108 |
 | `tests/test_order_workflow.py` | 自动化测试：验证 `order_workflow` 模块或业务场景。 | 50 |
 | `tests/test_production.py` | 自动化测试：验证 `production` 模块或业务场景。 | 6 |
 | `tests/test_runtime_store.py` | 自动化测试：验证 `runtime_store` 模块或业务场景。 | 7 |
@@ -159,12 +160,12 @@
 | `traveler_assistant/command_router.py` | 常用中英文命令的确定性本地解析器。 | 5 |
 | `traveler_assistant/core.py` | 共享配置、错误、进度、AIMES 查询和五金解析基础能力。 | 38 |
 | `traveler_assistant/costing.py` | 订单成本计算、展示排序和 Excel 导出。 | 12 |
-| `traveler_assistant/database.py` | 中央 SQLite 路径、Schema、迁移和通用缓存读写。 | 12 |
+| `traveler_assistant/database.py` | 中央 SQLite 路径、Schema、迁移和通用缓存读写。 | 13 |
 | `traveler_assistant/fittings.py` | 五金记录签名与最新来源选择规则。 | 3 |
 | `traveler_assistant/inventory.py` | 库存需求、商品映射、预检、浏览器出库和出库留痕。 | 145 |
 | `traveler_assistant/operation_log.py` | JSONL 操作日志、脱敏和数据库语句记录。 | 11 |
 | `traveler_assistant/order_details.py` | 从中央事实组装订单详情和 Panel 展示数据。 | 4 |
-| `traveler_assistant/order_index.py` | 订单索引核心：AIMES、Server、问题、确认、状态与同步证据。 | 207 |
+| `traveler_assistant/order_index.py` | 订单索引核心：AIMES、Server、问题、确认、状态与同步证据。 | 217 |
 | `traveler_assistant/order_workflow.py` | 订单文件解析、预览、Traveler/材料工作簿生成与更新。 | 97 |
 | `traveler_assistant/production.py` | 生产备料预览、生产完成记录和出货前置校验。 | 20 |
 | `traveler_assistant/runtime_store.py` | 助手学习命令与 Agent Token 用量的 SQLite 存储。 | 10 |
