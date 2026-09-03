@@ -237,7 +237,7 @@ order_workflow.main(command="sync-aimes")
 
 输出：`orders`、`aimes` 状态、warnings、ignored/assigned 列表、stage durations 和 operation trace。
 
-关键边界：`sync_aimes_index()` 只刷新 AIMES 身份，不扫描 Server。格式异常行作为警告跳过；失败时可以返回缓存，但缓存不能表述成刚刚在线验证成功。
+关键边界：`sync_aimes_index()` 只刷新 AIMES 身份，不扫描 Server。格式异常行作为待处理中心中的警告跳过有效业务写入；失败时可以返回缓存，但缓存不能表述成刚刚在线验证成功。
 
 ## 7. Server 扫描、预览与确认
 

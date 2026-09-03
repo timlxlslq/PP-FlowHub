@@ -46,6 +46,8 @@ def _materials(path: Path, order_id: str, color: str, panel_qty: int, edge_qty: 
     sheet["A17"] = "Sheets (3/4):"
     sheet["A18"] = "Sheets (1/4):"
     sheet["A19"] = "Edge Banding (m):"
+    sheet["C16"] = color
+    sheet["C17"], sheet["C18"], sheet["C19"] = panel_qty, 1, edge_qty
     _atomic_save(workbook, path)
 
 

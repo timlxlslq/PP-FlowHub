@@ -593,6 +593,8 @@ def _partition_aimes_rows(
 def _merge_aimes_recent_and_verified_rows(
     recent_rows: list[dict],
     verification_result: dict | None,
+    *,
+    cached_rows: list[dict] | None = None,
 ) -> list[dict]:
     """Combine the recent page with exact rows found outside that page.
 
@@ -600,17 +602,34 @@ def _merge_aimes_recent_and_verified_rows(
     verified row is still authoritative identity data and must be persisted;
     it is not only evidence that the factory order was not deleted.
     """
+    cached_by_factory = {
+        str(row.get("factory_order", "")).upper().strip(): row
+        for row in (cached_rows or [])
+        if isinstance(row, dict) and str(row.get("factory_order", "")).strip()
+    }
+
+    def retain_cached_split_time(row: dict) -> dict:
+        current = dict(row)
+        if str(current.get("split_time", "")).strip():
+            return current
+        factory_order = str(current.get("factory_order", "")).upper().strip()
+        cached = cached_by_factory.get(factory_order, {})
+        cached_split_time = str(cached.get("split_time", "")).strip()
+        if cached_split_time:
+            current["split_time"] = cached_split_time
+        return current
+
     merged: dict[str, dict] = {}
     for row in recent_rows:
         factory_order = str(row.get("factory_order", "")).upper().strip()
         if factory_order:
-            merged[factory_order] = row
+            merged[factory_order] = retain_cached_split_time(row)
     for row in (verification_result or {}).get("rows", []):
         if not isinstance(row, dict):
             continue
         factory_order = str(row.get("factory_order", "")).upper().strip()
         if factory_order and factory_order not in merged:
-            merged[factory_order] = row
+            merged[factory_order] = retain_cached_split_time(row)
     return list(merged.values())
 
 
@@ -1694,7 +1713,10 @@ class OrderIndexStore:
                 order_id=excluded.order_id,
                 factory_name=excluded.factory_name,
                 sales_order_name=excluded.sales_order_name,
-                split_time=excluded.split_time,
+                split_time=case
+                    when excluded.split_time <> '' then excluded.split_time
+                    else factory_orders.split_time
+                end,
                 name_source='AIMES',
                 ownership_status='已确认',
                 aimes_status='active',
@@ -2522,6 +2544,81 @@ def _hardware_report_paths(
         if not _is_recut_server_report(path, source_folder)
     ]
     return base_paths or all_paths
+
+
+def _replace_aicnc_hardware_for_factory_orders(
+    store: "OrderIndexStore",
+    factory_orders: Iterable[str],
+) -> None:
+    """Replace AICNC hardware projections using factory-order ownership."""
+    normalized = sorted({
+        str(factory_order or "").strip().upper()
+        for factory_order in factory_orders
+        if str(factory_order or "").strip()
+    })
+    if not normalized:
+        return
+    placeholders = ",".join("?" for _ in normalized)
+    store.connection.execute(
+        f"delete from hardware_items where source_type='aicnc' "
+        f"and factory_order in ({placeholders})",
+        tuple(normalized),
+    )
+
+
+def _aicnc_hardware_projection_signature(
+    factory_order: str,
+    product_code: str,
+    source_code: str,
+    name: str,
+    spec: str,
+    quantity: float,
+    unit: str,
+) -> tuple:
+    """Normalize business hardware fields while ignoring source metadata."""
+    return (
+        str(factory_order or "").strip().upper(),
+        str(product_code or "").strip().upper(),
+        str(source_code or "").strip().upper(),
+        str(name or "").strip(),
+        str(spec or "").strip(),
+        round(float(quantity or 0), 6),
+        str(unit or "").strip(),
+    )
+
+
+def _aicnc_hardware_projection_matches(
+    store: "OrderIndexStore",
+    factory_order: str,
+    desired_rows: Iterable[dict],
+) -> bool:
+    """Return whether one factory order already has the desired projection."""
+    current_rows = store.connection.execute(
+        """
+        select factory_order, product_code, source_code, name, spec, quantity, unit
+        from hardware_items
+        where source_type='aicnc' and factory_order=?
+        order by id
+        """,
+        (str(factory_order or "").strip().upper(),),
+    ).fetchall()
+    current = sorted(
+        _aicnc_hardware_projection_signature(*row)
+        for row in current_rows
+    )
+    desired = sorted(
+        _aicnc_hardware_projection_signature(
+            factory_order,
+            row.get("product_code", ""),
+            row.get("source_code", ""),
+            row.get("name", ""),
+            row.get("spec", ""),
+            row.get("quantity", 0),
+            row.get("unit", ""),
+        )
+        for row in desired_rows
+    )
+    return current == desired
 
 
 def _selected_hardware_report_paths(
@@ -3936,6 +4033,110 @@ def _resolve_fully_shipped_server_issues(
     return resolved
 
 
+def _resolve_stale_produced_material_issues(
+    store: OrderIndexStore,
+) -> int:
+    """Close material errors recorded after production finalized the order.
+
+    A completed production batch is a durable business fact.  If an older
+    parser or scan created a material-validation issue after that fact, keep
+    the history in ``sync_changes`` but remove the stale open item and restore
+    the material status when the central material facts are present.  A later
+    preview still validates the current workbook before any new write.
+    """
+    issues = [
+        issue for issue in store.active_issues()
+        if issue.get("kind") == "material_validation"
+        and issue.get("status") == "open"
+    ]
+    if not issues:
+        return 0
+    resolved = 0
+    for issue in issues:
+        folder = _server_folder_for_issue(str(issue.get("path") or ""))
+        if folder is None:
+            continue
+        order_ids = sorted(_server_folder_order_ids(folder))
+        if not order_ids:
+            continue
+        placeholders = ",".join("?" for _ in order_ids)
+        factory_rows = store.connection.execute(
+            f"""
+            select order_id, factory_order
+            from factory_orders
+            where aimes_status = 'active' and order_id in ({placeholders})
+            """,
+            order_ids,
+        ).fetchall()
+        if not factory_rows:
+            continue
+        produced_rows = store.connection.execute(
+            f"""
+            select f.order_id, f.factory_order, max(b.production_time)
+            from manual_production_batch_factories f
+            join manual_production_batches b on b.batch_id = f.batch_id
+            where b.status = 'completed' and f.order_id in ({placeholders})
+            group by f.order_id, f.factory_order
+            """,
+            order_ids,
+        ).fetchall()
+        produced_by_factory = {
+            (str(row[0]).upper(), str(row[1]).upper()): str(row[2] or "")
+            for row in produced_rows
+        }
+        required_factories = {
+            (str(row[0]).upper(), str(row[1]).upper()) for row in factory_rows
+        }
+        if not required_factories.issubset(produced_by_factory):
+            continue
+        production_times = [
+            value for key, value in produced_by_factory.items()
+            if key in required_factories and value
+        ]
+        if len(production_times) != len(required_factories):
+            continue
+        try:
+            issue_seen = _datetime_timestamp(str(issue.get("last_seen") or ""))
+            latest_production = max(_datetime_timestamp(value) for value in production_times)
+        except (OSError, OverflowError, ValueError):
+            continue
+        if issue_seen <= latest_production:
+            continue
+        material_fact_rows = store.connection.execute(
+            f"""
+            select distinct order_id
+            from material_items
+            where order_id in ({placeholders})
+            """,
+            order_ids,
+        ).fetchall()
+        fact_orders = {str(row[0]).upper() for row in material_fact_rows}
+        if not set(order_ids).issubset(fact_orders):
+            continue
+        store.resolve_active_issue(str(issue.get("issue_key") or ""))
+        store.add_change(
+            severity="info",
+            kind="material_validation_reconciled",
+            order_id=str(issue.get("order_id") or ""),
+            message=(
+                f"材料校验提示已关闭：订单 {str(issue.get('order_id') or '').upper()} "
+                "已完成生产，保留历史记录；后续预览仍会校验当前 material 文件。"
+            ),
+            path=str(issue.get("path") or ""),
+            observed_at=_now(),
+        )
+        store.connection.execute(
+            f"""
+            update orders
+            set material_status = '板材 · 封边', updated_at = ?
+            where order_id in ({placeholders})
+            """,
+            [_now(), *order_ids],
+        )
+        resolved += 1
+    return resolved
+
+
 def _aimes_row_signature(rows: list[dict]) -> list[tuple[str, str, str, str]]:
     return sorted(
         (
@@ -4120,7 +4321,11 @@ def sync_aimes_index(config: Config, *, force: bool = False, if_needed: bool = F
                 verification_candidates,
                 timing_sink=fetch_stage_durations,
             )
-            fetched = _merge_aimes_recent_and_verified_rows(fetched, verification_result)
+            fetched = _merge_aimes_recent_and_verified_rows(
+                fetched,
+                verification_result,
+                cached_rows=cached_source_rows,
+            )
         else:
             fetched = refresh_aimes_recent_orders(
                 config,
@@ -5462,7 +5667,7 @@ def _server_scan_trace(
         f"变化统计：新增 {stats['added_count']} 个，修改 {stats['modified_count']} 个，删除 {stats['deleted_count']} 个，改名 {stats.get('renamed_count', 0)} 个。",
         "阶段耗时："
         f"读取并比对 Server 文件 {float(stats.get('metadata_scan_seconds', 0)):.2f} 秒；"
-        f"解析并校验变化材料文件 {float(stats.get('material_validation_seconds', 0)):.2f} 秒；"
+        "普通扫描不读取 material 文件（材料只在预览/确认前校验）；"
         f"写入扫描元数据和快照 {float(stats.get('finalize_seconds', 0)):.2f} 秒。",
     ]
     if folder_timings:
@@ -5487,70 +5692,6 @@ def _server_scan_trace(
     return trace
 
 
-def _validate_materials_during_server_scan(
-    config: Config,
-    folders: list[Path],
-    seen_at: str,
-) -> None:
-    """Validate changed material workbooks in an isolated preview database.
-
-    Server scanning must not write order or factory facts, but it should still
-    tell the user that a material workbook needs manual correction before the
-    preview/confirmation step becomes available.
-    """
-    if not folders:
-        return
-    store = OrderIndexStore(config.workflow_database)
-    try:
-        for folder in folders:
-            folder_path = str(folder)
-            order_ids = _server_folder_order_ids(folder)
-            display_order_id = "、".join(sorted(order_ids))
-            try:
-                preview_server_changes(config, [folder])
-            except RuleError as exc:
-                if exc.code != "material_validation":
-                    continue
-                issue_rows = exc.context.get("issues") or []
-                if not issue_rows:
-                    issue_rows = [{"path": folder_path, "message": str(exc)}]
-                for issue in issue_rows:
-                    path = str(issue.get("path") or folder_path)
-                    message = f"material 文件校验未通过：{issue.get('message') or str(exc)}"
-                    issue_key = f"material_validation:{display_order_id}:{path}"
-                    store.upsert_active_issue(
-                        issue_key=issue_key,
-                        kind="material_validation",
-                        order_id=display_order_id,
-                        path=path,
-                        message=message,
-                        seen_at=seen_at,
-                    )
-                    store.add_change(
-                        severity="warning",
-                        kind="material_validation",
-                        order_id=display_order_id,
-                        message=message,
-                        path=path,
-                        observed_at=seen_at,
-                    )
-            except (OSError, ValueError):
-                # The metadata scan remains useful even when an isolated
-                # preview cannot be assembled for a folder without enough
-                # order evidence. The actionable material parser errors are
-                # returned as RuleError above.
-                continue
-            else:
-                for issue in store.active_issues():
-                    if issue.get("kind") != "material_validation":
-                        continue
-                    if _path_in_folders(str(issue.get("path") or ""), [folder_path]):
-                        store.resolve_active_issue(issue["issue_key"])
-        store.commit()
-    finally:
-        store.close()
-
-
 def scan_server_changes(config: Config) -> dict:
     """Compare Server metadata without advancing the processed baseline.
 
@@ -5571,6 +5712,7 @@ def scan_server_changes(config: Config) -> dict:
         timing_sink=server_folder_timings,
     )
     _resolve_fully_shipped_server_issues(config, store)
+    _resolve_stale_produced_material_issues(store)
     store.commit()
     scan_roots = _available_server_roots(config)
     current_folders = {item["source_folder"] for item in current.values()}
@@ -5863,9 +6005,9 @@ def scan_server_changes(config: Config) -> dict:
     related_legacy_count = sum(item["kind"] != "folder" for item in current_legacy.values())
     metadata_finished = time.perf_counter()
     scan_stats: dict[str, int | float] = {
-        # Keep this distinct from the full scan total below.  The Server scan
-        # also parses changed material workbooks for validation, so reporting
-        # only the metadata traversal as the total was misleading.
+        # Keep this distinct from the full scan total below.  The ordinary
+        # Server scan is metadata/XML-only; material parsing belongs to the
+        # explicit preview/confirmation path.
         "metadata_scan_seconds": round(metadata_finished - scan_started, 6),
         "order_folder_count": order_folder_count,
         # The current scanner checks only the two optimization XML markers in
@@ -5885,8 +6027,6 @@ def scan_server_changes(config: Config) -> dict:
     }
     store.commit()
     store.close()
-    validation_started = time.perf_counter()
-    validation_finished = time.perf_counter()
     store = OrderIndexStore(config.workflow_database)
     optimization_started = time.perf_counter()
     optimization_rows = store.connection.execute(
@@ -5995,7 +6135,6 @@ def scan_server_changes(config: Config) -> dict:
         # The next sync can safely fall back to its own read-only traversal.
         snapshot_path = ""
     completed = time.perf_counter()
-    scan_stats["material_validation_seconds"] = round(validation_finished - validation_started, 6)
     scan_stats["optimization_evidence_seconds"] = round(optimization_finished - optimization_started, 6)
     scan_stats["optimization_artifact_refresh_count"] = optimization_refreshed
     scan_stats["finalize_seconds"] = round(completed - optimization_finished, 6)
@@ -6005,11 +6144,6 @@ def scan_server_changes(config: Config) -> dict:
             "stage": "server_metadata",
             "label": "读取并比对 Server 文件",
             "duration_seconds": scan_stats["metadata_scan_seconds"],
-        },
-        {
-            "stage": "material_validation",
-            "label": "解析并校验变化材料文件",
-            "duration_seconds": scan_stats["material_validation_seconds"],
         },
         {
             "stage": "optimization_evidence",
@@ -6349,6 +6483,7 @@ def sync_order_index(
                 fetched_rows = _merge_aimes_recent_and_verified_rows(
                     fetched_rows,
                     aimes_verification_result,
+                    cached_rows=cached_aimes_source_rows,
                 )
             else:
                 fetched_rows = refresh_aimes_recent_orders(
@@ -7058,18 +7193,10 @@ def sync_order_index(
                                         observed_at=server_seen,
                                     )
                                     continue
-                                # Replace this source only after parsing and
-                                # resolving every selected item successfully.
-                                # Unchanged reports take the cached branch
-                                # above and therefore retain their facts; a
-                                # mapping failure must also retain the prior
-                                # valid projection instead of deleting it.
-                                store.connection.execute(
-                                    "delete from hardware_items where source_type='aicnc' and source_path=?",
-                                    (str(path),),
-                                )
+                                hardware_rows_by_factory: dict[str, list[dict]] = {}
                                 accepted_index = 0
                                 for factory_order, items in selected_groups:
+                                    normalized_factory_order = factory_order.upper()
                                     current_aimes_owner = next(
                                         (
                                             str(row.get("sales_order_name", "")).upper()
@@ -7084,19 +7211,54 @@ def sync_order_index(
                                         (factory_order.upper(),),
                                     ).fetchone()
                                     hardware_order_id = current_aimes_owner or (str(owner_row[0]).upper() if owner_row else order_hint.upper())
+                                    hardware_rows = hardware_rows_by_factory.setdefault(
+                                        normalized_factory_order,
+                                        [],
+                                    )
                                     for item in items:
                                         accepted = resolution.get("accepted", [])[accepted_index] if accepted_index < len(resolution.get("accepted", [])) else {}
                                         accepted_index += 1
                                         if ignored_hardware_reason(mappings, item.name, item.code) is not None:
                                             continue
                                         product_code = resolved_product_code(resolution, accepted_index - 1, item.code)
+                                        hardware_rows.append({
+                                            "order_id": hardware_order_id,
+                                            "factory_order": normalized_factory_order,
+                                            "product_code": product_code,
+                                            "source_code": item.code,
+                                            "name": item.name,
+                                            "spec": item.size,
+                                            "quantity": float(item.quantity),
+                                            "unit": item.unit,
+                                        })
+                                for factory_order, hardware_rows in hardware_rows_by_factory.items():
+                                    # A path change alone is not a business
+                                    # change. Keep the existing rows when the
+                                    # complete factory-order projection is
+                                    # already identical; otherwise replace it
+                                    # after the whole file passed resolution.
+                                    if _aicnc_hardware_projection_matches(
+                                        store,
+                                        factory_order,
+                                        hardware_rows,
+                                    ):
+                                        continue
+                                    _replace_aicnc_hardware_for_factory_orders(
+                                        store,
+                                        [factory_order],
+                                    )
+                                    for row in hardware_rows:
                                         store.connection.execute(
                                             """insert into hardware_items(
                                                 order_id,factory_order,scope,product_code,source_code,name,spec,quantity,unit,
                                                 source_type,source_path,remarks,updated_at
                                             ) values(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                                            (hardware_order_id, factory_order.upper(), "factory_order", product_code, item.code, item.name,
-                                             item.size, float(item.quantity), item.unit, "aicnc", str(path), "", server_seen),
+                                            (
+                                                row["order_id"], row["factory_order"], "factory_order",
+                                                row["product_code"], row["source_code"], row["name"],
+                                                row["spec"], row["quantity"], row["unit"], "aicnc",
+                                                str(path), "", server_seen,
+                                            ),
                                         )
                                 resolved_mapping_order_ids.add(order_hint.upper())
                         store.update_source_file_identity(
@@ -7938,27 +8100,6 @@ def _refresh_server_preview_hardware(
             and str(path or "")
         ]
         paths = sorted(_selected_hardware_report_paths(scoped_rows))
-        selected_factory_orders: set[str] = set()
-        for path in paths:
-            try:
-                groups = parse_fittings_groups(Path(path))
-            except Exception:
-                continue
-            for factory_order, _ in groups:
-                normalized_factory = str(factory_order).strip().upper()
-                owner = preview.connection.execute(
-                    "select order_id from factory_orders where factory_order=?",
-                    (normalized_factory,),
-                ).fetchone()
-                if owner is not None and str(owner[0] or "").strip().upper() in skipped_orders:
-                    continue
-                selected_factory_orders.add(normalized_factory)
-        if selected_factory_orders:
-            placeholders = ",".join("?" for _ in selected_factory_orders)
-            preview.connection.execute(
-                f"delete from hardware_items where source_type='aicnc' and factory_order in ({placeholders})",
-                tuple(sorted(selected_factory_orders)),
-            )
         for path in paths:
             try:
                 groups = parse_fittings_groups(Path(path))
@@ -8024,13 +8165,11 @@ def _refresh_server_preview_hardware(
             # explicitly ignored.
             if file_missing:
                 continue
-            preview.connection.execute(
-                "delete from hardware_items where source_type='aicnc' and source_path=?",
-                (path,),
-            )
+            hardware_rows_by_factory: dict[str, list[dict]] = {}
             for factory_order, order_id, items, resolution in group_rows:
                 if resolution is None:
                     continue
+                hardware_rows = hardware_rows_by_factory.setdefault(factory_order, [])
                 ignored = {
                     (
                         str(item.get("name", "")).strip().casefold(),
@@ -8046,24 +8185,37 @@ def _refresh_server_preview_hardware(
                     if identity in ignored:
                         continue
                     product_code = resolved_product_code(resolution, index, str(item.code or ""))
+                    hardware_rows.append({
+                        "order_id": order_id,
+                        "factory_order": factory_order,
+                        "product_code": product_code,
+                        "source_code": str(item.code or ""),
+                        "name": str(item.name or ""),
+                        "spec": str(item.size or ""),
+                        "quantity": float(item.quantity or 0),
+                        "unit": str(item.unit or ""),
+                    })
+            for factory_order, hardware_rows in hardware_rows_by_factory.items():
+                # A changed source path with identical business data should
+                # not cause a needless delete/reinsert in the preview DB.
+                if _aicnc_hardware_projection_matches(
+                    preview,
+                    factory_order,
+                    hardware_rows,
+                ):
+                    continue
+                _replace_aicnc_hardware_for_factory_orders(preview, [factory_order])
+                for row in hardware_rows:
                     preview.connection.execute(
                         """insert into hardware_items(
                             order_id, factory_order, scope, product_code, source_code, name, spec,
                             quantity, unit, source_type, source_path, active, updated_at
                         ) values(?,?,?,?,?,?,?,?,?,?,?,1,?)""",
                         (
-                            order_id,
-                            factory_order,
-                            "factory_order",
-                            product_code,
-                            str(item.code or ""),
-                            str(item.name or ""),
-                            str(item.size or ""),
-                            float(item.quantity or 0),
-                            str(item.unit or ""),
-                            "aicnc",
-                            path,
-                            _now(),
+                            row["order_id"], row["factory_order"], "factory_order",
+                            row["product_code"], row["source_code"], row["name"],
+                            row["spec"], row["quantity"], row["unit"], "aicnc",
+                            path, _now(),
                         ),
                     )
         preview.commit()

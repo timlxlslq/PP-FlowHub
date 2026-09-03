@@ -739,7 +739,7 @@ class OrderIndexTests(unittest.TestCase):
             )
             self.assertEqual(
                 [stage["stage"] for stage in scan_timing["stages"]],
-                ["server_metadata", "material_validation", "optimization_evidence", "scan_finalize"],
+                ["server_metadata", "optimization_evidence", "scan_finalize"],
             )
             self.assertFalse(any(
                 issue["kind"] == "material_validation"
@@ -1614,7 +1614,7 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(result["server"]["scan_stats"]["optimization_artifact_refresh_count"], 1)
             self.assertEqual(
                 [stage["stage"] for stage in result["operation_timing"]["stages"]],
-                ["server_metadata", "material_validation", "optimization_evidence", "scan_finalize"],
+                ["server_metadata", "optimization_evidence", "scan_finalize"],
             )
 
     def test_exact_standard_order_folder_wins_over_mixed_factory_report_folder(self):
@@ -1827,6 +1827,89 @@ class OrderIndexTests(unittest.TestCase):
                 )
             finally:
                 store.close()
+
+    def test_server_sync_replaces_hardware_by_factory_order_across_source_paths(self):
+        """A re-optimization path must replace, not add to, factory hardware."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(
+                state_dir=root / "state",
+                source_root=root / "server" / "Optimized Orders",
+            )
+            config.prepare_storage()
+            folder = config.source_root / "PP9999"
+            first = folder / "Report" / "Fittingslist-first.xlsx"
+            second = folder / "second-optimization" / "Report" / "Fittingslist-second.xlsx"
+            third = folder / "third-optimization" / "Report" / "Fittingslist-third.xlsx"
+            from tests.test_order_workflow import make_fittings
+
+            first.parent.mkdir(parents=True)
+            make_fittings(first, [("F100", 2)])
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_order("PP9999", validation_status="正常", source_folder=str(folder))
+            store.upsert_factory(
+                "F100",
+                order_id="PP9999",
+                factory_name="PP9999-KITCHEN",
+                sales_order_name="PP9999",
+                name_source="AIMES",
+                ownership_status="已确认",
+                has_hardware=True,
+            )
+            store.commit()
+            store.close()
+
+            sync_order_index(
+                config,
+                refresh_outbound_statuses=False,
+                reconcile_outbound=False,
+            )
+            second.parent.mkdir(parents=True)
+            make_fittings(second, [("F100", 2)])
+
+            sync_order_index(
+                config,
+                refresh_outbound_statuses=False,
+                reconcile_outbound=False,
+            )
+
+            store = OrderIndexStore(config.workflow_database)
+            try:
+                unchanged_rows = store.connection.execute(
+                    """
+                    select quantity, source_path
+                    from hardware_items
+                    where factory_order='F100' and source_type='aicnc' and active=1
+                    order by id
+                    """
+                ).fetchall()
+            finally:
+                store.close()
+
+            self.assertEqual(unchanged_rows, [(2.0, str(first))])
+
+            third.parent.mkdir(parents=True)
+            make_fittings(third, [("F100", 5)])
+            sync_order_index(
+                config,
+                refresh_outbound_statuses=False,
+                reconcile_outbound=False,
+            )
+
+            store = OrderIndexStore(config.workflow_database)
+            try:
+                rows = store.connection.execute(
+                    """
+                    select quantity, source_path
+                    from hardware_items
+                    where factory_order='F100' and source_type='aicnc' and active=1
+                    order by id
+                    """
+                ).fetchall()
+            finally:
+                store.close()
+
+        self.assertEqual(rows, [(5.0, str(third))])
 
     def test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records(self):
         class TrackingExecutor:
@@ -2858,6 +2941,7 @@ class OrderIndexTests(unittest.TestCase):
                 "F099",
                 order_id="PP0035",
                 factory_name="PP0035-ROOM 5",
+                split_time="2026-08-19T10:00:00",
                 name_source="server_report",
                 ownership_status="已确认",
             )
@@ -2889,12 +2973,12 @@ class OrderIndexTests(unittest.TestCase):
             self.assertTrue(result["aimes"]["succeeded"])
             store = OrderIndexStore(config.workflow_database)
             row = store.connection.execute(
-                "select order_id, factory_name, sales_order_name, name_source, last_aimes_seen from factory_orders where factory_order='F099'"
+                "select order_id, factory_name, sales_order_name, split_time, name_source, last_aimes_seen from factory_orders where factory_order='F099'"
             ).fetchone()
             store.close()
 
-        self.assertEqual(tuple(row[:4]), ("PP0035", "PP0035-ROOM 5", "PP0035", "AIMES"))
-        self.assertTrue(row[4])
+        self.assertEqual(tuple(row[:5]), ("PP0035", "PP0035-ROOM 5", "PP0035", "2026-08-19T10:00:00", "AIMES"))
+        self.assertTrue(row[5])
 
     def test_business_errors_are_actionable_and_hide_technical_details(self):
         validation = _business_validation_message(
@@ -3405,6 +3489,94 @@ class OrderIndexTests(unittest.TestCase):
 
         self.assertEqual(issue[0], "resolved")
         self.assertTrue(issue[1])
+
+    def test_completed_production_resolves_post_production_material_issue(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(
+                state_dir=root / "state",
+                source_root=root / "server" / "Optimized Orders",
+            )
+            config.prepare_storage()
+            folder = config.source_root / "PP0063-2"
+            folder.mkdir(parents=True)
+            material_path = folder / "PP0063-2 materials.xlsx"
+            material_path.write_bytes(b"source retained; preview owns validation")
+
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_order("PP0063-2", source_folder=str(folder))
+            store.upsert_aimes_factory(
+                "F2606170170",
+                order_id="PP0063-2",
+                factory_name="PP0063-2 KITCHEN",
+                sales_order_name="PP0063-2",
+                split_time="2026-06-17T05:43:46",
+                seen_at="2026-06-17T05:43:46",
+            )
+            store.connection.execute(
+                """
+                insert into material_items(
+                    order_id, material_type, color, thickness, quantity, unit,
+                    edge, source_type, source_path, source_fingerprint, updated_at
+                ) values(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    "PP0063-2", "panel", "Walnut", "19.1", 2, "张", "",
+                    "server", str(material_path), "fingerprint", "2026-08-19T09:38:40",
+                ),
+            )
+            store.connection.execute(
+                """
+                insert into manual_production_batches(
+                    batch_id, batch_number, order_id, production_time, source,
+                    status, created_at, updated_at
+                ) values(?,?,?,?,?,?,?,?)
+                """,
+                (
+                    1, "MP-20260821-225155-1D99ED", "PP0063-2",
+                    "2026-08-21T22:53:19-07:00", "manual", "completed",
+                    "2026-08-21T22:51:55-07:00", "2026-08-21T22:53:19-07:00",
+                ),
+            )
+            store.connection.execute(
+                "insert into manual_production_batch_factories(batch_id, order_id, factory_order) values(?,?,?)",
+                (1, "PP0063-2", "F2606170170"),
+            )
+            issue_key = f"material_validation:PP0063-2:{material_path}"
+            store.upsert_active_issue(
+                issue_key=issue_key,
+                kind="material_validation",
+                order_id="PP0063-2",
+                path=str(material_path),
+                message="旧解析器错误",
+                seen_at="2026-08-31T12:59:10",
+            )
+            store.commit()
+            store.close()
+
+            result = scan_server_changes(config)
+
+            self.assertFalse(any(
+                issue["kind"] == "material_validation"
+                for issue in result["current_issues"]
+            ))
+            reopened = OrderIndexStore(config.workflow_database)
+            issue = reopened.connection.execute(
+                "select status, resolved_at from active_issues where issue_key = ?",
+                (issue_key,),
+            ).fetchone()
+            order = reopened.connection.execute(
+                "select material_status from orders where order_id = 'PP0063-2'"
+            ).fetchone()
+            change = reopened.connection.execute(
+                "select kind from sync_changes where kind = 'material_validation_reconciled'"
+            ).fetchone()
+            reopened.close()
+
+        self.assertEqual(issue[0], "resolved")
+        self.assertTrue(issue[1])
+        self.assertEqual(order[0], "板材 · 封边")
+        self.assertEqual(change[0], "material_validation_reconciled")
 
     def test_fully_shipped_folder_resolves_stale_hardware_selection_issue(self):
         with tempfile.TemporaryDirectory() as temp:

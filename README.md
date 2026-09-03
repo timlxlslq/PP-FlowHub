@@ -63,3 +63,4 @@ PYTHONPATH=".:vendor" .venv/bin/python3 -m unittest discover -s tests -v
 - [Swift/macOS 全符号中文参考](docs/learning/07-swift-symbol-reference.md)：每个 App 类型、过程、计算属性和静态下一跳。
 - [测试、脚本与工具全符号中文参考](docs/learning/08-support-test-symbol-reference.md)：测试意图和辅助过程。
 - [用户操作与业务调用链全解](docs/learning/09-user-operation-call-chains.md)：从页面入口到 CLI、Python、SQLite/Excel/外部系统的人工校验链路。
+- [Product Design 订单中心审查](docs/learning/10-product-design-order-center-audit.md)：基于已安装 App 截图的真实页面状态、UX 问题和后续设计探索建议。

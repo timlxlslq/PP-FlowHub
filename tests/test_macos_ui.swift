@@ -71,16 +71,20 @@ private struct MacOSUIRegressionTests {
         testMaterialDisplayNames()
         testOrderDetailMaterialRows()
         testOrderDashboardRules()
+        testPendingServerSelectionAndRefreshContract()
         testPendingInventorySourceFolderPath()
         testPendingMaterialMappingIssueRoute()
+        testPendingInventoryMappingResumeContract()
         testOrderOutboundFactorySelection()
         testProductionFeedbackAndDashboardProgress()
         testServerWriteMaterialPreviewOrdering()
         testServerWriteHardwareChangeLayout()
         testAssistantOrderTimelineContract()
+        testAssistantStageIconAssets()
         testGlassDatePickerContract()
         testTodoTableHeaderRoundedCorners()
         testSettingsDefaultWindowLayoutContract()
+        testFixedWindowSizeContract()
         testSharedPageHeaderHeight()
         testInventoryActionLayoutRules()
         testProductionOrderPaths()
@@ -150,9 +154,9 @@ private struct MacOSUIRegressionTests {
         require(AppLayout.controlHeight == 44, "关键按钮与输入框应保持 44pt 操作目标")
         require(AppPalette.interfaceColorScheme == .light, "固定白色表面必须配套浅色文字环境")
         require(AppLayout.inventoryPreviewMinHeight >= 320, "库存预览区最小高度不足")
-        require(AppLayout.windowMinWidth >= 1180, "窗口最小宽度不足以容纳导航和操作控件")
-        require(AppLayout.windowIdealWidth == 1223, "默认窗口宽度应与当前助手看板工作区一致")
-        require(AppLayout.windowIdealHeight == 768, "默认窗口高度应与当前助手看板工作区一致")
+        require(AppLayout.windowMinWidth >= 1120, "窗口最小宽度不足以容纳导航和操作控件")
+        require(AppLayout.windowIdealWidth == 1120, "默认窗口宽度应与当前助手看板截图一致")
+        require(AppLayout.windowIdealHeight == 768, "默认窗口高度应与当前助手看板截图一致")
         require(AppLayout.todoDeadlineColumnWidth >= 270, "截止时间列不足以同时显示时间和过期提醒")
         require(AppLayout.todoListMaxHeight == 340, "待办列表高度未按要求压缩")
         require(AppLayout.todoInputMinHeight >= 92, "新增待办输入框高度不足三行")
@@ -528,11 +532,19 @@ private struct MacOSUIRegressionTests {
         let assignedReviews = aimesReviewItems(reviewObject, key: "assigned_aimes")
         require(pendingReviews.count == 1 && pendingReviews[0].factoryOrder == "F200", "AIMES 待确认清单解析错误")
         require(
-            !shouldPresentPendingCenterAfterAimes(presentIfNeeded: true, pendingAimesReviews: []),
+            !shouldPresentPendingCenterAfterAimes(
+                presentIfNeeded: true,
+                pendingAimesReviews: [],
+                aimesFormatWarnings: []
+            ),
             "仅有 Server 待处理项目时，获取 AIMES 不应弹出待处理中心"
         )
         require(
-            shouldPresentPendingCenterAfterAimes(presentIfNeeded: true, pendingAimesReviews: pendingReviews),
+            shouldPresentPendingCenterAfterAimes(
+                presentIfNeeded: true,
+                pendingAimesReviews: pendingReviews,
+                aimesFormatWarnings: []
+            ),
             "存在 AIMES 待确认记录时，应允许获取 AIMES 后打开待处理中心"
         )
         require(pendingReviews[0].suggestedOrderID == "CS001", "AIMES 工厂单名称建议订单号解析错误")
@@ -551,6 +563,14 @@ private struct MacOSUIRegressionTests {
                 && warningReviews[0].salesOrderName == "SHERRY 001"
                 && warningReviews[0].suggestedOrderID == "CS001",
             "销售单格式异常没有转换为可人工处理记录"
+        )
+        require(
+            shouldPresentPendingCenterAfterAimes(
+                presentIfNeeded: true,
+                pendingAimesReviews: [],
+                aimesFormatWarnings: warningReviews
+            ),
+            "存在 AIMES 销售单格式异常时，应进入统一待处理中心"
         )
         let aimesActionDetails = dashboardAimesActionDetails(
             pending: pendingReviews,
@@ -671,6 +691,27 @@ private struct MacOSUIRegressionTests {
         require(unifiedItems.count == 1, "同一 Server 文件夹不应同时显示为多个待处理项目")
         require(unifiedItems[0].serverGroup?.changes.count == 2, "待处理中心没有保留文件变化明细")
         require(unifiedItems[0].issues.count == 1 && unifiedItems[0].status == "处理失败", "文件夹失败原因没有合并到主记录")
+        let readyItems = buildPendingCenterItems(
+            serverChanges: [serverChanges[0]],
+            currentIssues: [],
+            aimesReviews: []
+        )
+        require(readyItems.count == 1 && readyItems[0].status == "待处理", "扫描完成但未发现问题的项目应显示为待处理")
+        let manualItems = buildPendingCenterItems(
+            serverChanges: [serverChanges[0]],
+            currentIssues: [CurrentIssue(
+                id: "temporary_mapping",
+                kind: "temporary_processing",
+                orderId: "PP0035-2",
+                factoryOrder: "",
+                path: serverFolder,
+                message: "未映射材料",
+                firstSeen: "2026-08-12T10:00:00",
+                lastSeen: "2026-08-12T10:00:00"
+            )],
+            aimesReviews: []
+        )
+        require(manualItems.count == 1 && manualItems[0].status == "需人工处理", "材料映射问题应显示为需人工处理")
         let withSeparateAimes = buildPendingCenterItems(
             serverChanges: serverChanges,
             currentIssues: [folderIssue],
@@ -678,6 +719,13 @@ private struct MacOSUIRegressionTests {
         )
         require(withSeparateAimes.count == 2, "AIMES 独立待确认记录没有进入统一待处理中心")
         require(withSeparateAimes.contains(where: { $0.aimesReviews.count == 1 }), "AIMES 待确认记录类型丢失")
+        let withFormatWarning = buildPendingCenterItems(
+            serverChanges: [],
+            currentIssues: [],
+            aimesReviews: [],
+            aimesFormatWarnings: warningReviews
+        )
+        require(withFormatWarning.count == 1 && withFormatWarning[0].aimesFormatWarnings.count == 1, "AIMES 格式异常没有进入统一待处理中心")
         let dashboardLog = dashboardActivitySteps([
             "changes": [[
                 "observed_at": "2026-08-10T12:34:56",
@@ -979,6 +1027,35 @@ private struct MacOSUIRegressionTests {
         _ = OrderDashboardView(model: AppModel())
     }
 
+    private static func testPendingServerSelectionAndRefreshContract() {
+        let dashboardSource = try! String(
+            contentsOfFile: "macos/OrderDashboardView.swift",
+            encoding: .utf8
+        )
+        let assistantSource = try! String(
+            contentsOfFile: "macos/TravelerAssistant.swift",
+            encoding: .utf8
+        )
+        require(
+            assistantSource.contains("selectedServerFolderPaths = [folderPath]")
+                && !dashboardSource.contains("Button(\"全选\") { model.selectAllServerFolders() }")
+                && !dashboardSource.contains("Button(\"取消全选\") { model.clearServerFolderSelection() }")
+                && assistantSource.contains("serverChangesExcludingFolders")
+                && assistantSource.contains("refreshDashboardAfterServerWrite(processedFolders: preview.sourceFolders)")
+                && assistantSource.contains("pendingServerChanges = serverChangesExcludingFolders")
+                && assistantSource.contains("closePendingCenterIfEmpty()"),
+            "待处理中心必须单选，并在 Server 写入成功后同步订单、助手和待处理列表"
+        )
+        require(
+            assistantSource.contains("aimesFormatWarnings: aimesFormatWarnings")
+                && assistantSource.contains("hasAimesHistory")
+                && !assistantSource.contains("AimesReviewSheet(model: model)")
+                && !dashboardSource.contains("处理 AIMES 异常")
+                && dashboardSource.contains("历史 AIMES 记录"),
+            "AIMES 异常必须统一进入待处理中心，并保留默认收起的历史记录"
+        )
+    }
+
     private static func testPendingInventorySourceFolderPath() {
         let reportFile = "/Volumes/server/Optimized Orders/pp0072/PP0072-MasterBed_Landing_Bed1_Bed2_Office/Report/FittingslistPC124429962608190002.xlsx"
         require(
@@ -1026,6 +1103,44 @@ private struct MacOSUIRegressionTests {
         require(
             !currentIssueRequiresInventoryMapping(malformedWorkbookIssue),
             "普通 material 文件读取失败不应误显示 SKU 映射入口"
+        )
+    }
+
+    private static func testPendingInventoryMappingResumeContract() {
+        let source = try! String(
+            contentsOfFile: "macos/TravelerAssistant.swift",
+            encoding: .utf8
+        )
+        require(
+            source.contains("private enum PendingMappingResumeAction")
+                && source.contains("case rereadSourceThenPresentReadOnlyPreview")
+                && source.contains("pendingMappingResumeAction = .rereadSourceThenPresentReadOnlyPreview"),
+            "材料映射续接必须保存明确的来源文件重读与只读预览上下文"
+        )
+        guard let saveStart = source.range(of: "func saveInventoryMapping(travelerName: String, productCode: String)"),
+              let saveEnd = source.range(of: "\n    func saveServerHardwareMapping", range: saveStart.upperBound..<source.endIndex) else {
+            require(false, "无法找到材料映射保存方法"
+            )
+            return
+        }
+        let saveSource = String(source[saveStart.lowerBound..<saveEnd.lowerBound])
+        require(
+            saveSource.contains("resumePendingMappingOperationAfterMapping()")
+                && !saveSource.contains("previewSelectedInventory()")
+                && !saveSource.contains("rereadPendingSourceFolder()"),
+            "映射保存完成后必须进入单一续接协调器，不能同时启动预览和来源文件重读"
+        )
+        require(
+            source.contains("来源文件已重新读取，可进行只读预览")
+                && source.contains("showPendingCenterPrompt = true")
+                && source.contains("pendingMappingResumeAction = nil"),
+            "来源文件重读成功后才可设置只读预览提示，并清理一次性续接上下文"
+        )
+        require(
+            !saveSource.contains("confirmServerWrite")
+                && !saveSource.contains("writeInventory")
+                && !saveSource.contains("--confirm-save"),
+            "材料映射续接不得自动确认或触发真实写入"
         )
     }
 
@@ -1167,7 +1282,7 @@ private struct MacOSUIRegressionTests {
                 assistant.contains("Server 材料写入完成") &&
                 assistant.contains("duration: duration") &&
                 !assistant.contains("self.showServerWriteConfirmation = false\n            self.refreshDashboardAfterServerWrite()") &&
-                assistant.contains("待处理中心将在下次手动扫描时更新") &&
+                assistant.contains("订单中心、助手和待处理中心已刷新") &&
                 !assistant.contains("订单列表已刷新；正在刷新待处理中心…\"\n            self.scanDashboardServer(background: true, presentIfNeeded: false)"),
             "Server 确认写入没有汇总材料、保留成功提示、记录耗时或取消写入后的自动扫描"
         )
@@ -1233,25 +1348,56 @@ private struct MacOSUIRegressionTests {
                 && assistantSource.contains("static let orderID: CGFloat = 20")
                 && assistantSource.contains("static let stageValue: CGFloat = 13")
                 && assistantSource.contains("GeometryReader")
-                && assistantSource.contains("startX = columnWidth")
-                && assistantSource.contains("endX = columnWidth")
-                && assistantSource.contains("stages[index].1 && stages[index + 1].1 ? AppPalette.success")
-                && assistantSource.contains("let iconColor = completed ? AppPalette.success : color")
+                && assistantSource.contains("completedCount: Int")
+                && assistantSource.contains("totalCount: Int")
+                && assistantSource.contains("let allStagesComplete = stages.allSatisfy")
+                && assistantSource.contains("let firstIncompleteIndex = stages.firstIndex")
+                && assistantSource.contains("let segmentState")
+                && assistantSource.contains("leadingStubLength")
+                && assistantSource.contains("segmentMidpoint")
+                && assistantSource.contains("index < firstIncompleteIndex")
+                && assistantSource.contains("let iconColor = completed ? AssistantDashboardTypography.stageEmerald : Color.secondary.opacity(0.62)")
                 && assistantSource.contains("GlassEffectContainer(spacing: 20)")
-                && assistantSource.contains(".regular.tint(AppPalette.success.opacity(0.20))")
-                && assistantSource.contains(".regular.tint(color.opacity(0.17))")
-                && assistantSource.contains("assistantProgressValue(item.outboundProgress), AppPalette.accent, \"shippingbox.fill\"")
+                && assistantSource.contains(".regular.tint(AssistantDashboardTypography.stageEmerald.opacity(0.28))")
+                && assistantSource.contains(".regular.tint(AppPalette.separator.opacity(0.18))")
+                && assistantSource.contains("assistantProgressValue(item.outboundProgress), \"truck.box.fill\"")
+                && assistantSource.contains("item.factoryCount > 0 ? \"\\(item.factoryCount)/\\(item.factoryCount)\" : \"—\", \"arrow.triangle.branch\"")
+                && assistantSource.contains("assistantProgressValue(item.optimizationProgress), \"square.stack\"")
+                && assistantSource.contains("assistantProgressValue(item.productionProgress), \"scissors\"")
+                && assistantSource.contains("Image(systemName: fallbackSymbol)")
+                && assistantSource.contains("AssistantDashboardTypography.stageEmerald.opacity(0.92)")
                 && assistantSource.contains(".contentTransition(.symbolEffect(.replace))")
                 && assistantSource.contains("assistantProgressValue")
-                && assistantSource.contains(".frame(width: 54, height: 19, alignment: .center)")
-                && assistantSource.contains("VStack(alignment: .center, spacing: 5)")
-                && assistantSource.contains(".resizable()")
-                && assistantSource.contains(".frame(width: 18, height: 18)")
-                && assistantSource.contains(".padding(.top, 3)")
-                && assistantSource.contains("let centerY: CGFloat = 41")
+                && assistantSource.contains("Text(stage.title)")
+                && assistantSource.contains("Text(stage.value)")
+                && assistantSource.contains("centerY - 20")
+                && assistantSource.contains("centerY + 20")
+                && assistantSource.contains(".font(.system(size: 34, weight: .semibold))")
+                && assistantSource.contains(".frame(width: 64, height: 64)")
+                && assistantSource.contains("let centerY: CGFloat = 50")
+                && assistantSource.contains(".frame(width: columnWidth, height: 100, alignment: .center)")
+                && assistantSource.contains("assistantProgressRail(item)\n                    .padding(.leading, 80)")
+                && assistantSource.contains(".frame(height: 100)")
+                && assistantSource.contains("let leadingStubLength: CGFloat = 64")
+                && assistantSource.contains("let stageStep: CGFloat = 10")
+                && assistantSource.contains("let baseCenterX =")
+                && assistantSource.contains("let stageShift = CGFloat(index + 1) * stageStep")
+                && assistantSource.contains("let centerX = baseCenterX + stageShift")
+                && assistantSource.contains(".offset(x: stageShift)")
+                && assistantSource.contains("AppPalette.separator.opacity(0.82)")
+                && assistantSource.contains("AppPalette.separator.opacity(0.90)")
                 && assistantSource.contains("TimelineView(.animation(minimumInterval: 1.0 / 20.0")
                 && assistantSource.contains("dashPhase: dashPhase")
                 && assistantSource.contains("accessibilityReduceMotion")
+                && assistantSource.contains("lineWidth: 9")
+                && assistantSource.contains("assistantStageIcon")
+                && assistantSource.contains("stageEmerald")
+                && assistantSource.contains("LinearGradient(")
+                && assistantSource.contains("RadialGradient(")
+                && assistantSource.contains("Color.white.opacity(0.55)")
+                && !assistantSource.contains(".offset(x: 22, y: 22)")
+                && !assistantSource.contains("阻塞")
+                && !assistantSource.contains("blocked")
                 && assistantSource.contains("ScrollView(.vertical)")
                 && !assistantSource.contains("assistantOrderStatusBadge")
                 && !assistantSource.contains("双击订单行进入订单中心")
@@ -1269,13 +1415,16 @@ private struct MacOSUIRegressionTests {
         if let railStart = assistantSource.range(of: "private func assistantProgressRail"),
            let railEnd = assistantSource.range(of: "private func assistantStageIcon", range: railStart.upperBound..<assistantSource.endIndex) {
             let railSource = String(assistantSource[railStart.lowerBound..<railEnd.lowerBound])
-            let titlePosition = railSource.range(of: "Text(stage.0)")?.lowerBound
-            let iconPosition = railSource.range(of: "assistantStageIcon(")?.lowerBound
-            let valuePosition = railSource.range(of: "Text(stage.2)")?.lowerBound
+            let titlePosition = railSource.range(of: "Text(stage.title)")?.lowerBound
+            let valuePosition = railSource.range(of: "Text(stage.value)")?.lowerBound
             require(
-                titlePosition != nil && iconPosition != nil && valuePosition != nil
-                    && titlePosition! < iconPosition! && iconPosition! < valuePosition!,
-                "助手看板阶段名称、图标和数值必须按上中下顺序排列"
+                titlePosition != nil && valuePosition != nil && titlePosition! < valuePosition!,
+                "助手看板阶段名称和数值必须绑定在线段上下"
+            )
+            require(
+                !railSource.contains("completedSegment")
+                    && !railSource.contains("stages[index].1 && stages[index + 1].1"),
+                "助手看板连接线不能再按相邻图标共同完成决定颜色"
             )
         } else {
             require(false, "未找到助手看板进度轨道源码")
@@ -1340,6 +1489,21 @@ private struct MacOSUIRegressionTests {
             !appSource.contains("liquidGlassPreview")
                 && !appSource.contains("LiquidGlassPreviewView"),
             "玻璃预览入口或路由仍残留在正式 App"
+        )
+    }
+
+    private static func testAssistantStageIconAssets() {
+        let assistantSource = try! String(
+            contentsOfFile: "macos/AssistantView.swift",
+            encoding: .utf8
+        )
+        require(
+            assistantSource.contains("fallbackSymbol: String")
+                && assistantSource.contains("Image(systemName: fallbackSymbol)")
+                && !assistantSource.contains("status-icon-split.png")
+                && !assistantSource.contains("status-icon-optimization.png")
+                && !assistantSource.contains("status-icon-production.png"),
+            "助手状态图标必须使用已选方案的原生线性符号，并清理旧的附件图标映射"
         )
     }
 
@@ -1497,6 +1661,27 @@ private struct MacOSUIRegressionTests {
                 && !source.contains("Label(\"重新载入\"")
                 && !source.contains("放弃页面中尚未保存的常规设置"),
             "设置页没有移除重新载入按钮、掩码账号字段或保留准确的保存范围"
+        )
+    }
+
+    private static func testFixedWindowSizeContract() {
+        let source = try! String(
+            contentsOfFile: "macos/TravelerAssistant.swift",
+            encoding: .utf8
+        )
+        require(
+            AppLayout.windowMinWidth == 1120
+                && AppLayout.windowIdealWidth == 1120
+                && AppLayout.windowMinHeight == 768
+                && AppLayout.windowIdealHeight == 768,
+            "PP FlowHub 默认窗口必须固定为 1120×768"
+        )
+        require(
+            source.contains(".windowResizability(.contentSize)")
+                && source.contains("window.styleMask.remove([.resizable, .fullScreen])")
+                && source.contains("window.minSize = fixedFrame.size")
+                && source.contains("window.maxSize = fixedFrame.size"),
+            "PP FlowHub 窗口必须禁止用户调整大小"
         )
     }
 

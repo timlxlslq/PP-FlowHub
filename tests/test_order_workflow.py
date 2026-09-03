@@ -61,6 +61,8 @@ def make_materials(path: Path, order_id: str = "PP9999", fractional: bool = Fals
     ws["A17"] = "Sheets (3/4):"
     ws["A18"] = "Sheets (1/4):"
     ws["A19"] = "Edge Banding (m):"
+    ws["C16"] = "Basalto SM"
+    ws["C17"], ws["C18"], ws["C19"] = 4, 1, edge
     wb.save(path)
 
 
@@ -487,7 +489,7 @@ class OrderWorkflowTests(unittest.TestCase):
                 ("panel", 19.1, "Test Oak", 3.0),
                 [(item.kind, item.thickness, item.color, item.quantity) for item in materials],
             )
-            self.assertEqual(edges, {"Test Oak": 13})
+            self.assertEqual(edges, {"Test Oak": 12.5})
             updated = load_workbook(traveler, data_only=False, read_only=True)
             self.assertEqual(updated.sheetnames[:3], ["WorkOrderTraveler", "Usage List", "Picking List"])
             self.assertEqual(parse_traveler(traveler).documents["CS001"][0].name, "19.1mm--Test Oak")
@@ -505,7 +507,7 @@ class OrderWorkflowTests(unittest.TestCase):
                 {(item.kind, item.thickness, item.color): item.quantity for item in materials if item.quantity},
                 {("plywood", 18.0, ""): 2, ("panel", 19.1, "Test Oak"): 3},
             )
-            self.assertEqual(edges, {"Test Oak": 13})
+            self.assertEqual(edges, {"Test Oak": 12.5})
             generated = load_workbook(created, data_only=False).active
             self.assertEqual(generated["A14"].value, "Total Qty:")
             self.assertEqual(generated["C16"].value, "Test Oak")
@@ -557,7 +559,7 @@ class OrderWorkflowTests(unittest.TestCase):
                 next(item.quantity for item in materials if item.kind == "panel" and item.color == "Test Oak"),
                 7,
             )
-            self.assertEqual(edges, {"Test Oak": 20})
+            self.assertEqual(edges, {"Test Oak": 19.75})
 
     def test_complex_report_generation_requests_manual_material(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -926,6 +928,59 @@ class OrderWorkflowTests(unittest.TestCase):
                 parse_order_materials("PP9999", path)
             self.assertEqual(raised.exception.code, "fractional_material")
 
+    def test_multicolor_materials_accepts_color_table_marker_in_total_row(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "PP0063-2 materials.xlsx"
+            make_materials(path, order_id="PP0063-2")
+            workbook = load_workbook(path)
+            sheet = workbook.active
+            sheet["A4"], sheet["F4"], sheet["H4"], sheet["I4"] = (
+                "Bath", 2, 7.5, "Walnut"
+            )
+            sheet["F14"], sheet["G14"], sheet["H14"] = (
+                "check color table", "check color table", "check color table"
+            )
+            sheet["C16"], sheet["D16"] = "Basalto SM", "Walnut"
+            sheet["C17"], sheet["D17"] = 4, 2
+            sheet["C18"], sheet["D18"] = 1, 0
+            sheet["C19"], sheet["D19"] = 12.5, 7.5
+            workbook.save(path)
+
+            _, materials, edges = parse_order_materials("PP0063-2", path)
+
+            self.assertEqual(
+                {
+                    (item.color, item.thickness): item.quantity
+                    for item in materials
+                    if item.kind == "panel"
+                },
+                {
+                    ("Basalto SM", 19.1): 4.0,
+                    ("Basalto SM", 8.0): 1.0,
+                    ("Walnut", 19.1): 2.0,
+                },
+            )
+            self.assertEqual(edges, {"Basalto SM": 12.5, "Walnut": 7.5})
+
+    def test_single_color_materials_without_color_table_is_a_schema_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "PP9999 materials.xlsx"
+            make_materials(path)
+            workbook = load_workbook(path)
+            sheet = workbook.active
+            for coordinate in (
+                "C16", "D16", "E16", "C17", "D17", "E17",
+                "C18", "D18", "E18", "C19", "D19", "E19",
+            ):
+                sheet[coordinate] = None
+            workbook.save(path)
+
+            with self.assertRaises(RuleError) as raised:
+                parse_order_materials("PP9999", path)
+
+            self.assertEqual(raised.exception.code, "materials_schema")
+            self.assertIn("Color Table", str(raised.exception))
+
     def test_single_color_materials_keep_edge_when_panel_is_zero(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "PP9999 materials.xlsx"
@@ -934,10 +989,9 @@ class OrderWorkflowTests(unittest.TestCase):
             sheet = workbook.active
             for coordinate in ("F3", "G3", "F14", "G14"):
                 sheet[coordinate] = 0
-            sheet["C16"] = None
-            sheet["C17"] = None
-            sheet["C18"] = None
-            sheet["C19"] = None
+            sheet["C17"] = 0
+            sheet["C18"] = 0
+            sheet["C19"] = 12.5
             workbook.save(path)
 
             _, materials, edges = parse_order_materials("PP9999", path)
@@ -1030,7 +1084,7 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(panel_quantities, {"Ivory Oak": 3, "Penelope FA44": 1, "Frappe 3": 5})
             self.assertEqual(edges, {"Ivory Oak": 18.5, "Penelope FA44": 36.72, "Frappe 3": 87.52})
 
-    def test_preview_includes_material_color_table_repair_warning(self):
+    def test_preview_rejects_incomplete_color_table_without_rewriting_source(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             order = root / "CS004"
@@ -1046,12 +1100,11 @@ class OrderWorkflowTests(unittest.TestCase):
             sheet["D16"], sheet["E16"] = None, None
             workbook.save(path)
 
-            preview = preview_order(Config(source_root=root, state_dir=root / "state"), order)
-            self.assertTrue(any("自动修正 Color Table" in warning for warning in preview.warnings))
-            self.assertEqual(
-                {item.color: item.quantity for item in preview.materials if item.kind == "panel"},
-                {"Ivory Oak": 1, "Penelope FA44": 1, "Frappe 3": 5},
-            )
+            with self.assertRaises(RuleError) as raised:
+                preview_order(Config(source_root=root, state_dir=root / "state"), order)
+            self.assertEqual(raised.exception.code, "material_summary_mismatch")
+            self.assertIsNone(load_workbook(path, data_only=False).active["D16"].value)
+            self.assertIsNone(load_workbook(path, data_only=False).active["E16"].value)
 
     def test_repair_aggregates_repeated_detail_color_rows(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1110,6 +1163,7 @@ class OrderWorkflowTests(unittest.TestCase):
             ]
             for row, color in enumerate(colors, start=3):
                 sheet.cell(row, 6).value = 1
+                sheet.cell(row, 7).value = 0
                 sheet.cell(row, 8).value = 10
                 sheet.cell(row, 9).value = color
                 sheet.cell(row, 1).value = "Traveler 汇总"
@@ -1145,6 +1199,11 @@ class OrderWorkflowTests(unittest.TestCase):
             }.items():
                 ws[coordinate] = value
                 ws[coordinate].number_format = "0;\\-0;;@"
+            ws["F3"], ws["H3"] = 6.25, 319.64
+            ws["F3"].number_format = "0;\\-0;;@"
+            ws["C17"], ws["C19"] = 6.25, 319.64
+            ws["C17"].number_format = "0;\\-0;;@"
+            ws["C19"].number_format = "0;\\-0;;@"
             wb.save(path)
             _, materials, edges = parse_order_materials("PP0068", path)
             quantities = {(item.kind, item.thickness): item.quantity for item in materials}
@@ -1152,7 +1211,7 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(quantities[("plywood", 14.5)], 1)
             self.assertEqual(quantities[("plywood", 5.4)], 3)
             self.assertEqual(quantities[("panel", 19.1)], 6)
-            self.assertEqual(edges, {"Basalto SM": 320})
+            self.assertEqual(edges, {"Basalto SM": 319.64})
 
     def test_material_detail_quantity_requires_color(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1218,7 +1277,7 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(quantities[("plywood", 5.4)], 9)
             self.assertEqual(quantities[("panel", 19.1)], 4)
             self.assertEqual(quantities[("panel", 8.0)], 1)
-            self.assertEqual(edges, {"Basalto SM": 320})
+            self.assertEqual(edges, {"Basalto SM": 319.64})
 
     def test_integer_display_format_is_also_used_for_room_rows(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1337,6 +1396,11 @@ class OrderWorkflowTests(unittest.TestCase):
             sheet = workbook.active
             for coordinate, value in {"C3": 2.5, "D3": 0.75, "E3": 3.25, "F3": 6.25}.items():
                 sheet[coordinate] = value
+            sheet["F14"] = 6.25
+            sheet["F14"].number_format = "0;\\-0;;@"
+            sheet["C17"] = 6.25
+            sheet["F3"].number_format = "0;\\-0;;@"
+            sheet["C17"].number_format = "0;\\-0;;@"
             workbook.save(materials_path)
             make_board(report / "板材清单.xlsx", "F100", "PP9999-CLOSET")
             empty = Workbook()

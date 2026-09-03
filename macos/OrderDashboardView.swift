@@ -792,9 +792,10 @@ private struct OrderDashboardProgressBar: View {
 
 func shouldPresentPendingCenterAfterAimes(
     presentIfNeeded: Bool,
-    pendingAimesReviews: [AimesReviewItem]
+    pendingAimesReviews: [AimesReviewItem],
+    aimesFormatWarnings: [AimesReviewItem] = []
 ) -> Bool {
-    presentIfNeeded && !pendingAimesReviews.isEmpty
+    presentIfNeeded && (!pendingAimesReviews.isEmpty || !aimesFormatWarnings.isEmpty)
 }
 
 struct DashboardMessage: Identifiable {
@@ -1590,17 +1591,6 @@ struct OrderDashboardView: View {
             }
             .appActionButton(minWidth: 126)
             .disabled(model.orderRunning)
-            if !model.aimesFormatWarnings.isEmpty
-                || !model.pendingAimesReviews.isEmpty
-                || !model.assignedAimesFactories.isEmpty {
-                Button {
-                    model.showAimesReviewPrompt = true
-                } label: {
-                    Label("处理 AIMES 异常", systemImage: "person.crop.circle.badge.questionmark")
-                }
-                .appActionButton(minWidth: 138)
-                .disabled(model.orderRunning)
-            }
             Button {
                 model.scanDashboardServer()
             } label: {
@@ -3274,6 +3264,7 @@ struct PendingCenterSheet: View {
     @ObservedObject var model: AppModel
     @State private var expandedIDs: Set<String> = []
     @State private var orderIDs: [String: String] = [:]
+    @State private var showAimesHistory = false
 
     private var items: [PendingCenterItem] { model.pendingCenterItems }
     private var serverItems: [PendingCenterItem] { items.filter { $0.serverGroup != nil } }
@@ -3321,8 +3312,8 @@ struct PendingCenterSheet: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
-                if !model.pendingAimesReviews.isEmpty && !model.selectedAimesReviewIDs.isEmpty {
-                    Button("忽略选中的 AIMES") { model.ignoreSelectedAimesFactories() }
+                if !model.selectedAimesReviewIDs.isEmpty {
+                    Button("忽略当前 AIMES 项") { model.ignoreSelectedAimesFactories() }
                         .buttonStyle(.glass)
                         .disabled(model.orderRunning)
                 }
@@ -3336,6 +3327,8 @@ struct PendingCenterSheet: View {
                     .appActionButton(minWidth: 150)
                     .disabled(model.orderRunning || selectedServerCount == 0)
             }
+
+            aimesHistorySection
         }
         .padding(20)
         .background(LiquidGlassPreviewBackdrop())
@@ -3447,6 +3440,10 @@ struct PendingCenterSheet: View {
             ForEach(item.aimesReviews) { review in
                 aimesDetails(review)
             }
+
+            ForEach(item.aimesFormatWarnings) { warning in
+                aimesFormatWarningDetails(warning)
+            }
         }
     }
 
@@ -3530,6 +3527,131 @@ struct PendingCenterSheet: View {
         .padding(10)
         .background(AppPalette.subtleSurface)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func aimesFormatWarningDetails(_ item: AimesReviewItem) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                Button { model.toggleAimesReviewSelection(item) } label: {
+                    Image(systemName: model.selectedAimesReviewIDs.contains(item.id) ? "checkmark.square.fill" : "square")
+                        .foregroundColor(model.selectedAimesReviewIDs.contains(item.id) ? AppPalette.accent : .secondary)
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.plain)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("AIMES 销售单格式异常 · \(item.factoryOrder)")
+                        .font(.subheadline.weight(.semibold))
+                    Text("工厂单名称：\(item.factoryName.isEmpty ? "名称为空" : item.factoryName)")
+                        .font(.caption)
+                    Text("原始销售单名称：\(item.salesOrderName.isEmpty ? "空" : item.salesOrderName)")
+                        .font(.caption)
+                    Text(item.reason).font(.caption).foregroundColor(AppPalette.warning)
+                }
+            }
+            HStack(spacing: 8) {
+                TextField(
+                    "订单号，如 PP0037 或 CS001",
+                    text: Binding(
+                        get: { orderIDs[item.id] ?? item.suggestedOrderID },
+                        set: { orderIDs[item.id] = $0 }
+                    )
+                )
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 220)
+                if !item.suggestedOrderID.isEmpty {
+                    Text("建议：(item.suggestedOrderID)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Button("确认归属") {
+                    model.assignAimesFactoryToOrder(
+                        item,
+                        orderID: orderIDs[item.id] ?? item.suggestedOrderID
+                    )
+                }
+                .buttonStyle(.glassProminent)
+                .disabled(
+                    model.orderRunning
+                        || (orderIDs[item.id] ?? item.suggestedOrderID)
+                            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+            }
+        }
+        .padding(10)
+        .background(AppPalette.subtleSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var aimesHistorySection: some View {
+        if model.hasAimesHistory {
+            VStack(alignment: .leading, spacing: 10) {
+                Button {
+                    showAimesHistory.toggle()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: showAimesHistory ? "chevron.down" : "chevron.right")
+                            .font(.caption.weight(.semibold))
+                        Text("历史 AIMES 记录")
+                            .font(.headline)
+                        Text("已确认 \(model.assignedAimesFactories.count) · 已忽略 \(model.ignoredAimesFactories.count)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .buttonStyle(.plain)
+
+                if showAimesHistory {
+                    AppSurfaceCard(padding: 0) {
+                        VStack(spacing: 0) {
+                            ForEach(model.assignedAimesFactories) { item in
+                                aimesHistoryRow(item, title: "已确认归属") {
+                                    model.restoreAimesFactoryAssignment(item)
+                                } actionTitle: {
+                                    "撤销归属"
+                                }
+                                if item.id != model.assignedAimesFactories.last?.id { Divider() }
+                            }
+                            if !model.assignedAimesFactories.isEmpty && !model.ignoredAimesFactories.isEmpty {
+                                Divider()
+                            }
+                            ForEach(model.ignoredAimesFactories) { item in
+                                aimesHistoryRow(item, title: "已忽略") {
+                                    model.restoreAimesFactory(item)
+                                } actionTitle: {
+                                    "恢复"
+                                }
+                                if item.id != model.ignoredAimesFactories.last?.id { Divider() }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func aimesHistoryRow(
+        _ item: AimesReviewItem,
+        title: String,
+        action: @escaping () -> Void,
+        actionTitle: () -> String
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(title) · \(item.factoryOrder.isEmpty ? "工厂单号为空" : item.factoryOrder)")
+                    .font(.subheadline.weight(.semibold))
+                Text("工厂单名称：\(item.factoryName.isEmpty ? "名称为空" : item.factoryName)")
+                    .font(.caption)
+                Text("销售单名称：\(item.salesOrderName.isEmpty ? "空" : item.salesOrderName)")
+                    .font(.caption)
+            }
+            Spacer(minLength: 12)
+            Button(actionTitle(), action: action)
+                .appActionButton(minWidth: title == "已忽略" ? 72 : 92)
+                .disabled(model.orderRunning)
+        }
+        .padding(12)
     }
 
     private func changeTypeName(_ type: String) -> String {
@@ -3803,228 +3925,6 @@ struct ServerProcessingOptionsSheet: View {
     }
 }
 
-struct AimesReviewSheet: View {
-    @ObservedObject var model: AppModel
-    @State private var manualOrderIDs: [String: String] = [:]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("AIMES 工厂单管理")
-                        .font(.title2.weight(.semibold))
-                    Text("待确认记录不会进入订单看板。请核对 AIMES 原始信息后，选择建议归属、稍后处理或永久忽略。")
-                        .font(.callout)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-                if !model.pendingAimesReviews.isEmpty {
-                    AppStatusBadge(text: "\(model.pendingAimesReviews.count) 条待确认", kind: .warning)
-                }
-            }
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    pendingSection
-                    formatWarningSection
-                    assignedSection
-                    ignoredSection
-                }
-            }
-
-            HStack {
-                Text("选择“稍后处理”不会保存忽略记录，下次获取 AIMES 时仍会提醒。")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Spacer()
-                Button(model.pendingAimesReviews.isEmpty ? "关闭" : "稍后处理") {
-                    model.showAimesReviewPrompt = false
-                }
-                .appActionButton(minWidth: 108)
-                if !model.pendingAimesReviews.isEmpty {
-                    Button("忽略选中") { model.ignoreSelectedAimesFactories() }
-                        .buttonStyle(.glassProminent)
-                        .appActionButton(minWidth: 118)
-                        .disabled(model.orderRunning || model.selectedAimesReviewIDs.isEmpty)
-                }
-            }
-        }
-        .padding(20)
-        .background(LiquidGlassPreviewBackdrop())
-    }
-
-    @ViewBuilder
-    private var formatWarningSection: some View {
-        if !model.aimesFormatWarnings.isEmpty {
-            Text("销售单格式异常（需要人工确认）")
-                .font(.headline)
-            AppSurfaceCard(padding: 0) {
-                VStack(spacing: 0) {
-                    ForEach(model.aimesFormatWarnings) { item in
-                        VStack(alignment: .leading, spacing: 9) {
-                            aimesIdentity(item)
-                            Text("原始销售单名称会保留用于追溯；确认后业务映射使用你输入的订单号。")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            HStack(spacing: 8) {
-                                TextField(
-                                    "订单号，如 PP0037 或 CS001",
-                                    text: Binding(
-                                        get: { manualOrderIDs[item.id] ?? item.suggestedOrderID },
-                                        set: { manualOrderIDs[item.id] = $0 }
-                                    )
-                                )
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 220)
-                                if !item.suggestedOrderID.isEmpty {
-                                    Text("建议：\(item.suggestedOrderID)")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                                Button("确认归属") {
-                                    model.assignAimesFactoryToOrder(
-                                        item,
-                                        orderID: manualOrderIDs[item.id] ?? item.suggestedOrderID
-                                    )
-                                }
-                                .buttonStyle(.glassProminent)
-                                .disabled(
-                                    model.orderRunning
-                                        || (manualOrderIDs[item.id] ?? item.suggestedOrderID)
-                                            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                )
-                            }
-                        }
-                        .padding(12)
-                        if item.id != model.aimesFormatWarnings.last?.id { Divider() }
-                    }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var pendingSection: some View {
-        if model.pendingAimesReviews.isEmpty {
-            AppSurfaceCard(padding: 16) {
-                Text("当前没有待确认的 AIMES 工厂单。")
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        } else {
-            HStack {
-                Text("待确认")
-                    .font(.headline)
-                Spacer()
-                Button("全选") {
-                    model.selectedAimesReviewIDs = Set(model.pendingAimesReviews.map(\.id))
-                }
-                .buttonStyle(.link)
-                Button("取消全选") { model.selectedAimesReviewIDs.removeAll() }
-                    .buttonStyle(.link)
-            }
-            AppSurfaceCard(padding: 0) {
-                VStack(spacing: 0) {
-                    ForEach(model.pendingAimesReviews) { item in
-                        HStack(alignment: .top, spacing: 12) {
-                            Button {
-                                model.toggleAimesReviewSelection(item)
-                            } label: {
-                                HStack(alignment: .top, spacing: 12) {
-                                Image(systemName: model.selectedAimesReviewIDs.contains(item.id) ? "checkmark.square.fill" : "square")
-                                    .foregroundColor(model.selectedAimesReviewIDs.contains(item.id) ? AppPalette.accent : .secondary)
-                                    .frame(width: 22, height: 22)
-                                aimesIdentity(item)
-                                Spacer(minLength: 0)
-                                }
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            if !item.suggestedOrderID.isEmpty {
-                                Button("按 \(item.suggestedOrderID) 处理") {
-                                    model.assignAimesFactoryToSuggestedOrder(item)
-                                }
-                                .buttonStyle(.glassProminent)
-                                .appActionButton(minWidth: 132)
-                                .disabled(model.orderRunning)
-                            }
-                        }
-                        .padding(12)
-                        if item.id != model.pendingAimesReviews.last?.id { Divider() }
-                    }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var assignedSection: some View {
-        if !model.assignedAimesFactories.isEmpty {
-            Text("已按工厂单名称确认归属")
-                .font(.headline)
-            AppSurfaceCard(padding: 0) {
-                VStack(spacing: 0) {
-                    ForEach(model.assignedAimesFactories) { item in
-                        HStack(alignment: .top, spacing: 12) {
-                            aimesIdentity(item, timestampLabel: "确认时间")
-                            Spacer(minLength: 12)
-                            Button("撤销归属") { model.restoreAimesFactoryAssignment(item) }
-                                .appActionButton(minWidth: 92)
-                                .disabled(model.orderRunning)
-                        }
-                        .padding(12)
-                        if item.id != model.assignedAimesFactories.last?.id { Divider() }
-                    }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var ignoredSection: some View {
-        if !model.ignoredAimesFactories.isEmpty {
-            Text("已忽略，可随时恢复")
-                .font(.headline)
-            AppSurfaceCard(padding: 0) {
-                VStack(spacing: 0) {
-                    ForEach(model.ignoredAimesFactories) { item in
-                        HStack(alignment: .top, spacing: 12) {
-                            aimesIdentity(item, timestampLabel: "忽略时间")
-                            Spacer(minLength: 12)
-                            Button("恢复") { model.restoreAimesFactory(item) }
-                                .appActionButton(minWidth: 72)
-                                .disabled(model.orderRunning)
-                        }
-                        .padding(12)
-                        if item.id != model.ignoredAimesFactories.last?.id { Divider() }
-                    }
-                }
-            }
-        }
-    }
-
-    private func aimesIdentity(_ item: AimesReviewItem, timestampLabel: String? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 10) {
-                Text(item.factoryOrder.isEmpty ? "工厂单号为空" : item.factoryOrder)
-                    .fontWeight(.semibold)
-                Text(item.factoryName.isEmpty ? "名称为空" : item.factoryName)
-                    .foregroundColor(.secondary)
-            }
-            Text("销售单名称：\(item.salesOrderName.isEmpty ? "空" : item.salesOrderName)")
-            Text(item.reason)
-                .font(.caption)
-                .foregroundColor(AppPalette.warning)
-            if let timestampLabel, !item.ignoredAt.isEmpty {
-                Text("\(timestampLabel)：\(appDisplayTimestamp(item.ignoredAt))")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
 struct CurrentIssuesSheet: View {
     @ObservedObject var model: AppModel
     @State private var orderIDs: [String: String] = [:]
@@ -4141,13 +4041,10 @@ struct ServerChangesSheet: View {
             }
 
             HStack(spacing: 10) {
-                Text("请选择要自动处理的文件夹（已选 \(selectedCount) 个）")
+                Text("请选择一个要自动处理的文件夹（已选 \(selectedCount) 个）")
                     .font(.callout.weight(.semibold))
                 Spacer()
-                Button("全选") { model.selectAllServerFolders() }
-                    .buttonStyle(.link)
-                    .disabled(groups.isEmpty || selectedCount == groups.count)
-                Button("取消全选") { model.clearServerFolderSelection() }
+                Button("取消选择") { model.clearServerFolderSelection() }
                     .buttonStyle(.link)
                     .disabled(selectedCount == 0)
             }

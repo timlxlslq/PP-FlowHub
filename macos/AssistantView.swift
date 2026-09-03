@@ -693,6 +693,13 @@ private enum AssistantDashboardTypography {
     static let stageTitle: CGFloat = 14
     static let stageValue: CGFloat = 13
     static let orderIdentityText = Color(red: 0.08, green: 0.36, blue: 0.20)
+    static let stageEmerald = Color(red: 0.08, green: 0.68, blue: 0.38)
+}
+
+private enum AssistantProgressSegmentState {
+    case completed
+    case active
+    case pending
 }
 
 struct AssistantView: View {
@@ -927,6 +934,7 @@ struct AssistantView: View {
                 .glassEffect(.regular.tint(AppPalette.success.opacity(0.12)), in: Capsule())
                 .padding(.leading, 10)
                 assistantProgressRail(item)
+                    .padding(.leading, 80)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
@@ -938,115 +946,184 @@ struct AssistantView: View {
     }
 
     private func assistantProgressRail(_ item: OrderDashboardItem) -> some View {
-        let stages: [(String, Bool, String, Color, String)] = [
-            ("拆单", item.factoryCount > 0, item.factoryCount > 0 ? "\(item.factoryCount)/\(item.factoryCount)" : "—", Color.indigo, "rectangle.split.3x1"),
-            ("优化", item.optimizedCount == item.factoryCount, assistantProgressValue(item.optimizationProgress), AppPalette.accent, "wand.and.stars"),
-            ("生产", item.producedCount == item.factoryCount, assistantProgressValue(item.productionProgress), AppPalette.cyan, "gearshape.2"),
-            ("出货", item.shippedCount == item.factoryCount, assistantProgressValue(item.outboundProgress), AppPalette.accent, "shippingbox.fill"),
+        let stages: [(title: String, completedCount: Int, totalCount: Int, value: String, fallbackSymbol: String)] = [
+            ("拆单", item.factoryCount, item.factoryCount, item.factoryCount > 0 ? "\(item.factoryCount)/\(item.factoryCount)" : "—", "arrow.triangle.branch"),
+            ("优化", item.optimizedCount, item.factoryCount, assistantProgressValue(item.optimizationProgress), "square.stack"),
+            ("生产", item.producedCount, item.factoryCount, assistantProgressValue(item.productionProgress), "scissors"),
+            ("出货", item.shippedCount, item.factoryCount, assistantProgressValue(item.outboundProgress), "truck.box.fill"),
         ]
-        let currentIndex = stages.firstIndex(where: { !$0.1 }) ?? stages.count - 1
-        let activeConnectorIndex = !stages[currentIndex].1 && currentIndex > 0 ? currentIndex - 1 : nil
-        return ZStack(alignment: .topLeading) {
-            GeometryReader { geometry in
-                let columnWidth = geometry.size.width / CGFloat(stages.count)
-                ForEach(0..<(stages.count - 1), id: \.self) { index in
+        let isComplete: (Int, Int) -> Bool = { completedCount, totalCount in
+            totalCount > 0 && completedCount >= totalCount
+        }
+        let allStagesComplete = stages.allSatisfy { isComplete($0.completedCount, $0.totalCount) }
+        let firstIncompleteIndex = stages.firstIndex {
+            !isComplete($0.completedCount, $0.totalCount)
+        } ?? stages.count
+
+        return GeometryReader { geometry in
+            let columnWidth = geometry.size.width / CGFloat(stages.count)
+            let iconDiameter: CGFloat = 64
+            let centerY: CGFloat = 50
+            let iconRadius = iconDiameter / 2
+            let leadingStubLength: CGFloat = 64
+            let stageStep: CGFloat = 10
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(stages.enumerated()), id: \.offset) { index, stage in
+                    let baseCenterX = columnWidth * (CGFloat(index) + 0.5)
+                    let stageShift = CGFloat(index + 1) * stageStep
+                    let centerX = baseCenterX + stageShift
+                    let startX: CGFloat = index == 0
+                        ? baseCenterX - iconRadius - 10 - leadingStubLength
+                        : columnWidth * (CGFloat(index - 1) + 0.5) + CGFloat(index) * stageStep + iconRadius + 10
+                    let endX = index == 0 ? baseCenterX - iconRadius - 10 : centerX - iconRadius - 10
+                    let segmentMidpoint = (startX + endX) / 2
+                    let segmentState: AssistantProgressSegmentState = allStagesComplete || index < firstIncompleteIndex
+                        ? .completed
+                        : (index == firstIncompleteIndex ? .active : .pending)
                     let connector = Path { path in
-                        let centerY: CGFloat = 41
-                        let startX = columnWidth * (CGFloat(index) + 0.5) + 20
-                        let endX = columnWidth * (CGFloat(index + 1) + 0.5) - 20
                         path.move(to: CGPoint(x: startX, y: centerY))
                         path.addLine(to: CGPoint(x: endX, y: centerY))
                     }
-                    connector.stroke(
-                        stages[index].1 && stages[index + 1].1 ? AppPalette.success : AppPalette.separator,
-                        style: StrokeStyle(lineWidth: 4, lineCap: .round)
-                    )
-                    if activeConnectorIndex == index {
-                        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: accessibilityReduceMotion)) { context in
-                            let elapsed = context.date.timeIntervalSinceReferenceDate
-                            let dashPhase = accessibilityReduceMotion
-                                ? CGFloat.zero
-                                : -CGFloat(elapsed.truncatingRemainder(dividingBy: 1.2) / 1.2) * 28
+
+                    Group {
+                        switch segmentState {
+                        case .completed:
                             connector.stroke(
-                                LinearGradient(
-                                    colors: [AppPalette.success.opacity(0.86), stages[currentIndex].3.opacity(0.92)],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                ),
-                                style: StrokeStyle(
-                                    lineWidth: 3,
-                                    lineCap: .round,
-                                    dash: [7, 7],
-                                    dashPhase: dashPhase
+                                AssistantDashboardTypography.stageEmerald.opacity(0.34),
+                                style: StrokeStyle(lineWidth: 9, lineCap: .round)
+                            )
+                            connector.stroke(
+                                AssistantDashboardTypography.stageEmerald.opacity(0.68),
+                                style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                            )
+                        case .active:
+                            connector.stroke(
+                                AssistantDashboardTypography.stageEmerald.opacity(0.20),
+                                style: StrokeStyle(lineWidth: 9, lineCap: .round)
+                            )
+                            TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: accessibilityReduceMotion)) { context in
+                                let elapsed = context.date.timeIntervalSinceReferenceDate
+                                let dashPhase = accessibilityReduceMotion
+                                    ? CGFloat.zero
+                                    : -CGFloat(elapsed.truncatingRemainder(dividingBy: 1.2) / 1.2) * 28
+                                connector.stroke(
+                                    AssistantDashboardTypography.stageEmerald.opacity(0.92),
+                                    style: StrokeStyle(
+                                        lineWidth: 5,
+                                        lineCap: .round,
+                                        dash: [14, 12],
+                                        dashPhase: dashPhase
+                                    )
                                 )
+                            }
+                        case .pending:
+                            connector.stroke(
+                                AppPalette.separator.opacity(0.82),
+                                style: StrokeStyle(lineWidth: 9, lineCap: .round)
+                            )
+                            connector.stroke(
+                                AppPalette.separator.opacity(0.90),
+                                style: StrokeStyle(lineWidth: 3, lineCap: .round)
                             )
                         }
                     }
+                    .allowsHitTesting(false)
+
+                    Text(stage.title)
+                        .font(.system(size: AssistantDashboardTypography.stageTitle, weight: .semibold))
+                        .position(x: segmentMidpoint, y: centerY - 20)
+                    Text(stage.value)
+                        .font(.system(size: AssistantDashboardTypography.stageValue).monospacedDigit())
+                        .foregroundColor(.secondary)
+                        .position(x: segmentMidpoint, y: centerY + 20)
                 }
-            }
-            GlassEffectContainer(spacing: 20) {
-                HStack(spacing: 0) {
-                    ForEach(Array(stages.enumerated()), id: \.offset) { index, stage in
-                        VStack(spacing: 0) {
-                            Text(stage.0)
-                                .font(.system(size: AssistantDashboardTypography.stageTitle, weight: .semibold))
-                                .frame(height: 18)
+
+                GlassEffectContainer(spacing: 20) {
+                    HStack(spacing: 0) {
+                        ForEach(Array(stages.enumerated()), id: \.offset) { index, stage in
+                            let stageShift = CGFloat(index + 1) * stageStep
+                            let completed = allStagesComplete || index < firstIncompleteIndex
                             assistantStageIcon(
-                                completed: stage.1,
-                                current: index == currentIndex && !stage.1,
-                                color: stage.3,
-                                symbol: stage.4
+                                completed: completed,
+                                current: !completed && index == firstIncompleteIndex,
+                                fallbackSymbol: stage.fallbackSymbol
                             )
-                            .padding(.top, 4)
-                            Text(stage.2)
-                                .font(.system(size: AssistantDashboardTypography.stageValue).monospacedDigit())
-                                .foregroundColor(.secondary)
-                                .padding(.top, 3)
-                                .frame(width: 54, height: 19, alignment: .center)
+                            .frame(width: columnWidth, height: 100, alignment: .center)
+                            .offset(x: stageShift)
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel("\(stage.title) \(stage.value)")
                         }
-                        .frame(maxWidth: .infinity)
-                        .accessibilityElement(children: .combine)
-                        .accessibilityLabel("\(stage.0) \(stage.2)")
                     }
                 }
             }
         }
+        .frame(height: 100)
     }
 
     private func assistantStageIcon(
         completed: Bool,
         current: Bool,
-        color: Color,
-        symbol: String
+        fallbackSymbol: String
     ) -> some View {
-        let iconColor = completed ? AppPalette.success : color
+        let iconColor = completed ? AssistantDashboardTypography.stageEmerald : Color.secondary.opacity(0.62)
         return ZStack {
             Circle()
-                .fill(completed ? AppPalette.success.opacity(0.08) : (current ? color.opacity(0.06) : Color.white.opacity(0.10)))
-            Image(systemName: completed ? "checkmark" : symbol)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 18, height: 18)
-                .foregroundStyle(completed || current ? iconColor : Color.secondary.opacity(0.62))
+                .fill(
+                    completed
+                        ? AssistantDashboardTypography.stageEmerald.opacity(0.12)
+                        : Color.white.opacity(0.10)
+                )
+            Image(systemName: fallbackSymbol)
+                .font(.system(size: 34, weight: .semibold))
+                .foregroundStyle(iconColor)
                 .contentTransition(.symbolEffect(.replace))
         }
-        .frame(width: 38, height: 38)
+        .frame(width: 64, height: 64)
         .glassEffect(
             completed
-                ? .regular.tint(AppPalette.success.opacity(0.20))
-                : (current ? .regular.tint(color.opacity(0.17)) : .clear),
+                ? .regular.tint(AssistantDashboardTypography.stageEmerald.opacity(0.28))
+                : (current ? .regular.tint(AppPalette.separator.opacity(0.18)) : .clear),
             in: Circle()
         )
         .overlay {
+            if completed {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [Color.white.opacity(0.55), Color.clear],
+                            center: .topLeading,
+                            startRadius: 0,
+                            endRadius: 31
+                        )
+                    )
+                    .padding(2)
+                    .allowsHitTesting(false)
+            }
             Circle()
                 .stroke(
-                    completed || current ? iconColor.opacity(0.92) : AppPalette.separator.opacity(0.85),
+                    LinearGradient(
+                        colors: completed || current
+                            ? [
+                                Color.white.opacity(0.88),
+                                iconColor.opacity(0.88),
+                                iconColor.opacity(0.45),
+                            ]
+                            : [
+                                Color.white.opacity(0.72),
+                                AppPalette.separator.opacity(0.85),
+                            ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
                     lineWidth: current ? 2.5 : 2
                 )
+            Circle()
+                .stroke(Color.white.opacity(completed || current ? 0.48 : 0.28), lineWidth: 1)
+                .padding(3)
         }
         .shadow(
-            color: completed || current ? iconColor.opacity(0.13) : Color.clear,
-            radius: 5,
+            color: completed || current ? iconColor.opacity(0.19) : Color.clear,
+            radius: 6,
             y: 2
         )
     }

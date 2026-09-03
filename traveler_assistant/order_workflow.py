@@ -471,47 +471,108 @@ def parse_order_materials(order_id: str, path: Path) -> tuple[str, list[Material
             detail_color = _canonical_color(_text(ws.cell(detail_row, color_col or 9).value)).casefold()
             if source_key is not None and detail_color != source_key:
                 continue
-            total += _number(ws.cell(detail_row, column).value, f"materials {ws.cell(2, column).value}")
+            detail_cell = ws.cell(detail_row, column)
+            field = f"materials {ws.cell(2, column).value}（{get_column_letter(column)}{detail_row}）"
+            total += (
+                _number(detail_cell.value, field)
+                if column == edge_col
+                else _display_number(detail_cell.value, detail_cell.number_format, field)
+            )
         return total
 
-    def color_integer_fallback(column: int, source_color: str) -> float:
-        # A legacy one-color workbook already has the order-level quantity in
-        # Total Qty. Keep that authoritative value when the newly written
-        # Color Table formula has no cached Excel result; only calculate from
-        # detail rows when the upper total is actually empty.
-        if len(colors) == 1 and ws.cell(total_row, column).value not in (None, ""):
-            return _integer_cell(ws.cell(total_row, column), f"{source_color} total")
-        return detail_sum(column, source_color)
+    def cell_label(row: int, column: int, label: str) -> str:
+        return f"{label}（{get_column_letter(column)}{row}）"
 
-    def summary_number(row: int, column: int, label: str, fallback: float) -> float:
-        value = ws.cell(row, column).value
-        formula = formula_ws.cell(row, column).value
+    def required_integer(row: int, column: int, label: str) -> float:
         cell = ws.cell(row, column)
-        if value in (None, "") and (
-            formula_ws.cell(row, column).data_type == "f"
-            or isinstance(formula, str) and formula.startswith("=")
-        ):
-            return _display_number(fallback, cell.number_format, label)
-        return _display_number(value, cell.number_format, label)
-
-    def summary_integer(row: int, column: int, label: str, fallback: float) -> float:
-        value = ws.cell(row, column).value
-        formula = formula_ws.cell(row, column).value
-        cell = ws.cell(row, column)
-        if value in (None, "") and (
-            formula_ws.cell(row, column).data_type == "f"
-            or isinstance(formula, str) and formula.startswith("=")
-        ):
-            displayed = _display_number(fallback, cell.number_format, label)
+        if cell.value in (None, "") or (isinstance(cell.value, str) and not cell.value.strip()):
+            formula = formula_ws.cell(row, column).value
+            has_formula = (
+                formula_ws.cell(row, column).data_type == "f"
+                or isinstance(formula, str) and formula.startswith("=")
+            )
+            if not has_formula:
+                raise RuleError(
+                    "invalid_number",
+                    f"{cell_label(row, column, label)} 不能为空，必须是整数",
+                )
+            fallback = detail_sum(column)
+            displayed = _display_number(fallback, cell.number_format, cell_label(row, column, label))
             if not math.isclose(displayed, round(displayed), abs_tol=EPSILON):
-                raise RuleError("fractional_material", f"{label} 必须是整数，当前为 {fallback}")
+                raise RuleError(
+                    "fractional_material",
+                    f"{cell_label(row, column, label)} 必须是整数，当前为 {fallback}",
+                )
             return float(round(displayed))
-        return _integer_cell(cell, label)
+        return _integer_cell(cell, cell_label(row, column, label))
+
+    def required_color_table_integer(row: int, column: int, label: str, source_color: str) -> float:
+        cell = ws.cell(row, column)
+        if cell.value in (None, "") or (isinstance(cell.value, str) and not cell.value.strip()):
+            formula = formula_ws.cell(row, column).value
+            has_formula = (
+                formula_ws.cell(row, column).data_type == "f"
+                or isinstance(formula, str) and formula.startswith("=")
+            )
+            if not has_formula:
+                raise RuleError(
+                    "materials_schema",
+                    f"Color Table 的 {cell_label(row, column, label)} 为空；"
+                    f"颜色 {source_color} 必须填写整数",
+                )
+            fallback = detail_sum(6 if row == row_34 else 7, source_color)
+            displayed = _display_number(fallback, cell.number_format, cell_label(row, column, label))
+            if not math.isclose(displayed, round(displayed), abs_tol=EPSILON):
+                raise RuleError(
+                    "fractional_material",
+                    f"{cell_label(row, column, label)} 必须是整数，当前为 {fallback}",
+                )
+            return float(round(displayed))
+        return _integer_cell(cell, cell_label(row, column, label))
+
+    def required_color_table_number(row: int, column: int, label: str, source_color: str) -> float:
+        cell = ws.cell(row, column)
+        if cell.value in (None, "") or (isinstance(cell.value, str) and not cell.value.strip()):
+            formula = formula_ws.cell(row, column).value
+            has_formula = (
+                formula_ws.cell(row, column).data_type == "f"
+                or isinstance(formula, str) and formula.startswith("=")
+            )
+            if not has_formula:
+                raise RuleError(
+                    "materials_schema",
+                    f"Color Table 的 {cell_label(row, column, label)} 为空；"
+                    f"颜色 {source_color} 必须填写数字",
+                )
+            fallback = detail_sum(8, source_color)
+            return _number(fallback, cell_label(row, column, label))
+        return _number(cell.value, cell_label(row, column, label))
+
+    def optional_total_number(row: int, column: int, label: str, integer: bool) -> float | None:
+        cell = ws.cell(row, column)
+        value = cell.value
+        if isinstance(value, str) and value.strip().casefold() == "check color table":
+            return None
+        if value in (None, "") or (isinstance(value, str) and not value.strip()):
+            formula = formula_ws.cell(row, column).value
+            has_formula = (
+                formula_ws.cell(row, column).data_type == "f"
+                or isinstance(formula, str) and formula.startswith("=")
+            )
+            if has_formula:
+                return None
+            raise RuleError(
+                "materials_schema",
+                f"{cell_label(row, column, label)} 为空；必须是数字或 check color table",
+            )
+        if integer:
+            return _integer_cell(cell, cell_label(row, column, label))
+        return _number(value, cell_label(row, column, label))
 
     plywood = []
     for label, thickness in zip(required, (18.0, 14.5, 5.4)):
         col = header_map[_normalized_label(label)]
-        quantity = summary_integer(total_row, col, label, detail_sum(col))
+        quantity = required_integer(total_row, col, label)
         plywood.append(MaterialItem("plywood", thickness, "", quantity))
 
     color_header_row = None
@@ -524,6 +585,20 @@ def parse_order_materials(order_id: str, path: Path) -> tuple[str, list[Material
     row_34 = _find_label_row(ws, "Sheets (3/4):")
     row_14 = _find_label_row(ws, "Sheets (1/4):")
     row_edge = _find_label_row(ws, "Edge Banding (m):")
+
+    missing_columns = [
+        label for label, column in (
+            ("3/4 Finish Panel", finish_34_col),
+            ("1/4 Finish Panel", finish_14_col),
+            ("Edge Banding (m)", edge_col),
+            ("Color", color_col),
+        ) if column is None
+    ]
+    if missing_columns:
+        raise RuleError(
+            "materials_schema",
+            "materials 文件缺少必须列：" + "、".join(missing_columns),
+        )
 
     # Panel and edge quantities are read from Color Table, but the detail
     # rows still have to be complete enough to explain that table. Empty
@@ -565,105 +640,95 @@ def parse_order_materials(order_id: str, path: Path) -> tuple[str, list[Material
         if color and _normalized_label(color) != "color:":
             colors.append((col, color))
 
+    if not colors:
+        raise RuleError(
+            "materials_schema",
+            "materials Color Table 未列出任何颜色；Panel 和封边数量必须从 Color Table 读取",
+        )
+    canonical_colors: dict[str, str] = {}
+    for _, source_color in colors:
+        canonical = _canonical_color(source_color).casefold()
+        previous = canonical_colors.get(canonical)
+        if previous is not None:
+            raise RuleError(
+                "materials_schema",
+                f"Color Table 存在重复颜色：{previous} 与 {source_color} 会映射为同一个颜色",
+            )
+        canonical_colors[canonical] = source_color
+
     panels: list[MaterialItem] = []
     edges: dict[str, float] = {}
-    if colors:
-        color_table_34_total = 0.0
-        color_table_14_total = 0.0
-        color_table_edge_total = 0.0
-        for col, source_color in colors:
-            color = _canonical_color(source_color)
-            qty_34 = summary_integer(
-                row_34,
-                col,
-                f"{source_color} Sheets (3/4)",
-                color_integer_fallback(6, source_color),
-            )
-            qty_14 = summary_integer(
-                row_14,
-                col,
-                f"{source_color} Sheets (1/4)",
-                color_integer_fallback(7, source_color),
-            )
-            edge = summary_number(row_edge, col, f"{source_color} Edge Banding", detail_sum(8, source_color))
-            color_table_34_total += qty_34
-            color_table_14_total += qty_14
-            color_table_edge_total += edge
-            if qty_34:
-                panels.append(MaterialItem("panel", 19.1, color, qty_34))
-            if qty_14:
-                panels.append(MaterialItem("panel", 8.0, color, qty_14))
-            if qty_34 or qty_14 or edge:
-                if (qty_34 or qty_14) and edge <= 0:
-                    raise RuleError("missing_edge", f"{source_color} 有 Panel 数量，但封边条为空或为 0")
-                if edge > 0:
-                    edges[color] = edge
-
-        summary_mismatches = []
-        if finish_34_col:
-            total_34 = summary_integer(
-                total_row,
-                finish_34_col,
-                "Total Qty 3/4 Finish Panel",
-                detail_sum(finish_34_col),
-            )
-            if not math.isclose(total_34, color_table_34_total, abs_tol=EPSILON):
-                summary_mismatches.append(
-                    f"3/4 Finish Panel：Total Qty={_fmt(total_34)}，Color Table={_fmt(color_table_34_total)}"
-                )
-        if finish_14_col:
-            total_14 = summary_integer(
-                total_row,
-                finish_14_col,
-                "Total Qty 1/4 Finish Panel",
-                detail_sum(finish_14_col),
-            )
-            if not math.isclose(total_14, color_table_14_total, abs_tol=EPSILON):
-                summary_mismatches.append(
-                    f"1/4 Finish Panel：Total Qty={_fmt(total_14)}，Color Table={_fmt(color_table_14_total)}"
-                )
-        if edge_col:
-            total_edge = summary_number(
-                total_row,
-                edge_col,
-                "Total Qty Edge Banding",
-                detail_sum(edge_col),
-            )
-            if not math.isclose(total_edge, color_table_edge_total, abs_tol=EPSILON):
-                summary_mismatches.append(
-                    f"Edge Banding：Total Qty={_fmt(total_edge)}，Color Table={_fmt(color_table_edge_total)}"
-                )
-        if summary_mismatches:
-            raise RuleError(
-                "material_summary_mismatch",
-                "Total Qty 与 Color Table 合计不一致："
-                f"{'；'.join(summary_mismatches)}；请手工检查后再写入订单材料",
-            )
-    else:
-        finish_34 = finish_34_col
-        finish_14 = finish_14_col
-        if not all((finish_34, finish_14, edge_col, color_col)):
-            raise RuleError("materials_schema", "单颜色 materials 缺少 Panel、封边或 Color 列")
-        source_color = _text(ws.cell(total_row, color_col).value)
-        qty_34 = _integer_cell(ws.cell(total_row, finish_34), "Sheets (3/4)")
-        qty_14 = _integer_cell(ws.cell(total_row, finish_14), "Sheets (1/4)")
-        edge = summary_number(
-            total_row,
-            edge_col,
-            "Edge Banding",
-            detail_sum(edge_col, source_color),
+    color_table_34_total = 0.0
+    color_table_14_total = 0.0
+    color_table_edge_total = 0.0
+    for col, source_color in colors:
+        color = _canonical_color(source_color)
+        qty_34 = required_color_table_integer(
+            row_34, col, f"{source_color} Sheets (3/4)", source_color
         )
+        qty_14 = required_color_table_integer(
+            row_14, col, f"{source_color} Sheets (1/4)", source_color
+        )
+        edge = required_color_table_number(
+            row_edge, col, f"{source_color} Edge Banding", source_color
+        )
+        color_table_34_total += qty_34
+        color_table_14_total += qty_14
+        color_table_edge_total += edge
+        if qty_34:
+            panels.append(MaterialItem("panel", 19.1, color, qty_34))
+        if qty_14:
+            panels.append(MaterialItem("panel", 8.0, color, qty_14))
         if qty_34 or qty_14 or edge:
-            if not source_color:
-                raise RuleError("materials_schema", "单颜色 materials 有 Panel 或封边数量，但 Total Qty 行缺少 Color")
             if (qty_34 or qty_14) and edge <= 0:
                 raise RuleError("missing_edge", f"{source_color} 有 Panel 数量，但封边条为空或为 0")
-            color = _canonical_color(source_color)
-            if qty_34:
-                panels.append(MaterialItem("panel", 19.1, color, qty_34))
-            if qty_14:
-                panels.append(MaterialItem("panel", 8.0, color, qty_14))
-            edges[color] = edge
+            if edge > 0:
+                edges[color] = edge
+
+    summary_mismatches = []
+    total_34 = optional_total_number(
+        total_row, finish_34_col, "Total Qty 3/4 Finish Panel", integer=True
+    )
+    if total_34 is not None and not math.isclose(total_34, color_table_34_total, abs_tol=EPSILON):
+        summary_mismatches.append(
+            f"3/4 Finish Panel：Total Qty={_fmt(total_34)}，Color Table={_fmt(color_table_34_total)}"
+        )
+    total_14 = optional_total_number(
+        total_row, finish_14_col, "Total Qty 1/4 Finish Panel", integer=True
+    )
+    if total_14 is not None and not math.isclose(total_14, color_table_14_total, abs_tol=EPSILON):
+        summary_mismatches.append(
+            f"1/4 Finish Panel：Total Qty={_fmt(total_14)}，Color Table={_fmt(color_table_14_total)}"
+        )
+    total_edge = optional_total_number(
+        total_row, edge_col, "Total Qty Edge Banding", integer=False
+    )
+    if total_edge is not None and not math.isclose(total_edge, color_table_edge_total, abs_tol=EPSILON):
+        summary_mismatches.append(
+            f"Edge Banding：Total Qty={_fmt(total_edge)}，Color Table={_fmt(color_table_edge_total)}"
+        )
+    detail_mismatches = []
+    for _, source_color in colors:
+        if not math.isclose(detail_sum(finish_34_col, source_color), sum(
+            item.quantity for item in panels
+            if item.kind == "panel" and item.thickness == 19.1
+            and item.color == _canonical_color(source_color)
+        ), abs_tol=EPSILON):
+            detail_mismatches.append(f"{source_color} 3/4 Finish Panel 明细与 Color Table 不一致")
+        if not math.isclose(detail_sum(finish_14_col, source_color), sum(
+            item.quantity for item in panels
+            if item.kind == "panel" and item.thickness == 8.0
+            and item.color == _canonical_color(source_color)
+        ), abs_tol=EPSILON):
+            detail_mismatches.append(f"{source_color} 1/4 Finish Panel 明细与 Color Table 不一致")
+    if detail_mismatches:
+        summary_mismatches.extend(detail_mismatches)
+    if summary_mismatches:
+        raise RuleError(
+            "material_summary_mismatch",
+            "Total Qty、明细与 Color Table 合计不一致："
+            f"{'；'.join(summary_mismatches)}；请手工检查后再写入订单材料",
+        )
     return wb.sheetnames[0], plywood + panels, edges
 
 
@@ -1639,31 +1704,10 @@ def preview_order(
             )
     else:
         materials_path = materials_files[0]
-    repair_warnings = []
-    for materials_file in materials_files:
-        repair = repair_material_color_table(materials_file)
-        if repair.get("corrected"):
-            # This is an intentional App write to the source workbook.
-            from .order_index import OrderIndexStore, _record_generated_material_baseline
-
-            baseline_store = OrderIndexStore(
-                config.workflow_database, connection=config.workflow_connection
-            )
-            try:
-                _record_generated_material_baseline(
-                    baseline_store,
-                    folder,
-                    materials_file,
-                    order_id=order_id,
-                )
-                baseline_store.commit()
-            finally:
-                baseline_store.close()
-            repair_warnings.append(repair["message"])
     sheet_name, materials, edges, room_rows, duplicate_warnings = _aggregate_material_sources(order_id, materials_files)
     color_table_materials = list(materials)
     color_table_edges = dict(edges)
-    warnings = repair_warnings + list(duplicate_warnings)
+    warnings = list(duplicate_warnings)
     selected_materials = list(materials)
     selected_edges = dict(edges)
     selected_room_rows = list(room_rows)

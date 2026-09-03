@@ -634,6 +634,7 @@ struct PendingCenterItem: Identifiable {
     let serverGroup: ServerFolderChangeGroup?
     let issues: [CurrentIssue]
     let aimesReviews: [AimesReviewItem]
+    let aimesFormatWarnings: [AimesReviewItem]
 }
 
 func serverFolderChangeGroups(_ changes: [ServerChangePreview]) -> [ServerFolderChangeGroup] {
@@ -658,7 +659,8 @@ func serverFolderChangeGroups(_ changes: [ServerChangePreview]) -> [ServerFolder
 func buildPendingCenterItems(
     serverChanges: [ServerChangePreview],
     currentIssues: [CurrentIssue],
-    aimesReviews: [AimesReviewItem]
+    aimesReviews: [AimesReviewItem],
+    aimesFormatWarnings: [AimesReviewItem] = []
 ) -> [PendingCenterItem] {
     let groups = serverFolderChangeGroups(serverChanges)
     var attachedIssueIDs = Set<String>()
@@ -682,17 +684,22 @@ func buildPendingCenterItems(
             attachedAimesIDs.insert(item.id)
             return true
         }
+        let formatWarnings = aimesFormatWarnings.filter { item in
+            guard !item.factoryOrder.isEmpty, factoryOrders.contains(item.factoryOrder) else { return false }
+            attachedAimesIDs.insert(item.id)
+            return true
+        }
         let status: String
-        if !reviews.isEmpty || issues.contains(where: { $0.kind == "factory_ownership" || $0.kind == "server_missing_report" }) {
+        if !reviews.isEmpty || !formatWarnings.isEmpty || issues.contains(where: { $0.kind == "factory_ownership" || $0.kind == "server_missing_report" }) {
             status = "需人工确认"
         } else if issues.contains(where: { $0.kind == "temporary_processing" && $0.message.contains("未映射材料") }) {
             status = "需人工处理"
         } else if !issues.isEmpty {
             status = "处理失败"
         } else {
-            status = "待扫描处理"
+            status = "待处理"
         }
-        let source = reviews.isEmpty ? "Server" : "Server · AIMES"
+        let source = reviews.isEmpty && formatWarnings.isEmpty ? "Server" : "Server · AIMES"
         result.append(PendingCenterItem(
             id: "folder:\(group.folderPath)",
             title: group.orderId.isEmpty ? group.folderName : group.orderId,
@@ -703,7 +710,8 @@ func buildPendingCenterItems(
             orderId: group.orderId,
             serverGroup: group,
             issues: issues,
-            aimesReviews: reviews
+            aimesReviews: reviews,
+            aimesFormatWarnings: formatWarnings
         ))
     }
 
@@ -720,7 +728,8 @@ func buildPendingCenterItems(
             orderId: issue.orderId,
             serverGroup: nil,
             issues: [issue],
-            aimesReviews: []
+            aimesReviews: [],
+            aimesFormatWarnings: []
         ))
     }
 
@@ -735,7 +744,24 @@ func buildPendingCenterItems(
             orderId: item.suggestedOrderID,
             serverGroup: nil,
             issues: [],
-            aimesReviews: [item]
+            aimesReviews: [item],
+            aimesFormatWarnings: []
+        ))
+    }
+
+    for item in aimesFormatWarnings where !attachedAimesIDs.contains(item.id) {
+        result.append(PendingCenterItem(
+            id: "aimes-warning:\(item.id)",
+            title: item.factoryOrder.isEmpty ? "AIMES 销售单格式异常" : item.factoryOrder,
+            subtitle: "AIMES · 销售单格式异常",
+            status: "需人工确认",
+            folderPath: "",
+            folderName: "",
+            orderId: item.suggestedOrderID,
+            serverGroup: nil,
+            issues: [],
+            aimesReviews: [],
+            aimesFormatWarnings: [item]
         ))
     }
 
@@ -870,15 +896,25 @@ func serverChangesExcludingFolder(
     _ changes: [ServerChangePreview],
     folderPath: String
 ) -> [ServerChangePreview] {
-    let prefix = folderPath.hasSuffix("/") ? folderPath : folderPath + "/"
+    return serverChangesExcludingFolders(changes, folderPaths: [folderPath])
+}
+
+func serverChangesExcludingFolders(
+    _ changes: [ServerChangePreview],
+    folderPaths: [String]
+) -> [ServerChangePreview] {
+    let folders = folderPaths.filter { !$0.isEmpty }
     return changes.filter { change in
         let sourceFolder = change.sourceFolder.isEmpty
             ? URL(fileURLWithPath: change.path).deletingLastPathComponent().path
             : change.sourceFolder
-        return sourceFolder != folderPath
-            && !sourceFolder.hasPrefix(prefix)
-            && change.path != folderPath
-            && !change.path.hasPrefix(prefix)
+        return !folders.contains { folderPath in
+            let prefix = folderPath.hasSuffix("/") ? folderPath : folderPath + "/"
+            return sourceFolder == folderPath
+                || sourceFolder.hasPrefix(prefix)
+                || change.path == folderPath
+                || change.path.hasPrefix(prefix)
+        }
     }
 }
 
@@ -1519,7 +1555,12 @@ final class AppModel: ObservableObject {
     @Published var inventoryMappingTargetNames: [String] = []
     @Published var productionMaterials: [ProductionMaterialDraft] = []
     @Published var productionPreviewStatus = ""
+    private enum PendingMappingResumeAction {
+        case rereadSourceThenPresentReadOnlyPreview
+    }
+
     private var pendingInventoryMappingFolder = ""
+    private var pendingMappingResumeAction: PendingMappingResumeAction?
     private var pendingDashboardOutboundRefresh = false
     @Published var orderFolders: [OrderFolderItem] = []
     @Published var dashboardOrders: [OrderDashboardItem] = []
@@ -1568,7 +1609,6 @@ final class AppModel: ObservableObject {
     @Published var aimesFormatWarnings: [AimesReviewItem] = []
     @Published var aimesWarnings: [[String: Any]] = []
     @Published var selectedAimesReviewIDs: Set<String> = []
-    @Published var showAimesReviewPrompt = false
     @Published var orderSourceKind = "owned"
     @Published var selectedOrderPath = ""
     @Published var selectedOrderId = ""
@@ -1617,8 +1657,13 @@ final class AppModel: ObservableObject {
         buildPendingCenterItems(
             serverChanges: pendingServerChanges,
             currentIssues: currentIssues,
-            aimesReviews: pendingAimesReviews
+            aimesReviews: pendingAimesReviews,
+            aimesFormatWarnings: aimesFormatWarnings
         )
+    }
+
+    var hasAimesHistory: Bool {
+        !ignoredAimesFactories.isEmpty || !assignedAimesFactories.isEmpty
     }
 
     var orderPreviewReady: Bool {
@@ -2173,20 +2218,20 @@ final class AppModel: ObservableObject {
         assignedAimesFactories = aimesReviewItems(object, key: "assigned_aimes")
         aimesWarnings = object["aimes_warnings"] as? [[String: Any]] ?? []
         aimesFormatWarnings = aimesReviewItemsFromWarnings(aimesWarnings)
-        selectedAimesReviewIDs.formIntersection(Set(pendingAimesReviews.map(\.id)))
-        if presentIfNeeded && pendingAimesReviews.isEmpty && !aimesFormatWarnings.isEmpty {
-            showAimesReviewPrompt = true
-        }
+        selectedAimesReviewIDs.formIntersection(
+            Set((pendingAimesReviews + aimesFormatWarnings).map(\.id))
+        )
         if shouldPresentPendingCenterAfterAimes(
             presentIfNeeded: presentIfNeeded,
-            pendingAimesReviews: pendingAimesReviews
+            pendingAimesReviews: pendingAimesReviews,
+            aimesFormatWarnings: aimesFormatWarnings
         ) {
             showPendingCenterPrompt = true
         }
     }
 
     private func closePendingCenterIfEmpty() {
-        if pendingCenterItems.isEmpty {
+        if pendingCenterItems.isEmpty && !hasAimesHistory {
             showPendingCenterPrompt = false
         }
     }
@@ -2449,13 +2494,14 @@ final class AppModel: ObservableObject {
         if selectedAimesReviewIDs.contains(item.id) {
             selectedAimesReviewIDs.remove(item.id)
         } else {
-            selectedAimesReviewIDs.insert(item.id)
+            selectedAimesReviewIDs = [item.id]
+            selectedServerFolderPaths.removeAll()
         }
     }
 
     func ignoreSelectedAimesFactories() {
         logUserAction("点击忽略选中的 AIMES 工厂单")
-        let keys = pendingAimesReviews
+        let keys = (pendingAimesReviews + aimesFormatWarnings)
             .filter { selectedAimesReviewIDs.contains($0.id) }
             .map(\.ignoreKey)
         guard !keys.isEmpty else { return }
@@ -2528,7 +2574,6 @@ final class AppModel: ObservableObject {
             self.finishDashboardOperation("aimes")
             self.applyDashboardObject(object)
             self.applyAimesReviewObject(object, presentIfNeeded: false)
-            self.showAimesReviewPrompt = false
             self.dashboardAimesStatus = trimmedOrderID == item.suggestedOrderID
                 ? "✅ 已将 \(item.factoryOrder) 按建议归入 \(trimmedOrderID)"
                 : "✅ 已将 \(item.factoryOrder) 手工归入 \(trimmedOrderID)"
@@ -2600,17 +2645,9 @@ final class AppModel: ObservableObject {
         if selectedServerFolderPaths.contains(folderPath) {
             selectedServerFolderPaths.remove(folderPath)
         } else {
-            selectedServerFolderPaths.insert(folderPath)
+            selectedServerFolderPaths = [folderPath]
+            selectedAimesReviewIDs.removeAll()
         }
-    }
-
-    func selectAllServerFolders() {
-        logUserAction("点击全选 Server 文件夹")
-        selectedServerFolderPaths = Set(
-            serverFolderChangeGroups(pendingServerChanges)
-                .filter { !$0.requiresManualReview }
-                .map(\.folderPath)
-        )
     }
 
     func clearServerFolderSelection() {
@@ -2723,7 +2760,7 @@ final class AppModel: ObservableObject {
             self.dashboardServerStatus = "✅ 已确认写入 \(trimmedOrder) / \(trimmedFactory)"
             self.dashboardSyncStatus = self.dashboardServerStatus
             if self.serverWritePreview == nil {
-                self.refreshDashboardAfterServerWrite()
+                self.refreshDashboardAfterServerWrite(processedFolders: preview.sourceFolders)
             }
             _ = object
         }
@@ -2793,11 +2830,11 @@ final class AppModel: ObservableObject {
                 ),
                 at: 0
             )
-            self.refreshDashboardAfterServerWrite()
+            self.refreshDashboardAfterServerWrite(processedFolders: preview.sourceFolders)
         }
     }
 
-    func refreshDashboardAfterServerWrite() {
+    func refreshDashboardAfterServerWrite(processedFolders: [String]) {
         guard !orderRunning else { return }
         beginDashboardOperation("sync", label: "刷新 Server 写入后的订单列表")
         dashboardSyncStatus = "正在刷新 Server 写入后的订单列表…"
@@ -2807,7 +2844,16 @@ final class AppModel: ObservableObject {
         }) { object in
             self.finishDashboardOperation("sync")
             self.applyDashboardObject(object, includeChanges: false)
-            self.dashboardSyncStatus = "✅ 订单列表已刷新；待处理中心将在下次手动扫描时更新"
+            self.pendingServerChanges = serverChangesExcludingFolders(
+                self.pendingServerChanges,
+                folderPaths: processedFolders
+            )
+            self.selectedServerFolderPaths.subtract(processedFolders)
+            self.closePendingCenterIfEmpty()
+            let pendingCount = self.pendingCenterItems.count
+            self.dashboardSyncStatus = pendingCount == 0
+                ? "✅ 订单中心、助手和待处理中心已刷新"
+                : "✅ 订单中心、助手和待处理中心已刷新；仍有 \(pendingCount) 项待处理"
         }
     }
 
@@ -2940,6 +2986,7 @@ final class AppModel: ObservableObject {
         // the order folder so sync-index refreshes both the order status and
         // the active-issue list.
         pendingInventoryMappingFolder = inventoryMappingSourceFolderPath(trimmed)
+        pendingMappingResumeAction = .rereadSourceThenPresentReadOnlyPreview
         inventoryMappingRequestPath = trimmed
         inventoryMappingTargetNames = inventoryMappingNames(from: message)
         showInventoryMappingWorkspace = true
@@ -2948,6 +2995,7 @@ final class AppModel: ObservableObject {
     func closeInventoryMappingWorkspace() {
         showInventoryMappingWorkspace = false
         pendingInventoryMappingFolder = ""
+        pendingMappingResumeAction = nil
         inventoryMappingRequestPath = ""
         inventoryMappingTargetNames = []
     }
@@ -2973,6 +3021,7 @@ final class AppModel: ObservableObject {
         beginDashboardOperation("server", label: "重新读取订单文件")
         runOrder(["process-server-folder", "--folder", path, "--include-hardware", "true"], failureStatus: "重新读取订单文件失败", onFailure: {
             self.finishDashboardOperation("server")
+            self.pendingMappingResumeAction = nil
             self.dashboardSyncStatus = "⚠️ \(businessFriendlyMessage(self.orderError, operation: "重新读取订单文件"))"
         }) { object in
             self.finishDashboardOperation("server")
@@ -2986,6 +3035,7 @@ final class AppModel: ObservableObject {
         dashboardSyncStatus = "正在刷新订单列表…"
         runOrder(["list-index"], failureStatus: "订单列表刷新失败", onFailure: {
             self.finishDashboardOperation("sync")
+            self.pendingMappingResumeAction = nil
             self.dashboardSyncStatus = "⚠️ \(businessFriendlyMessage(self.orderError, operation: "刷新订单列表"))"
         }) { object in
             self.finishDashboardOperation("sync")
@@ -2994,7 +3044,19 @@ final class AppModel: ObservableObject {
             self.dashboardSyncStatus = self.pendingCenterItems.isEmpty
                 ? "✅ 已重新读取订单文件并刷新订单列表"
                 : "✅ 订单列表已刷新；待处理中心仍有项目需要处理"
+            if case .rereadSourceThenPresentReadOnlyPreview = self.pendingMappingResumeAction {
+                self.pendingMappingResumeAction = nil
+                self.inventoryStatus = "来源文件已重新读取，可进行只读预览"
+                if !self.pendingCenterItems.isEmpty {
+                    self.showPendingCenterPrompt = true
+                }
+            }
         }
+    }
+
+    private func resumePendingMappingOperationAfterMapping() {
+        guard pendingMappingResumeAction != nil else { return }
+        rereadPendingSourceFolder()
     }
 
     func activatePendingInventoryMapping() {
@@ -3849,14 +3911,16 @@ final class AppModel: ObservableObject {
         runInventory([
             "set-mapping", nameArgument, travelerName,
             "--product-code", productCode,
-        ]) { object in
+        ], onFailure: { _ in
+            self.pendingMappingResumeAction = nil
+            self.pendingInventoryMappingFolder = ""
+        }) { object in
             let product = object["product"] as? [String: Any] ?? [:]
             let name = product["name"] as? String ?? productCode
             self.finishRunningInventoryStep("已映射到 \(productCode) \(name)", "success")
             self.inventoryStatus = "映射已保存，正在重新预检"
             self.inventoryMappingTargetNames.removeAll { $0.caseInsensitiveCompare(travelerName) == .orderedSame }
-            self.previewSelectedInventory()
-            self.rereadPendingSourceFolder()
+            self.resumePendingMappingOperationAfterMapping()
         }
     }
 
@@ -5001,14 +5065,43 @@ enum AppLayout {
     static let todoTableHeaderFontSize: CGFloat = 17
     static let todoTableBodyFontSize: CGFloat = 16
     static let materialNameFontSize: CGFloat = 18
-    // Match the current production workspace size; keep a safe minimum so the
-    // leading icon, navigation, and action controls never get clipped.
-    static let windowMinWidth: CGFloat = 1180
-    static let windowMinHeight: CGFloat = 760
-    // Match the current PP FlowHub workspace size shown in the approved UI.
-    static let windowIdealWidth: CGFloat = 1223
+    // Keep the primary workspace at the approved screenshot size.
+    static let windowMinWidth: CGFloat = 1120
+    static let windowMinHeight: CGFloat = 768
+    static let windowIdealWidth: CGFloat = 1120
     static let windowIdealHeight: CGFloat = 768
     static let inventoryOrderContextWidth: CGFloat = 735
+}
+
+private struct FixedWindowSizeController: NSViewRepresentable {
+    let size: CGSize
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            applyFixedSize(to: view.window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            applyFixedSize(to: nsView.window)
+        }
+    }
+
+    private func applyFixedSize(to window: NSWindow?) {
+        guard let window else { return }
+        let fixedFrame = NSRect(origin: window.frame.origin, size: size)
+        window.styleMask.remove([.resizable, .fullScreen])
+        window.standardWindowButton(.zoomButton)?.isHidden = true
+        window.standardWindowButton(.zoomButton)?.isEnabled = false
+        window.minSize = fixedFrame.size
+        window.maxSize = fixedFrame.size
+        if window.frame.size != fixedFrame.size {
+            window.setFrame(fixedFrame, display: true)
+        }
+    }
 }
 
 func inventoryActionColumnCount(availableWidth: CGFloat) -> Int {
@@ -7782,7 +7875,7 @@ struct TopNavigationBar: View {
 
             Spacer(minLength: 12)
             contextualStatus
-            if selection == .orders && !model.pendingCenterItems.isEmpty {
+            if selection == .orders && (!model.pendingCenterItems.isEmpty || model.hasAimesHistory) {
                 Button {
                     model.showPendingCenterPrompt = true
                 } label: {
@@ -7793,8 +7886,12 @@ struct TopNavigationBar: View {
                         .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("有 \(model.pendingCenterItems.count) 个待处理项目")
-                .help("打开待处理中心，查看 Server 文件夹和需要人工确认的问题")
+                .accessibilityLabel(
+                    model.pendingCenterItems.isEmpty
+                        ? "查看待处理中心和历史 AIMES 记录"
+                        : "有 \(model.pendingCenterItems.count) 个待处理项目"
+                )
+                .help("打开待处理中心，查看待处理项目和历史 AIMES 记录")
             }
             Button { showDesignNotes = true } label: {
                 Image(systemName: "info.circle")
@@ -7836,10 +7933,6 @@ struct TopNavigationBar: View {
         .sheet(isPresented: $model.showInventoryMappingWorkspace) {
             PendingInventoryMappingWorkspace(model: model)
                 .frame(minWidth: 620, minHeight: 420)
-        }
-        .sheet(isPresented: $model.showAimesReviewPrompt) {
-            AimesReviewSheet(model: model)
-                .frame(minWidth: 900, minHeight: 620)
         }
     }
 
@@ -7923,6 +8016,14 @@ struct TravelerAssistantApp: App {
             // otherwise macOS dark mode produces white text on these white cards.
             .preferredColorScheme(AppPalette.interfaceColorScheme)
             .background(LiquidGlassPreviewBackdrop())
+            .background(
+                FixedWindowSizeController(
+                    size: CGSize(
+                        width: AppLayout.windowIdealWidth,
+                        height: AppLayout.windowIdealHeight
+                    )
+                )
+            )
             .frame(
                 minWidth: AppLayout.windowMinWidth,
                 idealWidth: AppLayout.windowIdealWidth,
@@ -7944,6 +8045,7 @@ struct TravelerAssistantApp: App {
             }
         }
         .defaultSize(width: AppLayout.windowIdealWidth, height: AppLayout.windowIdealHeight)
+        .windowResizability(.contentSize)
         .commands { CommandGroup(replacing: .newItem) {} }
     }
 }

@@ -174,6 +174,15 @@ try {
     const rows = [];
     const missing = [];
     const verificationStartedAt = performance.now();
+    const verificationHeaderRows = page.locator("thead tr");
+    let verificationHeaders = [];
+    for (let index = 0; index < await verificationHeaderRows.count(); index += 1) {
+      const candidate = (await verificationHeaderRows.nth(index).locator("th").allTextContents()).map(value => value.trim());
+      if (candidate.length > verificationHeaders.length) verificationHeaders = candidate;
+    }
+    const verificationSplitTimeColumn = verificationHeaders.findIndex(
+      header => header === "拆单时间" || header.includes("拆单时间"),
+    );
     const recentFactoryOrders = new Set(
       (output.recent_rows || []).map(row => String(row.factory_order || "").toUpperCase()),
     );
@@ -214,7 +223,9 @@ try {
         factory_order: factoryOrder.toUpperCase(),
         factory_name: values[index + 1],
         sales_order_name: values.find((value, column) => column !== index && /^\s*(PP\d{4}(?:-\d+)?|CS\d{3})\s*$/i.test(value)) || "",
-        split_time: "",
+        split_time: verificationSplitTimeColumn >= 0
+          ? values[verificationSplitTimeColumn]?.trim() || ""
+          : "",
       });
     }
     recordStage("factory_order_verify", "精确核验工厂单存在性", verificationStartedAt);
