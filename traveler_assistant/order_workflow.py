@@ -49,6 +49,7 @@ from .inventory import (
 )
 from .fittings import is_fittings_report, select_latest_fittings
 from .report_read_context import cached_report, report_paths
+from .hardware_source_decisions import with_source_decisions
 from .operation_log import configure_operation_log
 from .database import ensure_schema
 
@@ -1675,6 +1676,7 @@ def _select_room_materials(
     return materials, dict(edges), warnings
 
 
+@with_source_decisions
 def preview_order(
     config: Config,
     folder: Path,

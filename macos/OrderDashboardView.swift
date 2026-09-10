@@ -4179,8 +4179,8 @@ struct HardwareSourceSelectionSheet: View {
     @ObservedObject var model: AppModel
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("选择工厂单五金来源").font(.title2.bold())
-            Text("同一工厂单的报表内容不同。请为每张工厂单选择一份完整报表；选择后重新预览，尚不写入数据库。")
+            Text("确认工厂单五金来源").font(.title2.bold())
+            Text("首次选择确认写入后，来源固定。以后只有报表内容变化时，才可选择保留已确认五金或更新；当前仍是预览。")
                 .foregroundStyle(.secondary)
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
@@ -4193,7 +4193,10 @@ struct HardwareSourceSelectionSheet: View {
                                 } label: {
                                     HStack(alignment: .top) {
                                         Image(systemName: model.hardwareSourceChoices[conflict.id] == candidate.id ? "largecircle.fill.circle" : "circle")
-                                        Text(candidate.path).multilineTextAlignment(.leading).textSelection(.enabled)
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(candidate.label).fontWeight(.semibold)
+                                            Text(candidate.path).multilineTextAlignment(.leading).textSelection(.enabled)
+                                        }
                                     }
                                 }.buttonStyle(.plain)
                                 ForEach(Array(candidate.items.enumerated()), id: \.offset) { _, item in

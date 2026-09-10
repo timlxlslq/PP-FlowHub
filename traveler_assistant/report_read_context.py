@@ -15,7 +15,12 @@ import inspect
 
 @dataclass
 class ReportReadContext:
+    reuse_reports: bool = True
     choices: dict = field(default_factory=dict)
+    locked_decisions: dict = field(default_factory=dict)
+    decision_proposals: dict = field(default_factory=dict)
+    keep_factories: set = field(default_factory=set)
+    decisions_prepared: bool = False
     source_conflicts: dict = field(default_factory=dict)
     resolved_sources: dict = field(default_factory=dict)
     resolved_paths: dict = field(default_factory=dict)
@@ -58,7 +63,7 @@ def preview_read_session(function):
 def report_paths(folder: Path):
     context = _current.get()
     key = str(folder)
-    if context is None:
+    if context is None or not context.reuse_reports:
         return list(folder.rglob('*.xlsx'))
     if key not in context.directories:
         context.directories[key] = list(folder.rglob('*.xlsx'))
@@ -70,7 +75,7 @@ def cached_report(function):
     @wraps(function)
     def read(*args, **kwargs):
         context = _current.get()
-        if context is None:
+        if context is None or not context.reuse_reports:
             return function(*args, **kwargs)
         bound = signature.bind(*args, **kwargs)
         bound.apply_defaults()

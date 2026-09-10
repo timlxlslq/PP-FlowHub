@@ -121,3 +121,58 @@ class ReportSelectionTests(unittest.TestCase):
             with self.assertRaises(RuleError) as error:
                 select_latest_fittings(paths)
             self.assertEqual(error.exception.code, 'fittings_selection_required')
+
+    def test_confirmed_source_is_fixed_until_content_changes_and_keep_survives_restart(self):
+        from tests.test_order_workflow import make_materials
+        from traveler_assistant.order_index import confirm_server_material_preview_memory
+        from traveler_assistant.hardware_source_decisions import load_source_decisions
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / 'state', source_root=root / 'source')
+            config.prepare_storage()
+            folder = config.source_root / 'PP9999'
+            folder.mkdir(parents=True)
+            make_materials(folder / 'PP9999 materials.xlsx')
+            a, b = folder / 'Fittingslist-a.xlsx', folder / 'Fittingslist-b.xlsx'
+            make_fittings(a, [('F100', 2)])
+            make_fittings(b, [('F100', 5)])
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_order('PP9999', source_folder=str(folder))
+            store.upsert_factory('F100', order_id='PP9999', factory_name='PP9999-KITCHEN', ownership_status='已确认')
+            store.commit(); store.close()
+            with patch('traveler_assistant.inventory.resolve_inventory_items', return_value={'missing': [], 'ignored': [], 'outbound': []}), patch('traveler_assistant.core._run_aimes_lookup', side_effect=AssertionError('unexpected network')):
+                conflict = preview_server_changes(config, [folder])['hardware_source_selection']['conflicts'][0]
+                option = next(c for c in conflict['candidates'] if c['path'] == str(a.resolve()))
+                payload = preview_server_changes(config, [folder], hardware_source_choices={'F100': option['id']})['server_write_preview']
+                self.assertEqual(load_source_decisions(config), {})
+                confirm_server_material_preview_memory(config, payload, confirm_write=True)
+                saved = load_source_decisions(config)['F100']
+                self.assertEqual(saved['selected']['path'], str(a.resolve()))
+                # Even an attempted choice of the other existing report cannot change it.
+                other = next(c for c in conflict['candidates'] if c['path'] == str(b.resolve()))
+                stable = preview_server_changes(config, [folder], hardware_source_choices={'F100': other['id']})
+                self.assertNotIn('hardware_source_selection', stable)
+                self.assertEqual(stable['server_write_preview']['hardware_keep_factories'], ['F100'])
+                make_fittings(b, [('F100', 7)])
+                changed = preview_server_changes(config, [folder])['hardware_source_selection']['conflicts'][0]
+                self.assertEqual(changed['mode'], 'update')
+                keep = next(c for c in changed['candidates'] if c['id'].startswith('keep:'))
+                kept = preview_server_changes(config, [folder], hardware_source_choices={'F100': keep['id']})['server_write_preview']
+                confirm_server_material_preview_memory(config, kept, confirm_write=True)
+                # New request/new Config stands in for an App restart.
+                reopened = Config(state_dir=config.state_dir, source_root=config.source_root)
+                self.assertNotIn('hardware_source_selection', preview_server_changes(reopened, [folder]))
+                connection = sqlite3.connect(config.workflow_database)
+                self.assertEqual(connection.execute("select quantity from hardware_items where factory_order='F100' and active=1 and source_type='aicnc'").fetchall(), [(2.0,)])
+                connection.close()
+                make_fittings(b, [('F100', 9)])
+                changed = preview_server_changes(config, [folder])['hardware_source_selection']['conflicts'][0]
+                update = next(c for c in changed['candidates'] if c['path'] == str(b.resolve()) and not c['id'].startswith('keep:'))
+                updated = preview_server_changes(config, [folder], hardware_source_choices={'F100': update['id']})['server_write_preview']
+                confirm_server_material_preview_memory(config, updated, confirm_write=True)
+                self.assertEqual(load_source_decisions(config)['F100']['selected']['path'], str(b.resolve()))
+                connection = sqlite3.connect(config.workflow_database)
+                self.assertEqual(connection.execute("select quantity from hardware_items where factory_order='F100' and active=1 and source_type='aicnc'").fetchall(), [(9.0,)])
+                connection.close()
+                with self.assertRaises(RuleError):
+                    confirm_server_material_preview_memory(config, payload, confirm_write=True)

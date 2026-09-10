@@ -40,6 +40,7 @@ from .core import (
 from .operation_log import log_database_statement
 from .fittings import is_fittings_report, select_latest_fittings, fittings_candidate
 from .report_read_context import report_paths, preview_read_session, current_report_context
+from .hardware_source_decisions import load_source_decisions, decision_revision, commit_source_decisions, with_source_decisions
 from .database import (
     collapse_actual_installation_days,
     ensure_outbound_document_factory_links,
@@ -6354,6 +6355,7 @@ def _preview_fittings_groups(path: Path, cache: dict | None = None) -> list:
     return groups
 
 
+@with_source_decisions
 def sync_order_index(
     config: Config,
     *,
@@ -7108,7 +7110,8 @@ def sync_order_index(
                             (factory_order, items)
                             for factory_order, items in groups
                             if (
-                                selected_fittings.get(factory_order.upper()) is not None
+                                not (current_report_context() and factory_order.upper() in current_report_context().keep_factories)
+                                and selected_fittings.get(factory_order.upper()) is not None
                                 and selected_fittings[factory_order.upper()].path.resolve() == path.resolve()
                             )
                         ]
@@ -8068,6 +8071,8 @@ def _refresh_server_preview_hardware(
             group_rows = []
             file_missing: list[dict] = []
             for factory_order, items in groups:
+                if current_report_context() and factory_order.upper() in current_report_context().keep_factories:
+                    continue
                 source = selected_reports.get(factory_order.upper())
                 if source is None or str(source.path) != path:
                     continue
@@ -8511,6 +8516,8 @@ def _server_preview_hardware_source_items(
         except Exception:
             continue
         for factory_order, items in groups:
+            if current_report_context() and factory_order.upper() in current_report_context().keep_factories:
+                continue
             source = selected_reports.get(factory_order.upper())
             if source is None or str(source.path) != path:
                 continue
@@ -8574,6 +8581,8 @@ def preview_server_changes(
     _server_folders_for_sync(config, None, selected_folders=normalized_folders)
     if not isinstance(hardware_source_choices or {}, dict):
         raise ValueError("五金来源选择必须是工厂单到报表的映射")
+    context = current_report_context()
+    context.locked_decisions = load_source_decisions(config)
     progress("正在读取五金报表并检查来源冲突")
     selected_sources = {}
     if include_hardware:
@@ -8593,6 +8602,7 @@ def preview_server_changes(
                     "conflicts": exc.context["conflicts"],
                 }}
             # Preserve existing detailed workbook validation/error presentation.
+    context.decisions_prepared = True
     finish_timing_stage("source_selection", "检查五金来源")
     memory = sqlite3.connect(":memory:")
     if config.workflow_database.is_file():
@@ -8663,6 +8673,9 @@ def preview_server_changes(
             preview_store=preview_store,
         ) | {
             "validation_recomputed": True,
+            "hardware_source_decisions": context.decision_proposals,
+            "hardware_source_decision_bases": {factory: decision_revision(value) for factory, value in context.locked_decisions.items()},
+            "hardware_keep_factories": sorted(context.keep_factories),
             "hardware_source_choices": hardware_source_choices or {},
             "hardware_source_selection": {
                 "source_folders": [str(folder) for folder in normalized_folders],
@@ -8839,6 +8852,12 @@ def _memory_factory_selection(payload: dict, order_id: str = "", factory_order: 
             continue
         if current_factory and current_order and (not wanted_factory or current_factory == wanted_factory):
             selected.add((current_factory, current_order))
+    for row in payload.get('write_records', {}).get('factory_orders', []):
+        factory = str(row.get('factory_order', '')).upper()
+        owner = str(row.get('order_id', '')).upper()
+        if factory in payload.get('hardware_source_decisions', {}) and owner:
+            if (not wanted_factory or factory == wanted_factory) and (not wanted_order or owner == wanted_order):
+                selected.add((factory, owner))
     return sorted(selected)
 
 
@@ -9054,6 +9073,8 @@ def _confirm_memory_preview(
     if (
         not _server_preview_has_business_changes(payload)
         and not payload.get("hardware_mapping_requirements")
+        and not any(decision_revision(value) != payload.get('hardware_source_decision_bases', {}).get(factory, '')
+                    for factory, value in payload.get('hardware_source_decisions', {}).items())
     ):
         baseline_folders = [
             Path(str(folder))
@@ -9128,6 +9149,7 @@ def _confirm_memory_preview(
     production = OrderIndexStore(config.workflow_database)
     try:
         production.connection.execute("begin")
+        commit_source_decisions(production.connection, payload, selected_factory_ids, skipped_orders)
         _insert_memory_records(production.connection, "orders", order_rows)
 
         material_paths_by_order: dict[str, set[str]] = defaultdict(set)
@@ -9148,7 +9170,7 @@ def _confirm_memory_preview(
             current_order = str(row.get("order_id", "")).strip().upper()
             _insert_memory_records(production.connection, "factory_orders", [row])
             preserve_confirmed_shipment(production.connection, current_factory)
-            if current_order in skipped_orders:
+            if current_order in skipped_orders or current_factory in payload.get('hardware_keep_factories', []):
                 continue
             replace_factory_hardware(
                 production.connection, current_factory,

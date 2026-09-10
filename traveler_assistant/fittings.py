@@ -98,6 +98,34 @@ def select_latest_fittings(
     for factory, matches in sorted(occurrences.items()):
         candidates = [fittings_candidate(source) for source in matches]
         requested = choices.get(factory)
+        locked = context.locked_decisions.get(factory) if context else None
+        if locked:
+            chosen_data = locked['selected']
+            observed = sorted({candidate['content_fingerprint'] for candidate in candidates})
+            keep_id = 'keep:' + hashlib.sha256(json.dumps([factory, observed], sort_keys=True).encode()).hexdigest()
+            if context.decisions_prepared:
+                proposal = context.decision_proposals.get(factory, locked)
+                chosen_data = proposal['selected']
+            elif observed != locked.get('observed_contents', []):
+                keep = dict(chosen_data, id=keep_id, label='保留已确认五金')
+                updates = [c for c in candidates if c['content_fingerprint'] not in locked.get('observed_contents', [])
+                           or (c['path'] == chosen_data['path'] and c['content_fingerprint'] != chosen_data['content_fingerprint'])]
+                selected_candidate = next((c for c in updates if c['id'] == requested), None)
+                if requested == keep_id or not updates:
+                    context.keep_factories.add(factory)
+                elif selected_candidate:
+                    chosen_data = selected_candidate
+                else:
+                    conflicts.append({'factory_order': factory, 'mode': 'update',
+                                      'candidates': [keep] + [dict(c, label='更新为此报表') for c in updates]})
+                    continue
+                context.decision_proposals[factory] = {'selected': chosen_data, 'observed_contents': observed}
+            else:
+                # A stable set of report contents never reopens source selection.
+                context.keep_factories.add(factory)
+                context.decision_proposals[factory] = locked
+            selected[factory] = selected_from_candidate(chosen_data)
+            continue
         resolved = context.resolved_sources.get(factory) if context else None
         # A folder-local pass cannot replace the choice resolved from the full
         # request's candidate set with another report for the same factory.
@@ -113,6 +141,11 @@ def select_latest_fittings(
             continue
         selected[factory] = chosen or matches[0]
         if context is not None:
+            if not context.decisions_prepared:
+                context.decision_proposals[factory] = {
+                    'selected': fittings_candidate(selected[factory]),
+                    'observed_contents': sorted({candidate['content_fingerprint'] for candidate in candidates}),
+                }
             context.resolved_sources[factory] = fittings_candidate(selected[factory])["id"]
             context.resolved_paths[factory] = str(selected[factory].path.resolve())
         if different:
@@ -130,8 +163,16 @@ def fittings_candidate(source: SelectedFittings) -> dict:
     identity = json.dumps([str(source.path.resolve()), source.signature], ensure_ascii=False)
     return {
         "id": hashlib.sha256(identity.encode()).hexdigest(),
+        "content_fingerprint": hashlib.sha256(json.dumps(source.signature, ensure_ascii=False).encode()).hexdigest(),
         "path": str(source.path.resolve()),
         "modified_at": source.modified_at,
         "items": [dict(name=item.name, code=item.code, spec=item.size,
                        unit=item.unit, quantity=item.quantity) for item in source.items],
     }
+
+
+def selected_from_candidate(candidate):
+    items = tuple(FittingItem(name=row['name'], code=row.get('code', ''), size=row.get('spec', ''),
+                              unit=row.get('unit', ''), quantity=float(row['quantity']))
+                  for row in candidate['items'])
+    return SelectedFittings(Path(candidate['path']), candidate.get('modified_at', 0), items, fitting_signature(items))

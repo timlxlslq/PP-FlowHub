@@ -454,33 +454,6 @@ struct ServerWriteHardwareChange: Identifiable {
     }
 }
 
-struct HardwareSourceCandidate: Identifiable {
-    let id: String
-    let path: String
-    let label: String
-    let items: [String]
-    init?(_ value: [String: Any]) {
-        guard let id = value["id"] as? String, let path = value["path"] as? String else { return nil }
-        self.id = id
-        self.path = path
-        self.label = value["label"] as? String ?? "选择此报表"
-        self.items = (value["items"] as? [[String: Any]] ?? []).map {
-            let quantity = ($0["quantity"] as? NSNumber)?.stringValue ?? ""
-            return "\($0["name"] as? String ?? "") · \($0["code"] as? String ?? "") · \($0["spec"] as? String ?? "")：\(quantity) \($0["unit"] as? String ?? "")"
-        }
-    }
-}
-
-struct HardwareSourceConflict: Identifiable {
-    let id: String
-    let candidates: [HardwareSourceCandidate]
-    init?(_ value: [String: Any]) {
-        guard let factory = value["factory_order"] as? String else { return nil }
-        id = factory
-        candidates = (value["candidates"] as? [[String: Any]] ?? []).compactMap(HardwareSourceCandidate.init)
-    }
-}
-
 struct ServerHardwareMappingRequirement: Identifiable {
     let id: String
     let name: String
@@ -718,8 +691,8 @@ func buildPendingCenterItems(
         }
         let status: String
         if !reviews.isEmpty || !formatWarnings.isEmpty || issues.contains(where: { $0.kind == "factory_ownership" || $0.kind == "server_missing_report" }) {
-            status = "待人工确认"
-        } else if issues.contains(where: { currentIssueRequiresInventoryMapping($0) || $0.message.contains("未映射材料") }) {
+            status = "需人工确认"
+        } else if issues.contains(where: { $0.kind == "temporary_processing" && $0.message.contains("未映射材料") }) {
             status = "需人工处理"
         } else if !issues.isEmpty {
             status = "处理失败"
@@ -748,8 +721,8 @@ func buildPendingCenterItems(
         result.append(PendingCenterItem(
             id: "issue:\(issue.id)",
             title: issue.factoryOrder.isEmpty ? (issue.orderId.isEmpty ? "当前问题" : issue.orderId) : issue.factoryOrder,
-            subtitle: issue.kind == "factory_ownership" ? "订单归属问题" : (issue.kind == "server_missing_report" ? "报表检查" : (currentIssueRequiresInventoryMapping(issue) || issue.message.contains("未映射材料") ? "出库前需要材料映射" : "订单处理问题")),
-            status: issue.kind == "factory_ownership" || issue.kind == "server_missing_report" ? "待人工确认" : (currentIssueRequiresInventoryMapping(issue) || issue.message.contains("未映射材料") ? "需人工处理" : "处理失败"),
+            subtitle: issue.kind == "factory_ownership" ? "订单归属问题" : (issue.kind == "server_missing_report" ? "报表检查" : (issue.message.contains("未映射材料") ? "出库前需要材料映射" : "订单处理问题")),
+            status: issue.kind == "factory_ownership" || issue.kind == "server_missing_report" ? "需人工确认" : (issue.message.contains("未映射材料") ? "需人工处理" : "处理失败"),
             folderPath: location,
             folderName: folderName,
             orderId: issue.orderId,
@@ -765,7 +738,7 @@ func buildPendingCenterItems(
             id: "aimes:\(item.id)",
             title: item.factoryOrder.isEmpty ? "AIMES 工厂单" : item.factoryOrder,
             subtitle: "AIMES · 工厂单待确认",
-            status: "待人工确认",
+            status: "需人工确认",
             folderPath: "",
             folderName: "",
             orderId: item.suggestedOrderID,
@@ -781,7 +754,7 @@ func buildPendingCenterItems(
             id: "aimes-warning:\(item.id)",
             title: item.factoryOrder.isEmpty ? "AIMES 销售单格式异常" : item.factoryOrder,
             subtitle: "AIMES · 销售单格式异常",
-            status: "待人工确认",
+            status: "需人工确认",
             folderPath: "",
             folderName: "",
             orderId: item.suggestedOrderID,
@@ -1596,45 +1569,7 @@ final class AppModel: ObservableObject {
     }
 
     private var pendingInventoryMappingFolder = ""
-    struct PendingMappingResumeState {
-        var remainingNames: [String]
-        var failureMessage: String = ""
-        var completedNames: Set<String> = []
-    }
-    @Published private(set) var pendingMappingResumeStates: [String: PendingMappingResumeState] = [:]
-
-    func pendingMappingResumeState(for item: PendingCenterItem) -> PendingMappingResumeState? {
-        pendingMappingResumeStates[item.id]
-    }
-
-    func pendingMappingResumeMessage(for item: PendingCenterItem) -> String {
-        pendingMappingResumeState(for: item)?.failureMessage ?? ""
-    }
-
-    var activePendingMappingResumeState: PendingMappingResumeState? {
-        guard let context = pendingResumeContext else { return nil }
-        return pendingMappingResumeStates[context.pendingItemID]
-    }
-
-    // Retain the source item independently of changing selection and mapping sheets.
-    private struct PendingResumeContext {
-        let id = UUID()
-        let pendingItemID: String
-        let sourceFolder: String
-        let originalPath: String
-        let originalItem: PendingCenterItem?
-        let orderID: String
-        let factoryOrders: [String]
-        let operation: PendingMappingResumeAction
-        let includeHardware: Bool
-    }
-    private var pendingResumeContext: PendingResumeContext?
-    private var pendingResumeInFlight = false
-    private var pendingResumePreview: [String: Any]?
-#if TESTING
-    var pendingOrderRunner: (([String], @escaping () -> Void, @escaping ([String: Any]) -> Void) -> Void)?
-    var pendingInventoryRunner: (([String], @escaping (String) -> Void, @escaping ([String: Any]) -> Void) -> Void)?
-#endif
+    private var pendingMappingResumeAction: PendingMappingResumeAction?
     private var pendingDashboardOutboundRefresh = false
     @Published var orderFolders: [OrderFolderItem] = []
     @Published var dashboardOrders: [OrderDashboardItem] = []
@@ -1667,12 +1602,6 @@ final class AppModel: ObservableObject {
     @Published var includeHardwareForServerProcessing = true
     @Published var pendingServerFolderURL: URL?
     @Published var showServerProcessingOptions = false
-    @Published var hardwareSourceConflicts: [HardwareSourceConflict] = []
-    @Published var hardwareSourceChoices: [String: String] = [:]
-    @Published var showHardwareSourceSelection = false
-    private var hardwareSourceFolders: [String] = []
-    private var hardwareSourceIncludeHardware = true
-    private var resumeAfterHardwareSourceDismissal = false
     @Published var serverWritePreview: ServerWritePreview?
     @Published var serverHardwareMappingRequirements: [ServerHardwareMappingRequirement] = []
     @Published var showServerWriteConfirmation = false
@@ -2254,10 +2183,6 @@ final class AppModel: ObservableObject {
     }
 
     private func presentServerWritePreview(_ object: [String: Any]) {
-        if let request = object["hardware_source_selection"] as? [String: Any] {
-            presentHardwareSourceSelection(request)
-            return
-        }
         guard let preview = ServerWritePreview(object: object) else {
             dashboardServerStatus = "⚠️ Server 文件中没有可确认的订单和工厂单"
             dashboardSyncStatus = dashboardServerStatus
@@ -2271,58 +2196,6 @@ final class AppModel: ObservableObject {
         showServerWriteConfirmation = true
         dashboardServerStatus = "Server 数据已解析，请核对预览内容后确认材料"
         dashboardSyncStatus = dashboardServerStatus
-    }
-
-    private func presentHardwareSourceSelection(_ request: [String: Any]) {
-        hardwareSourceFolders = request["source_folders"] as? [String] ?? []
-        hardwareSourceIncludeHardware = request["include_hardware"] as? Bool ?? true
-        hardwareSourceChoices = request["choices"] as? [String: String] ?? [:]
-        hardwareSourceConflicts = (request["conflicts"] as? [[String: Any]] ?? []).compactMap(HardwareSourceConflict.init)
-        showPendingCenterPrompt = false
-        showHardwareSourceSelection = true
-        dashboardServerStatus = "请确认五金来源或报表更新；已确认来源不会自动改变"
-        dashboardSyncStatus = dashboardServerStatus
-    }
-
-    var canResumeHardwareSourcePreview: Bool {
-        !orderRunning && !hardwareSourceConflicts.isEmpty && hardwareSourceConflicts.allSatisfy { conflict in
-            conflict.candidates.contains { $0.id == hardwareSourceChoices[conflict.id] }
-        }
-    }
-
-    func confirmHardwareSourceSelection() {
-        guard canResumeHardwareSourcePreview else { return }
-        resumeAfterHardwareSourceDismissal = true
-        showHardwareSourceSelection = false
-    }
-
-    private var hardwareSourceChoiceArguments: [String] {
-        guard !hardwareSourceChoices.isEmpty,
-              let data = try? JSONSerialization.data(withJSONObject: hardwareSourceChoices, options: [.sortedKeys]),
-              let json = String(data: data, encoding: .utf8) else { return [] }
-        return ["--hardware-source-choices", json]
-    }
-
-    func hardwareSourceSelectionDidDismiss() {
-        guard resumeAfterHardwareSourceDismissal else { return }
-        resumeAfterHardwareSourceDismissal = false
-        guard !orderRunning else { return }
-        let folders = hardwareSourceFolders
-        beginDashboardOperation("server", label: "按所选五金来源重新预览")
-        var arguments = ["preview-server-changes", "--include-hardware", hardwareSourceIncludeHardware ? "true" : "false"]
-        for folder in folders { arguments += ["--server-folder", folder] }
-        arguments += hardwareSourceChoiceArguments
-        runOrder(arguments, failureStatus: "五金来源预览失败", onFailure: {
-            self.finishDashboardOperation("server")
-            self.dashboardServerStatus = "⚠️ \(self.orderError)"
-            self.dashboardSyncStatus = self.dashboardServerStatus
-            if folders.count == 1 && self.orderError.contains("未完成商品 SKU 处理：") {
-                self.requestInventoryMapping(folderPath: folders[0], message: self.orderError, includeHardware: self.hardwareSourceIncludeHardware)
-            }
-        }) { object in
-            self.finishDashboardOperation("server", using: object)
-            self.presentServerWritePreview(object)
-        }
     }
 
     private func applyCurrentIssues(from object: [String: Any]) {
@@ -2388,11 +2261,6 @@ final class AppModel: ObservableObject {
             label: label,
             startedAtUptime: ProcessInfo.processInfo.systemUptime
         )
-    }
-
-    func dashboardElapsedTime(_ source: String) -> TimeInterval? {
-        guard let start = dashboardOperationStartedAt[source] else { return nil }
-        return max(0, ProcessInfo.processInfo.systemUptime - start.startedAtUptime)
     }
 
     private func finishDashboardOperation(_ source: String) {
@@ -2815,7 +2683,6 @@ final class AppModel: ObservableObject {
             showPendingCenterPrompt = true
             return
         }
-        hardwareSourceChoices = [:]
         beginDashboardOperation("server", label: "预览 Server 变化")
         showPendingCenterPrompt = false
         dashboardServerStatus = "正在预览 Server 变化；正式数据库暂不写入…"
@@ -3022,7 +2889,6 @@ final class AppModel: ObservableObject {
         let folderPath = folderURL.standardizedFileURL.path
         let folderName = folderURL.lastPathComponent
         let hasSecurityScope = folderURL.startAccessingSecurityScopedResource()
-        hardwareSourceChoices = [:]
         beginDashboardOperation("server", label: "预览 Server 文件夹")
         showPendingCenterPrompt = false
         dashboardServerStatus = "正在预览 Server 文件夹：\(folderName)；正式数据库暂不写入…"
@@ -3036,7 +2902,6 @@ final class AppModel: ObservableObject {
             onFailure: {
                 self.finishDashboardOperation("server")
                 if hasSecurityScope { folderURL.stopAccessingSecurityScopedResource() }
-                self.dashboardServerStatus = "⚠️ \(businessFriendlyMessage(self.orderError, operation: "预览 Server 文件夹"))"
                 self.dashboardSyncStatus = self.dashboardServerStatus
                 self.dashboardActivity.insert(
                     InventoryStep(
@@ -3048,10 +2913,6 @@ final class AppModel: ObservableObject {
                     ),
                     at: 0
                 )
-                // Mapping errors can arise only in the in-memory preview, without a pending-center item.
-                if self.orderError.contains("未完成商品 SKU 处理：") {
-                    self.requestInventoryMapping(folderPath: folderPath, message: self.orderError, includeHardware: includeHardware)
-                }
             }
         ) { object in
             self.finishDashboardOperation("server")
@@ -3130,55 +2991,32 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func requestInventoryMapping(folderPath: String, message: String = "", includeHardware: Bool = true) {
+    func requestInventoryMapping(folderPath: String, message: String = "") {
         let trimmed = folderPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         showPendingCenterPrompt = false
         showServerChangesPrompt = false
+        // Current-issue paths can point to a report file (or the Report
+        // directory) inside a standard order. Reprocessing must start from
+        // the order folder so sync-index refreshes both the order status and
+        // the active-issue list.
         pendingInventoryMappingFolder = inventoryMappingSourceFolderPath(trimmed)
-        let item = pendingCenterItems.first { $0.issues.contains { $0.path == trimmed } }
-            ?? pendingCenterItems.first {
-                !$0.folderPath.isEmpty
-                    && inventoryMappingSourceFolderPath($0.folderPath) == pendingInventoryMappingFolder
-            }
-        pendingResumeContext = PendingResumeContext(
-            pendingItemID: item?.id ?? "folder:\(pendingInventoryMappingFolder)",
-            sourceFolder: pendingInventoryMappingFolder, originalPath: trimmed,
-            originalItem: item, orderID: item?.orderId ?? "",
-            factoryOrders: item?.issues.map(\.factoryOrder).filter { !$0.isEmpty } ?? [],
-            operation: .rereadSourceThenPresentReadOnlyPreview,
-            includeHardware: includeHardware
-        )
-        pendingResumeInFlight = false
-        pendingResumePreview = nil
+        pendingMappingResumeAction = .rereadSourceThenPresentReadOnlyPreview
         inventoryMappingRequestPath = trimmed
-        let key = pendingResumeContext!.pendingItemID
-        var state = pendingMappingResumeStates[key] ?? PendingMappingResumeState(remainingNames: [])
-        for name in inventoryMappingNames(from: message) {
-            let completed = state.completedNames.contains { $0.caseInsensitiveCompare(name) == .orderedSame }
-            let alreadyPending = state.remainingNames.contains { $0.caseInsensitiveCompare(name) == .orderedSame }
-            if !completed && !alreadyPending { state.remainingNames.append(name) }
-        }
-        pendingMappingResumeStates[key] = state
-        inventoryMappingTargetNames = state.remainingNames
-        inventoryStatus = state.failureMessage.isEmpty
-            ? "请处理剩余映射或重试只读预览"
-            : "⚠️ \(state.failureMessage)"
+        inventoryMappingTargetNames = inventoryMappingNames(from: message)
         showInventoryMappingWorkspace = true
     }
 
     func closeInventoryMappingWorkspace() {
         showInventoryMappingWorkspace = false
         pendingInventoryMappingFolder = ""
-        pendingResumeContext = nil
-        pendingResumeInFlight = false
-        pendingResumePreview = nil
+        pendingMappingResumeAction = nil
         inventoryMappingRequestPath = ""
         inventoryMappingTargetNames = []
     }
 
     private func inventoryMappingNames(from message: String) -> [String] {
-        guard let markerRange = message.range(of: "处理：") ?? message.range(of: "未映射材料：") else { return [] }
+        guard let markerRange = message.range(of: "处理：") else { return [] }
         let remainder = message[markerRange.upperBound...]
         let payload = remainder.split(whereSeparator: { $0 == "；" || $0 == "。" }).first ?? Substring()
         return payload
@@ -3187,93 +3025,53 @@ final class AppModel: ObservableObject {
             .filter { !$0.isEmpty }
     }
 
-    // Resume only the blocked preview, never the durable sync command.
     private func rereadPendingSourceFolder() {
-        guard pendingResumeContext != nil else { return }
-        resumePendingMappingOperationAfterMapping()
-    }
-
-    private func failPendingResume(_ context: PendingResumeContext, message: String) {
-        pendingMappingResumeStates[context.pendingItemID]?.failureMessage = message
-        guard pendingResumeContext?.id == context.id else { return }
-        pendingResumeInFlight = false
-        inventoryStatus = "⚠️ \(message)"
-        dashboardServerStatus = inventoryStatus
-        dashboardSyncStatus = inventoryStatus
-        // Preserve the original pending item and context for another mapping or retry.
-    }
-
-    // A completed save stays completed even when its callback arrives after cancellation.
-    private func recordPendingMappingsSaved(_ names: [String], context: PendingResumeContext?) {
-        guard let context else { return }
-        pendingMappingResumeStates[context.pendingItemID]?.completedNames.formUnion(names)
-        pendingMappingResumeStates[context.pendingItemID]?.remainingNames.removeAll { target in
-            names.contains { $0.caseInsensitiveCompare(target) == .orderedSame }
-        }
-        pendingMappingResumeStates[context.pendingItemID]?.failureMessage = ""
-        if pendingResumeContext?.pendingItemID == context.pendingItemID {
-            inventoryMappingTargetNames = pendingMappingResumeStates[context.pendingItemID]?.remainingNames ?? []
+        guard !pendingInventoryMappingFolder.isEmpty else { return }
+        let candidate = URL(fileURLWithPath: pendingInventoryMappingFolder)
+        var isDirectory = ObjCBool(false)
+        let path = FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory) && isDirectory.boolValue
+            ? candidate.path
+            : candidate.deletingLastPathComponent().path
+        pendingInventoryMappingFolder = ""
+        beginDashboardOperation("server", label: "重新读取订单文件")
+        runOrder(["process-server-folder", "--folder", path, "--include-hardware", "true"], failureStatus: "重新读取订单文件失败", onFailure: {
+            self.finishDashboardOperation("server")
+            self.pendingMappingResumeAction = nil
+            self.dashboardSyncStatus = "⚠️ \(businessFriendlyMessage(self.orderError, operation: "重新读取订单文件"))"
+        }) { object in
+            self.finishDashboardOperation("server")
+            self.applyDashboardObject(object)
+            self.refreshDashboardOrdersAfterInventoryMapping()
         }
     }
 
-    // Present after SwiftUI completes dismissal, not after an arbitrary delay.
-    func inventoryMappingWorkspaceDidDismiss() {
-        // A new request may already have opened another workspace while the old sheet closed.
-        guard !showInventoryMappingWorkspace else { return }
-        let preview = pendingResumePreview
-        closeInventoryMappingWorkspace()
-        if let preview { presentServerWritePreview(preview) }
+    private func refreshDashboardOrdersAfterInventoryMapping() {
+        beginDashboardOperation("sync", label: "刷新订单列表")
+        dashboardSyncStatus = "正在刷新订单列表…"
+        runOrder(["list-index"], failureStatus: "订单列表刷新失败", onFailure: {
+            self.finishDashboardOperation("sync")
+            self.pendingMappingResumeAction = nil
+            self.dashboardSyncStatus = "⚠️ \(businessFriendlyMessage(self.orderError, operation: "刷新订单列表"))"
+        }) { object in
+            self.finishDashboardOperation("sync")
+            self.applyDashboardObject(object, includeChanges: false)
+            self.closePendingCenterIfEmpty()
+            self.dashboardSyncStatus = self.pendingCenterItems.isEmpty
+                ? "✅ 已重新读取订单文件并刷新订单列表"
+                : "✅ 订单列表已刷新；待处理中心仍有项目需要处理"
+            if case .rereadSourceThenPresentReadOnlyPreview = self.pendingMappingResumeAction {
+                self.pendingMappingResumeAction = nil
+                self.inventoryStatus = "来源文件已重新读取，可进行只读预览"
+                if !self.pendingCenterItems.isEmpty {
+                    self.showPendingCenterPrompt = true
+                }
+            }
+        }
     }
 
     private func resumePendingMappingOperationAfterMapping() {
-        guard let context = pendingResumeContext else {
-            previewSelectedInventory()
-            return
-        }
-        guard !pendingResumeInFlight else { return }
-        guard inventoryMappingTargetNames.isEmpty else {
-            inventoryStatus = "映射已保存；请继续处理剩余 \(inventoryMappingTargetNames.count) 项映射"
-            return
-        }
-        guard !orderRunning else {
-            failPendingResume(context, message: "订单操作进行中；完成后请重试只读预览")
-            return
-        }
-        pendingResumeInFlight = true
-        beginDashboardOperation("server", label: "映射后只读预览")
-        runOrder(["preview-server-changes", "--server-folder", context.sourceFolder, "--include-hardware", context.includeHardware ? "true" : "false"] + hardwareSourceChoiceArguments,
-                 failureStatus: "映射后预览失败", onFailure: {
-            self.finishDashboardOperation("server")
-            if self.pendingResumeContext?.id == context.id {
-                let names = self.inventoryMappingNames(from: self.orderError)
-                self.pendingMappingResumeStates[context.pendingItemID]?.remainingNames = names
-                self.inventoryMappingTargetNames = names
-            }
-            self.failPendingResume(context, message: "读取或校验失败：\(self.orderError)；请检查映射后重试")
-        }) { object in
-            self.finishDashboardOperation("server")
-            guard self.pendingResumeContext?.id == context.id else { return }
-            if object["hardware_source_selection"] is [String: Any] {
-                self.pendingResumePreview = object
-                self.showInventoryMappingWorkspace = false
-                return
-            }
-            guard let preview = ServerWritePreview(object: object),
-                  preview.sourceFolders.map({ inventoryMappingSourceFolderPath($0) }).contains(context.sourceFolder) else {
-                self.failPendingResume(context, message: "没有原文件夹的有效 Server 预览；请检查来源文件后重试")
-                return
-            }
-            // Do not refresh list-index: its cache-miss path may reconcile durable business facts.
-            self.pendingMappingResumeStates[context.pendingItemID]?.failureMessage = ""
-            self.pendingResumePreview = object
-            self.showPendingCenterPrompt = false
-            self.showInventoryMappingWorkspace = false
-        }
-    }
-
-    func retryPendingMappingPreview() {
-        guard pendingResumeContext != nil, !inventoryRunning else { return }
-        resumePendingMappingOperationAfterMapping()
+        guard pendingMappingResumeAction != nil else { return }
+        rereadPendingSourceFolder()
     }
 
     func activatePendingInventoryMapping() {
@@ -3942,9 +3740,6 @@ final class AppModel: ObservableObject {
     }
 
     func setInventoryItemsIgnored(_ names: [String], ignored: Bool) {
-        guard !inventoryRunning, !pendingResumeInFlight else { return }
-        let context = pendingResumeContext
-        let contextID = context?.id
         let uniqueNames = Array(Set(names.filter { !$0.isEmpty })).sorted()
         guard !uniqueNames.isEmpty else {
             inventoryStatus = ignored ? "请先选择需要忽略的材料" : "请先选择需要恢复的材料"
@@ -3960,19 +3755,13 @@ final class AppModel: ObservableObject {
             arguments += ["--reason", "用户在出库预览中选择忽略"]
         }
         runInventory(arguments) { _ in
-            if ignored { self.recordPendingMappingsSaved(uniqueNames, context: context) }
-            guard self.pendingResumeContext?.id == contextID else { return }
             self.addInventoryStep(
                 ignored ? "忽略设置已保存" : "忽略设置已取消",
                 uniqueNames.joined(separator: "、"),
                 "success"
             )
-            if ignored {
-                self.inventoryMappingTargetNames.removeAll { target in
-                    uniqueNames.contains { $0.caseInsensitiveCompare(target) == .orderedSame }
-                }
-            }
-            self.resumePendingMappingOperationAfterMapping()
+            self.previewSelectedInventory()
+            self.rereadPendingSourceFolder()
         }
     }
 
@@ -4046,9 +3835,6 @@ final class AppModel: ObservableObject {
     }
 
     func saveInventoryIgnoredMapping(name: String, reason: String) {
-        guard !inventoryRunning, !pendingResumeInFlight else { return }
-        let context = pendingResumeContext
-        let contextID = context?.id
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
             settingsStatus = "❌ 忽略项目名称不能为空。"
@@ -4062,12 +3848,7 @@ final class AppModel: ObservableObject {
             "--reason", reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? "用户在设置中选择全局忽略"
                 : reason.trimmingCharacters(in: .whitespacesAndNewlines),
-        ], onFailure: { _ in
-            guard let context else { return }
-            self.failPendingResume(context, message: "忽略设置保存失败；原项目仍待处理，请重试")
-        }) { _ in
-            self.recordPendingMappingsSaved([trimmedName], context: context)
-            guard self.pendingResumeContext?.id == contextID else { return }
+        ]) { _ in
             self.settingsStatus = "✅ 全局忽略项目已保存：\(trimmedName)"
             self.inventoryMappingTargetNames.removeAll { $0.caseInsensitiveCompare(trimmedName) == .orderedSame }
             if !pendingSourceFolder.isEmpty {
@@ -4138,9 +3919,6 @@ final class AppModel: ObservableObject {
     }
 
     func saveInventoryMapping(travelerName: String, productCode: String) {
-        guard !inventoryRunning, !pendingResumeInFlight else { return }
-        let context = pendingResumeContext
-        let contextID = context?.id
         logUserAction("点击保存材料映射", details: ["traveler_name_present": !travelerName.isEmpty, "product_code_present": !productCode.isEmpty])
         beginInventoryOperation("保存材料映射")
         addInventoryStep("确认映射", "\(travelerName) → \(productCode)", "running")
@@ -4149,12 +3927,9 @@ final class AppModel: ObservableObject {
             "set-mapping", nameArgument, travelerName,
             "--product-code", productCode,
         ], onFailure: { _ in
-            if let context {
-                self.failPendingResume(context, message: "映射保存失败；原项目仍待处理，请重试")
-            }
+            self.pendingMappingResumeAction = nil
+            self.pendingInventoryMappingFolder = ""
         }) { object in
-            self.recordPendingMappingsSaved([travelerName], context: context)
-            guard self.pendingResumeContext?.id == contextID else { return }
             let product = object["product"] as? [String: Any] ?? [:]
             let name = product["name"] as? String ?? productCode
             self.finishRunningInventoryStep("已映射到 \(productCode) \(name)", "success")
@@ -4340,20 +4115,6 @@ final class AppModel: ObservableObject {
         onFailure: ((String) -> Void)? = nil,
         completion: @escaping ([String: Any]) -> Void
     ) {
-#if TESTING
-        if let runner = pendingInventoryRunner {
-            guard !manageRunning || !inventoryRunning else { return }
-            if manageRunning { inventoryRunning = true }
-            runner(arguments, { reason in
-                if manageRunning { self.inventoryRunning = false }
-                onFailure?(reason)
-            }, { object in
-                if manageRunning { self.inventoryRunning = false }
-                completion(object)
-            })
-            return
-        }
-#endif
         if !dashboardStatusIsInProgress(dashboardSyncStatus) {
             dashboardSyncStatus = "正在处理库存系统操作…"
         }
@@ -4608,10 +4369,6 @@ final class AppModel: ObservableObject {
                 orderRawErrors += line + "\n"
                 continue
             }
-            if orderRunning && dashboardOperationStartedAt["server"] != nil {
-                dashboardServerStatus = "正在处理：\(message)"
-                dashboardSyncStatus = dashboardServerStatus
-            }
             if let updated = updatingLatestRunningStep(orderSteps, detail: message) {
                 orderSteps = updated
             } else {
@@ -4628,19 +4385,6 @@ final class AppModel: ObservableObject {
         completion: @escaping ([String: Any]) -> Void
     ) {
         guard !orderRunning else { return }
-#if TESTING
-        if let runner = pendingOrderRunner {
-            orderRunning = true
-            runner(arguments, {
-                self.orderRunning = false
-                onFailure?()
-            }, { object in
-                self.orderRunning = false
-                completion(object)
-            })
-            return
-        }
-#endif
         orderRunning = true
         orderError = ""
         orderCreatedPath = ""
@@ -5029,8 +4773,7 @@ final class AppModel: ObservableObject {
         userNote: String,
         plannedDays: [OrderInstallationDay],
         actualDays: [OrderInstallationDay],
-        onStatusChange: @escaping (String) -> Void = { _ in },
-        onSuccess: @escaping () -> Void = {}
+        onStatusChange: @escaping (String) -> Void = { _ in }
     ) {
         let encode: ([OrderInstallationDay]) -> String = { days in
             let payload = days.map { ["date": $0.date, "installer": $0.installer] }
@@ -5070,7 +4813,6 @@ final class AppModel: ObservableObject {
             self.orderStatus = "订单备注和安装安排已保存"
             self.finishOrderStep("订单备注和安装安排已保存", "success")
             onStatusChange("已保存")
-            onSuccess()
         }
     }
 
@@ -6583,9 +6325,9 @@ struct PendingInventoryMappingWorkspace: View {
 
             if model.inventoryMappingTargetNames.isEmpty {
                 ContentUnavailableView(
-                    "没有剩余映射项目",
+                    "没有读取到材料名称",
                     systemImage: "questionmark.folder",
-                    description: Text("可重试只读预览，或到设置中手工维护材料映射。")
+                    description: Text("请关闭窗口后重新扫描；也可以到设置中手工维护材料映射。")
                 )
             } else {
                 AppSurfaceCard(padding: 0) {
@@ -6616,12 +6358,7 @@ struct PendingInventoryMappingWorkspace: View {
             }
 
             HStack {
-                Text(model.activePendingMappingResumeState?.failureMessage.isEmpty == false
-                    ? model.activePendingMappingResumeState!.failureMessage
-                    : model.inventoryStatus).font(.caption).textSelection(.enabled)
                 Spacer()
-                Button("重试只读预览") { model.retryPendingMappingPreview() }
-                    .disabled(model.inventoryRunning || model.orderRunning || !model.inventoryMappingTargetNames.isEmpty)
                 Button("关闭") { model.closeInventoryMappingWorkspace() }
                     .appActionButton(minWidth: 80)
             }
@@ -7479,7 +7216,6 @@ struct TodoEditorSheet: View {
 struct SettingsView: View {
     @ObservedObject var model: AppModel
     @State private var showOperationLog = false
-    @State private var showAimesHistory = false
     @State private var showIgnoredHardwareList = false
     @State private var showManualMappingList = false
     @State private var showInitialDatePicker = false
@@ -7536,9 +7272,6 @@ struct SettingsView: View {
             model.refreshInventoryCatalogStatus()
             model.refreshInventoryMappings()
             model.refreshOperationLogInfo()
-        }
-        .sheet(isPresented: $showAimesHistory) {
-            AimesHistorySheet(model: model)
         }
         .sheet(isPresented: $showOperationLog) {
             OperationLogViewerView(url: model.operationLogURL)
@@ -7695,12 +7428,6 @@ struct SettingsView: View {
                         .help("保留最近三天每日备份及最近 30 天内每周一份")
                 }
                 .frame(minHeight: 68)
-
-                settingsManagementRow(
-                    "历史 AIMES 记录",
-                    count: model.assignedAimesFactories.count + model.ignoredAimesFactories.count,
-                    help: "查看已确认和已忽略记录，撤销归属或恢复待处理。"
-                ) { showAimesHistory = true }
 
                 Divider()
 
@@ -8176,10 +7903,10 @@ struct TopNavigationBar: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(
                     model.pendingCenterItems.isEmpty
-                        ? "查看待处理中心"
+                        ? "查看待处理中心和历史 AIMES 记录"
                         : "有 \(model.pendingCenterItems.count) 个待处理项目"
                 )
-                .help("打开待处理中心，查看待处理项目")
+                .help("打开待处理中心，查看待处理项目和历史 AIMES 记录")
             }
             Button { showDesignNotes = true } label: {
                 Image(systemName: "info.circle")
@@ -8212,16 +7939,13 @@ struct TopNavigationBar: View {
         }
         .sheet(isPresented: $model.showPendingCenterPrompt) {
             PendingCenterSheet(model: model)
-                .frame(minWidth: 980, minHeight: 620)
-        }
-        .sheet(isPresented: $model.showHardwareSourceSelection, onDismiss: { model.hardwareSourceSelectionDidDismiss() }) {
-            HardwareSourceSelectionSheet(model: model)
+                .frame(minWidth: 900, minHeight: 640)
         }
         .sheet(isPresented: $model.showServerWriteConfirmation) {
             ServerWriteConfirmationSheet(model: model)
                 .frame(width: 820, height: 650)
         }
-        .sheet(isPresented: $model.showInventoryMappingWorkspace, onDismiss: model.inventoryMappingWorkspaceDidDismiss) {
+        .sheet(isPresented: $model.showInventoryMappingWorkspace) {
             PendingInventoryMappingWorkspace(model: model)
                 .frame(minWidth: 620, minHeight: 420)
         }

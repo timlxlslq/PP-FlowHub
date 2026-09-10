@@ -141,6 +141,10 @@ def ensure_schema(path: Path) -> None:
     try:
         connection.executescript(
             """
+            create table if not exists hardware_source_decisions(
+                factory_order text primary key,
+                decision_json text not null
+            );
             create table if not exists hardware_source_versions(
                 factory_order text primary key,
                 order_id text not null,
