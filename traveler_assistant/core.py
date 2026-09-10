@@ -22,6 +22,8 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
+from .report_read_context import cached_report
+from .streaming_process import run_with_progress
 from .operation_log import log_progress_payload
 from .database import (
     database_path,
@@ -91,6 +93,7 @@ class Config:
     aimes_retry_delays: tuple[float, float] = (2.0, 4.0)
     operation_log_enabled: bool = True
     storage_prepared: bool = False
+    test_source: bool = False
     # Server previews use one process-local database connection.  It is
     # intentionally not part of persisted settings or command-line state.
     workflow_connection: sqlite3.Connection | None = None
@@ -119,6 +122,8 @@ class Config:
         or mutate those files again: ``workflow.sqlite3`` is the sole runtime
         source of durable application facts.
         """
+        from .hardware_facts import assert_source_isolation
+        assert_source_isolation(self.workflow_database, [self.source_root], test_mode=self.test_source)
         self.storage_prepared = True
         ensure_schema(database_path(self.state_dir))
 
@@ -127,6 +132,7 @@ class Config:
         return self.state_dir / "settings.json"
 
     def load_settings(self, source_profile: str | None = None) -> None:
+        self.test_source = source_profile == "local"
         if not self.settings_file.is_file():
             return
         try:
@@ -295,6 +301,7 @@ def _run_aimes_lookup(
             if not isinstance(event, dict) or event.get("event") != "progress":
                 continue
             log_progress_payload(event)
+            print(json.dumps(event, ensure_ascii=False), file=sys.stderr, flush=True)
             stage = str(event.get("stage", "")).strip()
             duration = event.get("duration_seconds")
             if stage and isinstance(duration, (int, float)):
@@ -304,15 +311,17 @@ def _run_aimes_lookup(
                     "duration_seconds": round(float(duration), 2),
                 })
 
-    for attempt in range(3):
+    deadline = time.monotonic() + 90
+    attempt = 0
+    for attempt in range(2):
         attempt_timings: list[dict[str, object]] = []
-        progress(f"正在获取 AIMES 数据（第 {attempt + 1}/3 次）", factory_orders=missing)
+        progress(f"正在获取 AIMES 数据（第 {attempt + 1}/2 次）", factory_orders=missing)
         try:
-            completed = subprocess.run(
-                [config.node_path, str(helper)], input=payload, text=True,
-                capture_output=True, timeout=120, env=env, check=True,
+            completed = run_with_progress(
+                [config.node_path, str(helper)], input_text=payload, env=env,
+                timeout=max(0.001, deadline - time.monotonic()),
+                on_stderr_line=lambda line: consume_progress(line, attempt_timings),
             )
-            consume_progress(completed.stderr, attempt_timings)
             result = json.loads(completed.stdout)
             if not isinstance(result, dict):
                 raise json.JSONDecodeError("AIMES 返回结果不是对象", completed.stdout, 0)
@@ -335,11 +344,10 @@ def _run_aimes_lookup(
             result["_aimes_retry_count"] = attempt
             return result
         except subprocess.CalledProcessError as exc:
-            consume_progress(exc.stderr or "", attempt_timings)
             last_error = (exc.stderr or "AIMES 查询失败").strip()[-1000:]
             operation_timings.extend(attempt_timings)
             progress(
-                f"AIMES 第 {attempt + 1}/3 次尝试失败，准备重试",
+                f"AIMES 第 {attempt + 1}/2 次尝试失败，准备重试",
                 retry_attempt=attempt + 1,
             )
             if "账号或密码错误" in last_error:
@@ -348,13 +356,19 @@ def _run_aimes_lookup(
             last_error = str(exc)
             operation_timings.extend(attempt_timings)
             progress(
-                f"AIMES 第 {attempt + 1}/3 次尝试失败，准备重试",
+                f"AIMES 第 {attempt + 1}/2 次尝试失败，准备重试",
                 retry_attempt=attempt + 1,
             )
-        if attempt < 2:
+        # Authenticated page/query failures are retried inside the same browser.
+        # Relaunch only for a failed process/session, never for known data errors.
+        if any(marker in last_error for marker in ("AIMES_STEP_FAILED", "找不到工厂单名称", "缺少必要列")):
+            break
+        if time.monotonic() >= deadline:
+            break
+        if attempt < 1:
             retry_started = time.perf_counter()
             progress(f"等待 {config.aimes_retry_delays[attempt]:.1f} 秒后重试 AIMES")
-            time.sleep(config.aimes_retry_delays[attempt])
+            time.sleep(min(config.aimes_retry_delays[attempt], max(0, deadline - time.monotonic())))
             operation_timings.append({
                 "stage": "retry_wait",
                 "label": f"重试等待（第 {attempt + 1} 次后）",
@@ -365,7 +379,7 @@ def _run_aimes_lookup(
         f"AIMES 查询失败：{last_error}",
         factory_orders=missing,
         aimes_timings=operation_timings,
-        aimes_retry_count=2,
+        aimes_retry_count=attempt,
     )
 
 
@@ -559,6 +573,7 @@ RAIL_PAIR_NAMES = (
 )
 
 
+@cached_report
 def parse_fittings_groups(
     path: Path,
     *,
@@ -588,7 +603,7 @@ def parse_fittings_groups(
     sheet = workbook["Page1"]
     starts = [
         row for row in range(1, sheet.max_row + 1)
-        if _text(sheet.cell(row, 1).value) == "Order No."
+        if re.sub(r"\s+", "", _text(sheet.cell(row, 1).value)) in {"OrderNo.", "订单号"}
     ]
     if not starts:
         raise RuleError("fittings_schema", "五金清单缺少 Order No. 区块")
@@ -602,14 +617,17 @@ def parse_fittings_groups(
             else:
                 raise RuleError("fittings_identity", f"五金清单工厂单号异常：{factory}")
         header = start + 5
-        expected = {3: "Name", 5: "Code", 6: "Size", 11: "Quantity"}
+        # Both AICNC versions use the same columns and block offsets.
+        legacy = re.sub(r"\s+", "", _text(sheet.cell(start, 1).value)) == "订单号"
+        expected = ({3: "名称", 5: "编号", 6: "尺寸", 11: "数量"} if legacy
+                    else {3: "Name", 5: "Code", 6: "Size", 11: "Quantity"})
         if any(_text(sheet.cell(header, col).value) != label for col, label in expected.items()):
             raise RuleError("fittings_schema", f"五金清单第 {start} 行开始的区块字段发生变化")
         end = starts[index + 1] if index + 1 < len(starts) else sheet.max_row + 1
         items = []
         for row in range(header + 1, end):
             name = _text(sheet.cell(row, 3).value)
-            if not name or name == "Total":
+            if not name or name in {"Total", "小计", "合计"}:
                 continue
             items.append(FittingItem(
                 name=name,

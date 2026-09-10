@@ -3016,6 +3016,7 @@ class InventorySyncStore:
         production_draft: dict | None = None,
         operation_id: str = "",
         commit_operation: bool = True,
+        commit_production: bool = True,
     ) -> None:
         self._backup_current()
         prepared = {item["remark"]: item for item in self.prepare_documents(preview)}
@@ -3081,7 +3082,7 @@ class InventorySyncStore:
                     ensure_outbound_document_factory_links(
                         connection, document_number, preview.traveler.order_id, linked_factory_value
                     )
-            if production_draft is not None:
+            if production_draft is not None and commit_production:
                 from .production import record_completed_production
                 record_completed_production(connection, production_draft)
             if operation_id and commit_operation:
@@ -3195,6 +3196,7 @@ def _persist_single_outbound_result(
     config: Config,
     preview: InventoryPreview | None,
     result: dict,
+    production_draft: dict | None = None,
 ) -> str:
     """Persist one externally confirmed document before the next is attempted."""
     if preview is None or not (result.get("saved") or result.get("unchanged")):
@@ -3211,6 +3213,8 @@ def _persist_single_outbound_result(
         # The operation remains partial until every requested document is
         # confirmed.  The durable per-document ledger is still written now.
         operation_id="",
+        production_draft=production_draft,
+        commit_production=False,
     )
     return document_number
 
@@ -4170,7 +4174,9 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                 )
             raise RuleError("jdy_browser", "库存系统返回结果无法解析") from exc
         if action == "outbound" and confirm_save and operation_journal is not None and operation_id:
-            confirmed_number = _persist_single_outbound_result(config, preview, parsed_result)
+            confirmed_number = _persist_single_outbound_result(
+                config, preview, parsed_result, production_draft=production_draft
+            )
             if confirmed_number:
                 if len(responses) < len(requests):
                     operation_journal.update(

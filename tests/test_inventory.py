@@ -31,6 +31,7 @@ from traveler_assistant.inventory import (
     _is_inventory_domain_url,
     _is_inventory_service_workbench_url,
     _persist_completed_outbound_results,
+    _persist_single_outbound_result,
     _assert_single_server_material_source,
     build_database_preview,
     database_document_items,
@@ -557,8 +558,12 @@ class InventoryTests(unittest.TestCase):
         self.assertIn('Button("加入全局忽略")', swift)
         self.assertIn('Button("处理映射")', swift)
         self.assertIn("inventoryMappingSourceFolderPath", swift)
-        self.assertIn("refreshDashboardOrdersAfterInventoryMapping", swift)
-        self.assertIn('runOrder(["list-index"], failureStatus: "订单列表刷新失败"', swift)
+        resume = swift.split("private func resumePendingMappingOperationAfterMapping()", 1)[1].split(
+            "func retryPendingMappingPreview()", 1
+        )[0]
+        self.assertIn('"preview-server-changes"', resume)
+        self.assertNotIn('"list-index"', resume)
+        self.assertNotIn('"process-server-folder"', resume)
         self.assertIn("OrderShipmentConfirmationSheet(", dashboard)
         detail_card = dashboard.split("struct OrderDashboardDetailCard", 1)[1].split(
             "struct OutboundScopeSheet", 1
@@ -1894,7 +1899,7 @@ class InventoryTests(unittest.TestCase):
     def test_production_material_outbound_does_not_mark_factory_orders_shipped(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            config = Config(state_dir=root / "state")
+            config = Config(state_dir=root / "state", backup_root=root / "backups")
             config.prepare_storage()
             store = OrderIndexStore(config.workflow_database)
             store.upsert_order("PP0063-2", validation_status="正常")
@@ -1948,11 +1953,106 @@ class InventoryTests(unittest.TestCase):
                 config.workflow_database,
                 config.backup_root,
             )
+            result = {"remark": "PP0063-2", "saved": True, "documentNumber": "QTCK-PRODUCTION"}
+            _persist_single_outbound_result(config, preview, result, production_draft=production_draft)
+            # A fresh store must not recreate shipment links before final commit.
+            sync = InventorySyncStore(config.workflow_database, config.backup_root)
+            with sqlite3.connect(config.workflow_database) as connection:
+                self.assertEqual(connection.execute("select count(*) from manual_production_batches").fetchone()[0], 0)
+                self.assertEqual(connection.execute("select count(*) from outbound_document_factories").fetchone()[0], 0)
+                self.assertEqual(connection.execute("select document_type from outbound_documents").fetchone()[0], "production_materials")
             sync.save_success(
                 preview,
                 [{"remark": "PP0063-2", "saved": True, "documentNumber": "QTCK-PRODUCTION"}],
                 production_draft=production_draft,
             )
+
+            connection = sqlite3.connect(config.workflow_database)
+            links = connection.execute(
+                "select factory_order from outbound_document_factories "
+                "where document_number='QTCK-PRODUCTION'"
+            ).fetchall()
+            status = connection.execute(
+                "select outbound_status, outbound_document from factory_orders "
+                "where factory_order='F-PRODUCTION'"
+            ).fetchone()
+            batch = connection.execute(
+                "select status from manual_production_batches where batch_number='MP-PRODUCTION-001'"
+            ).fetchone()
+            connection.close()
+            self.assertEqual(links, [])
+            self.assertEqual(status, ("未出库", ""))
+            self.assertEqual(batch, ("completed",))
+
+    def test_production_browser_success_commits_materials_and_batch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(state_dir=root / "state", backup_root=root / "backups")
+            config.prepare_storage()
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_order("PP0063-2", validation_status="正常")
+            store.upsert_factory(
+                "F-PRODUCTION",
+                order_id="PP0063-2",
+                factory_name="PP0063-2-KITCHEN",
+                sales_order_name="PP0063-2",
+                name_source="AIMES",
+                ownership_status="已确认",
+                optimized=True,
+                outbound_status="未出库",
+            )
+            store.commit()
+            store.close()
+
+            source_item = TravelerItem(1, "板材与封边", "18mm--Plywood", 2, "PP0063-2")
+            outbound_item = OutboundItem(
+                traveler_name="18mm--Plywood",
+                product_code="M0001",
+                product_name="18mm Plywood",
+                quantity=2,
+                section="板材与封边",
+                match_source="test",
+                document_remark="PP0063-2",
+                unit="张",
+            )
+            preview = InventoryPreview(
+                traveler=TravelerData(
+                    path=config.workflow_database.resolve(),
+                    pp_folder="PP0063-2",
+                    order_id="PP0063-2",
+                    order_name="PP0063-2",
+                    items=[source_item],
+                    zero_items=[],
+                    documents={"PP0063-2": [source_item]},
+                    modified_at="2026-08-21T00:00:00",
+                    fingerprint="test-fingerprint",
+                ),
+                outbound_items=[outbound_item],
+                selected_factory_orders=("F-PRODUCTION",),
+                source_type="database",
+            )
+            production_draft = {
+                "batch_number": "MP-PRODUCTION-001",
+                "order_id": "PP0063-2",
+                "selected_factory_orders": ["F-PRODUCTION"],
+                "materials": [{"material_type": "plywood", "color": "", "thickness": "18", "edge": "", "unit": "张", "quantity": 2}],
+            }
+            browser_result = SimpleNamespace(returncode=0, stdout=json.dumps({
+                "remark": "PP0063-2", "saved": True, "documentNumber": "QTCK-PRODUCTION"
+            }), stderr="")
+            with patch("traveler_assistant.inventory._local_setting", return_value=""), \
+                 patch("traveler_assistant.inventory._find_existing_inventory_page", return_value={"url": "https://vip2-hz.jdy.com/default-new.jsp"}), \
+                 patch("traveler_assistant.production.cumulative_production_materials", return_value=production_draft["materials"]), \
+                 patch("traveler_assistant.inventory.build_database_preview", return_value=preview), \
+                 patch("traveler_assistant.inventory._resolve_jdy_runtime", return_value=(Path("/node"), Path("/modules"))), \
+                 patch("traveler_assistant.inventory.subprocess.Popen", return_value=_FakeNodeProcess(browser_result)):
+                result = run_jdy(config, "outbound", confirm_save=True, order_id="PP0063-2",
+                                 selected_factory_orders=["F-PRODUCTION"],
+                                 production_batch_number=production_draft["batch_number"],
+                                 production_materials=production_draft["materials"])
+            self.assertTrue(result["productionCompleted"])
+            with sqlite3.connect(config.workflow_database) as connection:
+                self.assertEqual(connection.execute("select status from inventory_operations").fetchone()[0], "local_committed")
 
             connection = sqlite3.connect(config.workflow_database)
             links = connection.execute(

@@ -28,6 +28,21 @@ const recordStage = (stage, label, startedAt) => {
 };
 let browser;
 let page;
+// Retrying an authenticated read reuses the current browser and login session.
+const retryPageStep = async (label, action) => {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await action();
+    } catch (error) {
+      const reason = error?.name || "Error";
+      log(`${label}失败（${reason}，第 ${attempt + 1}/2 次）`, { stage: "page_retry", stage_label: label });
+      if (page.url().includes("passport.3vjia.com")) throw new Error("AIMES 登录会话已失效");
+      if (attempt === 1) throw new Error(`AIMES_STEP_FAILED：${label}重试失败（${reason}）`);
+      log(`正在重试${label}，保留当前登录会话`);
+      await page.goto("https://aimes.3vjia.com/oms/factoryOrder", { waitUntil: "domcontentloaded", timeout: 15000 });
+    }
+  }
+};
 try {
   const configuredBrowser = process.env.TRAVELER_BROWSER_EXECUTABLE || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
   const browserOptions = {
@@ -56,14 +71,12 @@ try {
   await page.waitForURL(url => url.hostname === "aimes.3vjia.com" && url.pathname.startsWith("/dashboard/"), { timeout: 30000 });
   recordStage("login", "登录 AIMES", loginStartedAt);
   const pageLoadStartedAt = performance.now();
-  log("读取 AIMES 工作台页面");
-  log("点击 AIMES 菜单 OMS");
-  await page.getByText("OMS", { exact: true }).click();
-  log("点击 AIMES 菜单工厂订单");
-  await page.getByText("工厂订单", { exact: true }).click();
   const input = page.getByPlaceholder("请输入工厂单号");
-  await input.waitFor({ state: "visible", timeout: 30000 });
-  await page.locator("tbody tr").first().waitFor({ state: "visible", timeout: 30000 });
+  await retryPageStep("加载 AIMES 工厂订单页面", async () => {
+    log("加载 AIMES 工厂订单页面");
+    await page.goto("https://aimes.3vjia.com/oms/factoryOrder", { waitUntil: "domcontentloaded", timeout: 15000 });
+    await input.waitFor({ state: "visible", timeout: 15000 });
+  });
   recordStage("page_load", "加载 AIMES 工厂订单页面", pageLoadStartedAt);
   const output = {};
   if (request.recentLimit) {
@@ -236,21 +249,25 @@ try {
     await browser.close();
     process.exit(0);
   }
+  const queryStartedAt = performance.now();
   for (const factoryOrder of request.factoryOrders) {
-    log("在 AIMES 工厂订单页填写查询条件（内容已省略）");
-    await input.fill(factoryOrder);
-    log("点击 AIMES 查询按钮");
-    await page.getByRole("button", { name: "查询", exact: true }).click();
-    const row = page.locator("tbody tr").filter({ hasText: factoryOrder });
-    await row.waitFor({ state: "visible", timeout: 20000 });
-    const values = await row.locator("td").allTextContents();
-    const index = values.findIndex(value => value.trim() === factoryOrder);
-    if (index < 0 || !values[index + 1]?.trim()) throw new Error(`找不到工厂单名称：${factoryOrder}`);
-    output[factoryOrder] = values[index + 1].trim();
+    await retryPageStep("查询工厂单名称", async () => {
+      log("正在查询 AIMES 工厂单名称", { stage: "factory_query", stage_label: "查询工厂单名称" });
+      await input.fill(factoryOrder);
+      await page.getByRole("button", { name: "查询", exact: true }).click({ timeout: 10000 });
+      const row = page.locator("tbody tr").filter({ hasText: factoryOrder });
+      await row.first().waitFor({ state: "visible", timeout: 10000 });
+      const values = await row.first().locator("td").allTextContents();
+      const index = values.findIndex(value => value.trim() === factoryOrder);
+      if (index < 0 || !values[index + 1]?.trim()) throw new Error(`找不到工厂单名称：${factoryOrder}`);
+      output[factoryOrder] = values[index + 1].trim();
+    });
   }
+  recordStage("factory_query", "查询工厂单名称", queryStartedAt);
+  output.timings = timings;
   process.stdout.write(JSON.stringify(output));
 } catch (error) {
-  process.stderr.write(`AIMES 自动查询失败：${error?.message || String(error)}${page ? `；当前页面：${page.url()}` : ""}\n`);
+  process.stderr.write(`AIMES 自动查询失败：${error?.message || String(error)}${page ? `；当前页面：${safePageURL()}` : ""}\n`);
   process.exitCode = 1;
 } finally {
   if (browser) await browser.close();

@@ -71,10 +71,17 @@ private struct MacOSUIRegressionTests {
         testMaterialDisplayNames()
         testOrderDetailMaterialRows()
         testOrderDashboardRules()
+        testDashboardActivityIsScopedToAppSession()
         testPendingServerSelectionAndRefreshContract()
         testPendingInventorySourceFolderPath()
         testPendingMaterialMappingIssueRoute()
         testPendingInventoryMappingResumeContract()
+        testSelectedServerPreviewFailure()
+        testHardwareSourceSelectionFlow()
+        testFolderPreviewMappingRecovery()
+        testPendingMappingCallbacks()
+        testPendingMappingMergesFolderIssues()
+        testPendingCenterWorkflowUIContract()
         testOrderOutboundFactorySelection()
         testProductionFeedbackAndDashboardProgress()
         testServerWriteMaterialPreviewOrdering()
@@ -726,6 +733,17 @@ private struct MacOSUIRegressionTests {
             aimesFormatWarnings: warningReviews
         )
         require(withFormatWarning.count == 1 && withFormatWarning[0].aimesFormatWarnings.count == 1, "AIMES 格式异常没有进入统一待处理中心")
+        require(withFormatWarning[0].status == "待人工确认", "AIMES 格式异常必须显示待人工确认")
+        require(withSeparateAimes.last?.status == "待人工确认", "AIMES review 必须显示待人工确认")
+        for kind in ["factory_ownership", "server_missing_report", "material_mapping", "hardware_mapping", "material_validation"] {
+            let issue = CurrentIssue(id: kind, kind: kind, orderId: "PP0035-2", factoryOrder: "F1", path: serverFolder + "/Report/material.xlsx", message: "未完成商品 SKU 处理：A", firstSeen: "", lastSeen: "")
+            for changes in [serverChanges, []] {
+                let items = buildPendingCenterItems(serverChanges: changes, currentIssues: [issue], aimesReviews: [])
+                let expected = ["factory_ownership", "server_missing_report"].contains(kind) ? "待人工确认" : "需人工处理"
+                require(items.first?.status == expected, "独立和合并问题必须保持相同分类：\(kind)")
+                require(!items.contains { $0.status == "稍后处理" }, "稍后处理不能成为状态")
+            }
+        }
         let dashboardLog = dashboardActivitySteps([
             "changes": [[
                 "observed_at": "2026-08-10T12:34:56",
@@ -1027,6 +1045,33 @@ private struct MacOSUIRegressionTests {
         _ = OrderDashboardView(model: AppModel())
     }
 
+    private static func testDashboardActivityIsScopedToAppSession() {
+        let sessionStartedAt = dashboardBusinessDate("2026-09-04T08:45:00")!
+        let activity = dashboardActivitySteps(
+            [
+                "changes": [
+                    [
+                        "observed_at": "2026-09-03T12:00:00",
+                        "message": "昨天的历史消息",
+                    ],
+                    [
+                        "observed_at": "2026-09-04T08:44:59",
+                        "message": "本次启动前的历史消息",
+                    ],
+                    [
+                        "observed_at": "2026-09-04T08:45:01",
+                        "message": "本次启动后的消息",
+                    ],
+                ],
+            ],
+            sessionStartedAt: sessionStartedAt
+        )
+        require(
+            activity.map(\.detail) == ["本次启动后的消息"],
+            "订单中心操作记录应只显示本次 App 打开后发生的记录"
+        )
+    }
+
     private static func testPendingServerSelectionAndRefreshContract() {
         let dashboardSource = try! String(
             contentsOfFile: "macos/OrderDashboardView.swift",
@@ -1112,9 +1157,9 @@ private struct MacOSUIRegressionTests {
             encoding: .utf8
         )
         require(
-            source.contains("private enum PendingMappingResumeAction")
+            source.contains("private struct PendingResumeContext")
                 && source.contains("case rereadSourceThenPresentReadOnlyPreview")
-                && source.contains("pendingMappingResumeAction = .rereadSourceThenPresentReadOnlyPreview"),
+                && source.contains("let originalItem: PendingCenterItem?"),
             "材料映射续接必须保存明确的来源文件重读与只读预览上下文"
         )
         guard let saveStart = source.range(of: "func saveInventoryMapping(travelerName: String, productCode: String)"),
@@ -1131,9 +1176,9 @@ private struct MacOSUIRegressionTests {
             "映射保存完成后必须进入单一续接协调器，不能同时启动预览和来源文件重读"
         )
         require(
-            source.contains("来源文件已重新读取，可进行只读预览")
-                && source.contains("showPendingCenterPrompt = true")
-                && source.contains("pendingMappingResumeAction = nil"),
+            source.contains("onDismiss: model.inventoryMappingWorkspaceDidDismiss")
+                && source.contains("presentServerWritePreview(preview)")
+                && source.contains("pendingResumeContext = nil"),
             "来源文件重读成功后才可设置只读预览提示，并清理一次性续接上下文"
         )
         require(
@@ -1142,6 +1187,229 @@ private struct MacOSUIRegressionTests {
                 && !saveSource.contains("--confirm-save"),
             "材料映射续接不得自动确认或触发真实写入"
         )
+    }
+
+    private static func testPendingCenterWorkflowUIContract() {
+        let source = try! String(contentsOfFile: "macos/OrderDashboardView.swift", encoding: .utf8)
+        let app = try! String(contentsOfFile: "macos/TravelerAssistant.swift", encoding: .utf8)
+        let start = source.range(of: "struct PendingCenterSheet: View")!.lowerBound
+        let end = source.range(of: "struct ServerWriteConfirmationSheet: View")!.lowerBound
+        let sheet = String(source[start..<end])
+        require(sheet.contains(".frame(width: 980, height: 620)") && app.contains(".frame(minWidth: 980, minHeight: 620)"), "待处理中心根容器与详情必须采用紧凑尺寸")
+        require(sheet.contains("[\"全部\", \"待处理\", \"处理失败\", \"待人工确认\", \"需人工处理\"]"), "筛选必须使用四种业务分类")
+        require(sheet.contains("visibleItems.first { $0.id == selectedID }") && sheet.contains("selectedID = item.id"), "详情必须跟随可见队列选择")
+        require(sheet.contains("model.selectedServerFolderPaths.removeAll()") && sheet.contains("model.selectedAimesReviewIDs.removeAll()"), "切换项目必须清除旧操作选择")
+        require(sheet.contains("Button(\"稍后处理\") { model.showPendingCenterPrompt = false }") && sheet.contains("选择并预览"), "稍后处理只关闭，预览必须有明确入口")
+        require(sheet.contains(".alert(confirmationTitle, isPresented: $showActionConfirmation)") && sheet.contains("pendingAction?()"), "待处理业务动作必须经过二次确认")
+        let preview = String(source[end...])
+        require(preview.contains(".alert(\"确认后写入\", isPresented: $showWriteConfirmation)") && preview.contains("guard canConfirmWrite else { return }"), "写入预览必须保留显式二次确认和校验门禁")
+    }
+
+    private static func testSelectedServerPreviewFailure() {
+        let model = AppModel()
+        let folder = URL(fileURLWithPath: "/tmp/PP0062-KITCHEN_20260908145832")
+        var fail: (() -> Void)?
+        model.pendingOrderRunner = { _, failure, _ in fail = failure }
+        model.processSelectedServerFolder(folder, includeHardware: true)
+        require(model.orderRunning && dashboardStatusIsInProgress(model.dashboardServerStatus), "预览开始应显示运行中")
+        model.orderError = "无法识别所选文件夹：" + folder.path
+        fail?()
+        require(!model.orderRunning && !dashboardStatusIsInProgress(model.dashboardServerStatus), "预览失败后不得继续显示运行中")
+        require(model.dashboardServerStatus.contains(folder.path) && model.dashboardSyncStatus == model.dashboardServerStatus, "失败状态应保留真实错误及路径")
+        require(model.dashboardActivity.first?.state == "failure" && model.dashboardActivity.first?.detail == model.dashboardServerStatus, "活动记录应显示实际失败原因")
+        require(!dashboardStatusIsInProgress("⚠️ 正在读取的文件已被移除"), "错误描述含正在也不能判为运行中")
+    }
+
+    private static func testHardwareSourceSelectionFlow() {
+        let model = AppModel()
+        let folder = "/tmp/PP9999"
+        let request: [String: Any] = ["source_folders": [folder], "include_hardware": true, "conflicts": [
+            ["factory_order": "F100", "candidates": [
+                ["id": "old-content", "path": folder + "/main/Fittingslist.xlsx", "items": [["name": "Hinge", "quantity": 2]]],
+                ["id": "new-content", "path": folder + "/leftovers/Fittingslist.xlsx", "items": [["name": "Hinge", "quantity": 5]]]
+            ]]
+        ]]
+        var commands: [[String]] = []
+        var complete: (([String: Any]) -> Void)?
+        model.pendingOrderRunner = { args, _, success in commands.append(args); complete = success }
+        model.processSelectedServerFolder(URL(fileURLWithPath: folder), includeHardware: true)
+        complete?(["hardware_source_selection": request])
+        require(model.showHardwareSourceSelection && !model.showServerWriteConfirmation, "报表冲突必须先选择，不能进入写入确认")
+        require(model.hardwareSourceChoices.isEmpty && !model.canResumeHardwareSourcePreview, "不得按名称或时间默认选择")
+        model.hardwareSourceChoices["F100"] = "old-content"
+        model.confirmHardwareSourceSelection()
+        require(commands.count == 1, "等来源选择 Sheet 关闭后才能重试")
+        model.hardwareSourceSelectionDidDismiss()
+        require(commands.count == 2 && commands.last?.first == "preview-server-changes", "选择只能重新预览，不能写入")
+        require(commands.last?.contains("--hardware-source-choices") == true && commands.last?.last?.contains("old-content") == true, "必须传递用户选择及内容标识")
+        let payload: [String: Any] = ["write_records": [:], "source_folders": [folder], "orders": [["order_id": "PP9999"]], "hardware_source_selection": request]
+        complete?(["server_write_preview": payload])
+        require(model.showServerWriteConfirmation, "完成来源预览后应保留独立的写入确认")
+        require(model.hardwareSourceChoices["F100"] == "old-content", "选定来源应保持到写入确认，不提供更换入口")
+
+    }
+
+    private static func testFolderPreviewMappingRecovery() {
+        let model = AppModel()
+        let folder = URL(fileURLWithPath: "/Volumes/server/Optimized Orders/PP0008")
+        var fail: (() -> Void)?
+        var commands: [[String]] = []
+        model.pendingOrderRunner = { args, failure, _ in commands.append(args); fail = failure }
+        model.processSelectedServerFolder(folder, includeHardware: false)
+        model.orderError = "材料文件尚未通过校验：订单 PP0008 存在未完成商品 SKU 处理：8mm--Walnut；请先设置映射"
+        fail?()
+        require(model.currentIssues.isEmpty && model.showInventoryMappingWorkspace, "内存预览发现映射问题应直接打开入口，无需已保存的待处理问题")
+        require(model.inventoryMappingTargetNames == ["8mm--Walnut"], "入口应列出实际缺失材料")
+        model.pendingInventoryRunner = { _, _, success in success([:]) }
+        model.saveInventoryMapping(travelerName: "8mm--Walnut", productCode: "TEST")
+        require(commands.count == 2 && commands.last == ["preview-server-changes", "--server-folder", folder.path, "--include-hardware", "false"], "映射后只重试原文件夹预览，并保留五金选项")
+        model.orderError = "未完成商品 SKU 处理：另一材料；请先设置映射"
+        fail?()
+        require(model.inventoryMappingTargetNames == ["另一材料"], "重试发现的新映射问题应提供处理入口")
+    }
+
+    private static func testPendingMappingCallbacks() {
+        let folder = "/Volumes/server/Optimized Orders/PP0099"
+        let path = folder + "/Report/material.xlsx"
+        let issue = CurrentIssue(id: "mapping-99", kind: "material_validation", orderId: "PP0099", factoryOrder: "F99", path: path, message: "未完成商品 SKU 处理：A、B", firstSeen: "", lastSeen: "")
+        let preview: [String: Any] = ["server_write_preview": ["write_records": [:], "source_folders": [folder], "orders": [["order_id": "PP0099"]]]]
+        let model = AppModel()
+        model.currentIssues = [issue]
+        var commands: [[String]] = []
+        var inventorySuccess: (([String: Any]) -> Void)?
+        var inventoryFailure: ((String) -> Void)?
+        var orderSuccess: (([String: Any]) -> Void)?
+        var orderFailure: (() -> Void)?
+        model.pendingInventoryRunner = { args, failure, success in
+            commands.append(args); inventoryFailure = failure; inventorySuccess = success
+        }
+        model.pendingOrderRunner = { args, failure, success in
+            commands.append(args); orderFailure = failure; orderSuccess = success
+        }
+        model.requestInventoryMapping(folderPath: path, message: issue.message)
+        let originalID = model.pendingCenterItems[0].id
+        model.saveInventoryMapping(travelerName: "A", productCode: "M1")
+        inventoryFailure?("save failed")
+        require(model.pendingCenterItems[0].id == originalID && model.inventoryMappingTargetNames == ["A", "B"], "保存失败不能清除原项目或剩余映射")
+        let saveFailure = model.pendingMappingResumeMessage(for: model.pendingCenterItems[0])
+        model.closeInventoryMappingWorkspace()
+        require(!saveFailure.isEmpty && model.pendingMappingResumeStates[originalID]?.failureMessage == saveFailure, "关闭必须保留项目级保存失败")
+        model.requestInventoryMapping(folderPath: path, message: issue.message)
+        require(model.activePendingMappingResumeState?.failureMessage == saveFailure && model.inventoryMappingTargetNames == ["A", "B"], "重开必须恢复失败和剩余项目")
+        model.saveInventoryMapping(travelerName: "A", productCode: "M1")
+        inventorySuccess?([:])
+        require(model.inventoryMappingTargetNames == ["B"] && commands.count == 2, "多个映射未完成前不得续跑")
+        model.closeInventoryMappingWorkspace()
+        model.requestInventoryMapping(folderPath: path, message: issue.message)
+        require(model.inventoryMappingTargetNames == ["B"], "重开不能从旧错误消息重新引入已保存的 A")
+        model.saveInventoryMapping(travelerName: "B", productCode: "M2")
+        inventorySuccess?([:])
+        require(commands.last == ["preview-server-changes", "--server-folder", folder, "--include-hardware", "true"], "续跑必须使用规范化原目录的内存预览")
+        let count = commands.count
+        model.retryPendingMappingPreview()
+        require(commands.count == count, "预览进行中不得并行启动续跑")
+        orderFailure?()
+        require(model.pendingCenterItems[0].id == originalID && model.showInventoryMappingWorkspace, "预览失败必须保留原项目和重试入口")
+        let previewFailure = model.pendingMappingResumeMessage(for: model.pendingCenterItems[0])
+        model.closeInventoryMappingWorkspace()
+        model.requestInventoryMapping(folderPath: path, message: issue.message)
+        require(!previewFailure.isEmpty && model.inventoryMappingTargetNames.isEmpty && model.activePendingMappingResumeState?.failureMessage == previewFailure, "预览失败后重开不能重新引入已保存映射")
+        model.retryPendingMappingPreview()
+        orderSuccess?([:])
+        require(!model.showServerWriteConfirmation, "无效预览不能呈现确认界面")
+        model.retryPendingMappingPreview()
+        let beforePreviewResult = commands.count
+        orderSuccess?(preview)
+        require(commands.count == beforePreviewResult, "预览成功后不得启动 list-index 或任何替代查询")
+        require(!model.showInventoryMappingWorkspace && !model.showServerWriteConfirmation, "必须等待映射 Sheet 完成关闭")
+        model.inventoryMappingWorkspaceDidDismiss()
+        require(model.showServerWriteConfirmation && model.serverWritePreview?.sourceFolders == [folder], "成功后必须真正呈现原文件夹 Server 预览")
+        require(model.pendingCenterItems[0].id == originalID, "预览成功不代表原问题已写入或已解决")
+        require(!commands.contains { $0[0].hasPrefix("confirm-") || $0[0] == "process-server-folder" || $0[0] == "list-index" }, "自动续跑不能调用业务写入或列表协调命令")
+
+        model.showServerWriteConfirmation = false
+        model.requestInventoryMapping(folderPath: path, message: "处理：A")
+        require(model.inventoryMappingTargetNames.isEmpty && model.activePendingMappingResumeState?.failureMessage == "", "成功后重开应保持已完成映射并清除旧失败")
+        model.saveInventoryMapping(travelerName: "A", productCode: "M1")
+        let staleSave = inventorySuccess
+        model.closeInventoryMappingWorkspace()
+        let beforeCancel = commands.count
+        staleSave?([:])
+        require(commands.count == beforeCancel && !model.showServerWriteConfirmation, "取消后的保存回调不能启动预览")
+        model.requestInventoryMapping(folderPath: path, message: "处理：A")
+        model.saveInventoryMapping(travelerName: "A", productCode: "M1")
+        inventorySuccess?([:])
+        let stalePreview = orderSuccess
+        model.requestInventoryMapping(folderPath: "/Volumes/server/Other/Report/file.xlsx", message: "处理：C")
+        let beforeSwitch = commands.count
+        stalePreview?(preview)
+        require(commands.count == beforeSwitch && model.inventoryMappingTargetNames == ["C"], "旧预览回调不得覆盖新项目")
+        model.inventoryMappingWorkspaceDidDismiss()
+        require(model.showInventoryMappingWorkspace && model.inventoryMappingTargetNames == ["C"], "旧 Sheet 关闭通知不得取消新请求")
+        model.closeInventoryMappingWorkspace()
+
+        // Ignoring one mapping uses the same serial continuation and preserves unsaved items.
+        let ignorePath = "/Volumes/server/Ignore/Report/material.xlsx"
+        model.requestInventoryMapping(folderPath: ignorePath, message: "未映射材料：A、B。请处理")
+        model.saveInventoryIgnoredMapping(name: "A", reason: "test")
+        inventoryFailure?("ignore failed")
+        require(model.inventoryMappingTargetNames == ["A", "B"], "忽略保存失败必须保留全部映射")
+        model.saveInventoryIgnoredMapping(name: "A", reason: "test")
+        inventorySuccess?([:])
+        require(model.inventoryMappingTargetNames == ["B"] && commands.last?.first == "ignore-item", "忽略首项后不得提前预览")
+        model.closeInventoryMappingWorkspace()
+        model.requestInventoryMapping(folderPath: ignorePath, message: "未映射材料：A、B。请处理")
+        require(model.inventoryMappingTargetNames == ["B"], "关闭重开不能重新引入已忽略的 A")
+        model.orderRunning = true
+        model.saveInventoryMapping(travelerName: "B", productCode: "M2")
+        inventorySuccess?([:])
+        require(model.inventoryStatus.contains("订单操作进行中"), "忙碌的订单通道必须提供可恢复提示，不能静默丢弃续跑")
+        model.orderRunning = false
+        model.retryPendingMappingPreview()
+        let staleResult = orderSuccess
+        model.closeInventoryMappingWorkspace()
+        staleResult?(preview)
+        model.inventoryMappingWorkspaceDidDismiss()
+        require(!model.showServerWriteConfirmation && model.pendingCenterItems[0].id == originalID, "预览期间取消不能呈现预览或移除待处理项目")
+
+        let latePath = "/Volumes/server/Late/Report/material.xlsx"
+        model.requestInventoryMapping(folderPath: latePath, message: "处理：Late")
+        model.saveInventoryMapping(travelerName: "Late", productCode: "M3")
+        model.closeInventoryMappingWorkspace()
+        let beforeLateSave = commands.count
+        inventorySuccess?([:])
+        model.requestInventoryMapping(folderPath: latePath, message: "处理：Late")
+        require(model.inventoryMappingTargetNames.isEmpty && commands.count == beforeLateSave, "关闭后完成的保存必须记住，不能自动续跑或重新引入材料")
+        model.closeInventoryMappingWorkspace()
+    }
+
+    private static func testPendingMappingMergesFolderIssues() {
+        let folder = "/Volumes/server/Optimized Orders/PP0100"
+        let pathA = folder + "/Report/a.xlsx"
+        let pathB = folder + "/Report/b.xlsx"
+        let model = AppModel()
+        model.pendingServerChanges = [ServerChangePreview(id: "folder-100", changeType: "modified", kind: "folder", orderId: "PP0100", sourceFolder: folder, path: folder, message: "changed", manualOnly: false, eventTime: "")]
+        model.currentIssues = [pathA, pathB].enumerated().map { index, path in
+            CurrentIssue(id: "issue-\(index)", kind: "material_mapping", orderId: "PP0100", factoryOrder: "", path: path, message: "处理：\(index == 0 ? "A" : "B")", firstSeen: "", lastSeen: "")
+        }
+        model.pendingInventoryRunner = { _, _, success in success([:]) }
+        model.pendingOrderRunner = { _, failure, _ in failure() }
+        let item = model.pendingCenterItems[0]
+        require(model.pendingCenterItems.count == 1, "测试必须为同一文件夹合并的两个问题")
+        model.requestInventoryMapping(folderPath: pathA, message: "处理：A")
+        model.saveInventoryMapping(travelerName: "A", productCode: "M1")
+        model.closeInventoryMappingWorkspace()
+        model.requestInventoryMapping(folderPath: pathB, message: "处理：B")
+        require(model.inventoryMappingTargetNames == ["B"], "同文件夹第二问题的 B 不能被首个问题缓存隐藏")
+        model.closeInventoryMappingWorkspace()
+        model.requestInventoryMapping(folderPath: pathA, message: "处理：a、B、C")
+        require(model.inventoryMappingTargetNames == ["B", "C"], "重开必须合并新 C，去重 B，并排除已保存 A 的大小写变体")
+        require(model.pendingMappingResumeState(for: item)?.completedNames == ["A"], "已完成集合必须独立于剩余列表保存")
+        model.saveInventoryIgnoredMapping(name: "B", reason: "test")
+        model.closeInventoryMappingWorkspace()
+        model.requestInventoryMapping(folderPath: pathB, message: "处理：A、B、C、D")
+        require(model.inventoryMappingTargetNames == ["C", "D"], "已忽略 B 不能复活；尚未见过的 D 必须出现")
+        model.closeInventoryMappingWorkspace()
     }
 
     private static func testOrderOutboundFactorySelection() {

@@ -56,6 +56,14 @@ def ensure_outbound_document_factory_links(
     order_id = str(order_id or "").strip().upper()
     if not document_number or not order_id:
         return 0
+    # Production consumption never proves that a factory order was shipped,
+    # including when startup backfills legacy document relationships.
+    document = connection.execute(
+        "select document_type from outbound_documents where document_number=?",
+        (document_number,),
+    ).fetchone()
+    if document and document[0] == "production_materials":
+        return 0
     if connection.execute(
         "select 1 from sqlite_master where type='table' and name='outbound_document_factories'"
     ).fetchone() is None:
@@ -133,6 +141,24 @@ def ensure_schema(path: Path) -> None:
     try:
         connection.executescript(
             """
+            create table if not exists hardware_source_versions(
+                factory_order text primary key,
+                order_id text not null,
+                fingerprint text not null,
+                source_paths_json text not null,
+                row_count integer not null,
+                updated_at text not null
+            );
+            create table if not exists sync_changes(
+                id integer primary key,
+                observed_at text not null,
+                severity text not null,
+                kind text not null,
+                order_id text not null default '',
+                factory_order text not null default '',
+                path text not null default '',
+                message text not null
+            );
             create table if not exists workflow_metadata(
                 key text primary key,
                 value text not null default '',

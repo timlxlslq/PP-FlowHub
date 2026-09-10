@@ -9,14 +9,25 @@ rendering use the same source-selection contract.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+import hashlib
+import json
 from pathlib import Path
 from typing import Callable, Iterable
 
 from .core import FittingItem, RuleError, parse_fittings_groups
+from .report_read_context import current_report_context
 
 
 EPSILON = 1e-9
+
+
+def is_fittings_report(path: Path) -> bool:
+    """Recognize current English and legacy Chinese AICNC report filenames."""
+    return (
+        path.suffix.casefold() == ".xlsx"
+        and not path.name.startswith("~$")
+        and path.stem.casefold().startswith(("fittingslist", "五金料单"))
+    )
 
 
 def fitting_signature(items: Iterable[FittingItem]) -> tuple:
@@ -47,12 +58,11 @@ def select_latest_fittings(
     fallback_factory: str = "",
     is_empty_report: Callable[[Path], bool] | None = None,
 ) -> tuple[dict[str, SelectedFittings], list[str], bool, list[Path]]:
-    """Select one Fittingslist block per factory order.
+    """Select one complete report block per factory, requiring a choice on conflicts.
 
     Returns ``(selected, warnings, found_files, skipped_empty_files)``.  A
-    factory order is selected from the newest file.  Equal-time files with
-    different content stop the selection so the caller cannot silently choose
-    an arbitrary source.
+    differing report always requires an explicit content-bound choice; neither
+    folder names nor modification times determine the selected source.
     """
     occurrences: dict[str, list[SelectedFittings]] = {}
     found_files = False
@@ -72,8 +82,6 @@ def select_latest_fittings(
             raise
         modified_at = path.stat().st_mtime
         for factory, items in groups:
-            if not any(float(item.quantity) > 0 for item in items):
-                continue
             candidate = SelectedFittings(
                 path=path,
                 modified_at=modified_at,
@@ -84,26 +92,46 @@ def select_latest_fittings(
 
     selected: dict[str, SelectedFittings] = {}
     warnings: list[str] = []
+    conflicts: list[dict] = []
+    context = current_report_context()
+    choices = context.choices if context else {}
     for factory, matches in sorted(occurrences.items()):
-        newest_time = max(item.modified_at for item in matches)
-        newest = [item for item in matches if abs(item.modified_at - newest_time) < EPSILON]
-        newest_signatures = {item.signature for item in newest}
-        if len(newest_signatures) > 1:
-            raise RuleError(
-                "fittings_timestamp_tie",
-                f"{factory} 的多个最新 Fittingslist 修改时间相同但五金内容不同，请人工检查",
-                files=[str(item.path) for item in newest],
-            )
-        chosen = newest[0]
-        selected[factory] = chosen
-        all_signatures = {item.signature for item in matches}
-        if len(all_signatures) > 1:
-            older = [str(item.path) for item in matches if item.path != chosen.path]
-            warnings.append(
-                f"{factory} 在不同 Fittingslist 中内容不一致；已采用修改时间最新的 {chosen.path.name}"
-                f"（{datetime.fromtimestamp(chosen.modified_at).isoformat(timespec='seconds')}），"
-                f"较旧文件：{'、'.join(older)}"
-            )
+        candidates = [fittings_candidate(source) for source in matches]
+        requested = choices.get(factory)
+        resolved = context.resolved_sources.get(factory) if context else None
+        # A folder-local pass cannot replace the choice resolved from the full
+        # request's candidate set with another report for the same factory.
+        chosen = next((source for source, candidate in zip(matches, candidates)
+                       if candidate["id"] == (requested or resolved)), None)
+        if resolved and chosen is None and context.resolved_paths.get(factory) not in {c["path"] for c in candidates}:
+            continue
+        different = len({source.signature for source in matches}) > 1
+        if different and context is not None:
+            context.source_conflicts[factory] = {"factory_order": factory, "candidates": candidates}
+        if (different or requested or resolved) and chosen is None:
+            conflicts.append({"factory_order": factory, "candidates": candidates})
+            continue
+        selected[factory] = chosen or matches[0]
+        if context is not None:
+            context.resolved_sources[factory] = fittings_candidate(selected[factory])["id"]
+            context.resolved_paths[factory] = str(selected[factory].path.resolve())
+        if different:
+            warnings.append(f"{factory} 五金内容不一致，已采用用户选择的 {selected[factory].path}")
         elif len(matches) > 1:
-            warnings.append(f"{factory} 在 {len(matches)} 份 Fittingslist 中重复且内容一致，已自动去重")
+            warnings.append(f"{factory} 在 {len(matches)} 份五金报表中内容一致，已自动去重")
+    if conflicts:
+        raise RuleError("fittings_selection_required", "同一工厂单的五金报表内容不同，请选择五金来源",
+                        conflicts=conflicts)
     return selected, warnings, found_files, skipped_empty
+
+
+def fittings_candidate(source: SelectedFittings) -> dict:
+    """Bind a choice to the full report path and parsed content, not its time."""
+    identity = json.dumps([str(source.path.resolve()), source.signature], ensure_ascii=False)
+    return {
+        "id": hashlib.sha256(identity.encode()).hexdigest(),
+        "path": str(source.path.resolve()),
+        "modified_at": source.modified_at,
+        "items": [dict(name=item.name, code=item.code, spec=item.size,
+                       unit=item.unit, quantity=item.quantity) for item in source.items],
+    }

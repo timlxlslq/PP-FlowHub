@@ -212,6 +212,23 @@ class OrderIndexTests(unittest.TestCase):
                 [("F-VANITY", "Drawer slide", 4.0)],
             )
 
+    def test_invalid_preview_folder_reports_path_without_copying_database(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state", source_root=root / "source", order_root=root / "orders")
+            config.prepare_storage()
+            folder = config.source_root / "PP0062-KITCHEN_20260908145832"
+            folder.mkdir(parents=True)
+            (folder / "nesting_result.xml").write_text("<result/>")
+            with patch("traveler_assistant.order_index._report_files", wraps=_report_files) as reports, patch("traveler_assistant.order_index.sqlite3.connect") as connect:
+                with self.assertRaises(RuleError) as raised:
+                    preview_server_changes(config, [folder])
+            self.assertEqual(raised.exception.code, "server_folder_invalid")
+            self.assertIn(str(folder), str(raised.exception))
+            self.assertIn("上一级订单目录", str(raised.exception))
+            reports.assert_called_once_with(folder.resolve())
+            connect.assert_not_called()
+
     def test_server_preview_requires_factory_confirmation_before_production_write(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -249,7 +266,9 @@ class OrderIndexTests(unittest.TestCase):
             stale.commit()
             stale.close()
 
-            with patch(
+            from traveler_assistant.order_workflow import parse_fittings_groups
+            from traveler_assistant.order_index import _server_preview_payload
+            with patch("traveler_assistant.order_workflow.parse_fittings_groups", wraps=parse_fittings_groups) as parse, patch("traveler_assistant.order_index._server_preview_payload", wraps=_server_preview_payload) as build, patch(
                 "traveler_assistant.order_index.sync_order_index",
                 wraps=sync_order_index,
             ) as sync, patch(
@@ -257,6 +276,9 @@ class OrderIndexTests(unittest.TestCase):
                 return_value={"missing": []},
             ):
                 preview = preview_server_changes(config, [folder])
+            parse.assert_called_once_with((report / "Fittingslist.xlsx").resolve())
+            build.assert_called_once()
+            self.assertTrue(preview["server_write_preview"]["hardware_source_items"])
             sync.assert_called_once()
             self.assertFalse(sync.call_args.kwargs["full_refresh"])
             self.assertTrue(sync.call_args.kwargs["validate_selected_orders"])
@@ -339,7 +361,7 @@ class OrderIndexTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_server_preview_uses_recut_board_as_increment_and_base_fittings_only(self):
+    def test_server_preview_preserves_recut_material_and_requires_hardware_choice(self):
         """A recut board adds material without replacing the base hardware report."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -424,7 +446,10 @@ class OrderIndexTests(unittest.TestCase):
                 "traveler_assistant.inventory.resolve_inventory_items",
                 return_value={"missing": [], "ignored": [], "outbound": []},
             ):
-                payload = preview_server_changes(config, [folder])["server_write_preview"]
+                selection = preview_server_changes(config, [folder])["hardware_source_selection"]
+                candidates = selection["conflicts"][0]["candidates"]
+                chosen = next(item for item in candidates if item["path"] == str((base_report / "Fittingslist.xlsx").resolve()))
+                payload = preview_server_changes(config, [folder], hardware_source_choices={"F100": chosen["id"]})["server_write_preview"]
 
             order = next(item for item in payload["orders"] if item["order_id"] == "PP9999")
             plywood_changes = [
@@ -770,7 +795,7 @@ class OrderIndexTests(unittest.TestCase):
             )
             self.assertEqual(
                 [stage["stage"] for stage in preview_timing["stages"]],
-                ["preview_database", "server_parse", "preview_build"],
+                ["source_selection", "preview_database", "server_parse", "preview_build"],
             )
 
             self.assertEqual(
@@ -805,6 +830,8 @@ class OrderIndexTests(unittest.TestCase):
 
             self.assertEqual(raised.exception.code, "material_validation")
             self.assertIn("Color 为空", str(raised.exception))
+            self.assertNotIn("请手工修正 Room/section", str(raised.exception))
+            self.assertIn("重新预览", str(raised.exception))
 
     def test_server_material_allocation_splits_one_source_row_between_orders(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1909,7 +1936,20 @@ class OrderIndexTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertEqual(rows, [(5.0, str(third))])
+            self.assertEqual(rows, [(2.0, str(first))])
+            from traveler_assistant.fittings import select_latest_fittings
+            from traveler_assistant.report_read_context import report_read_session
+            with self.assertRaises(RuleError) as conflict:
+                select_latest_fittings([first, second, third])
+            option = next(item for item in conflict.exception.context["conflicts"][0]["candidates"] if item["path"] == str(third.resolve()))
+            with report_read_session({"F100": option["id"]}):
+                sync_order_index(config, full_refresh=True, refresh_outbound_statuses=False, reconcile_outbound=False)
+            store = OrderIndexStore(config.workflow_database)
+            try:
+                rows = store.connection.execute("select quantity, source_path from hardware_items where factory_order='F100' and source_type='aicnc' and active=1").fetchall()
+                self.assertEqual(rows, [(5.0, str(third))])
+            finally:
+                store.close()
 
     def test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records(self):
         class TrackingExecutor:
@@ -2903,7 +2943,7 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual([item["factory_order"] for item in summary["factories"]], ["F101"])
         self.assertEqual(tuple(status), ("deleted", "2026-08-16T11:00:00"))
 
-    def test_invalid_aimes_rows_are_transient_warnings_only(self):
+    def test_invalid_aimes_rows_persist_for_reopen_without_entering_business_tables(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config()
             config.state_dir = Path(temp) / "state"
@@ -2927,9 +2967,97 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(result["aimes_issues"], [])
             self.assertEqual(result["aimes_warnings"][0]["factory_order"], "F200")
             store = OrderIndexStore(config.workflow_database)
-            self.assertEqual(store.connection.execute("select count(*) from aimes_review_rows").fetchone()[0], 0)
+            self.assertEqual(store.connection.execute("select count(*) from aimes_review_rows").fetchone()[0], 1)
             self.assertEqual(store.connection.execute("select count(*) from factory_orders").fetchone()[0], 0)
             store.close()
+
+            reopened = list_order_index(config)
+            self.assertEqual(reopened["aimes_warnings"][0]["factory_order"], "F200")
+
+    def test_skipped_aimes_refresh_keeps_persisted_warning_visible_after_reopen(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = Config(state_dir=Path(temp) / "state")
+            config.prepare_storage()
+            store = OrderIndexStore(config.workflow_database)
+            store.replace_aimes_review_rows([{
+                "ignore_key": "factory:F2608190230",
+                "factory_order": "F2608190230",
+                "factory_name": "P0072-BED 2",
+                "sales_order_name": "PP0072",
+                "reason": "工厂单名称订单前缀 P0072 与销售单名称 PP0072 不一致",
+                "suggested_order_id": "",
+                "split_time": "2026-08-19T13:06:45",
+            }])
+            today = datetime.now().date().isoformat()
+            store.record_run(
+                f"{today}T08:00:00",
+                f"{today}T08:01:00",
+                aimes_attempted=True,
+                aimes_succeeded=True,
+                aimes_count=1,
+                server_folder_count=0,
+            )
+            store.commit()
+            store.close()
+
+            result = sync_aimes_index(config, if_needed=True)
+
+            self.assertFalse(result["aimes"]["attempted"])
+            self.assertEqual(result["aimes"]["warning_count"], 1)
+            self.assertEqual(result["aimes_warnings"][0]["factory_order"], "F2608190230")
+
+    def test_persisted_aimes_warning_can_be_assigned_when_valid_cache_excludes_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = Config(state_dir=Path(temp) / "state")
+            config.prepare_storage()
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_order("PP0072", validation_status="正常", stage="已出货")
+            store.upsert_factory(
+                "F2608190230",
+                order_id="PP0072",
+                factory_name="P0072-BED 2",
+                sales_order_name="PP0072",
+                name_source="AIMES",
+                ownership_status="已确认",
+                outbound_status="已出库",
+            )
+            store.replace_aimes_review_rows([{
+                "ignore_key": "factory:F2608190230",
+                "factory_order": "F2608190230",
+                "factory_name": "P0072-BED 2",
+                "sales_order_name": "PP0072",
+                "reason": "工厂单名称订单前缀 P0072 与销售单名称 PP0072 不一致",
+                "suggested_order_id": "",
+                "split_time": "2026-08-19T13:06:45",
+            }])
+            store.commit()
+            store.close()
+
+            with patch("traveler_assistant.order_index.load_aimes_order_cache", return_value=[]):
+                result = assign_aimes_factory_order(
+                    config,
+                    "factory:F2608190230",
+                    "PP0072",
+                )
+
+            self.assertEqual(result["aimes_warnings"], [])
+            reopened = OrderIndexStore(config.workflow_database)
+            assignment = reopened.connection.execute(
+                "select assigned_order_id from aimes_order_assignments where ignore_key = ?",
+                ("factory:F2608190230",),
+            ).fetchone()
+            outbound = reopened.connection.execute(
+                "select outbound_status from factory_orders where factory_order = ?",
+                ("F2608190230",),
+            ).fetchone()
+            review_count = reopened.connection.execute(
+                "select count(*) from aimes_review_rows where ignore_key = ?",
+                ("factory:F2608190230",),
+            ).fetchone()[0]
+            reopened.close()
+            self.assertEqual(tuple(assignment), ("PP0072",))
+            self.assertEqual(tuple(outbound), ("已出库",))
+            self.assertEqual(review_count, 0)
 
     def test_exactly_verified_aimes_factory_is_persisted_as_aimes_identity(self):
         with tempfile.TemporaryDirectory() as temp:

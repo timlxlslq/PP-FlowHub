@@ -15,6 +15,7 @@ import math
 import os
 import re
 import shutil
+import sqlite3
 import sys
 import tempfile
 import time
@@ -46,7 +47,8 @@ from .inventory import (
     set_ignored_mapping,
     TravelerItem,
 )
-from .fittings import select_latest_fittings
+from .fittings import is_fittings_report, select_latest_fittings
+from .report_read_context import cached_report, report_paths
 from .operation_log import configure_operation_log
 from .database import ensure_schema
 
@@ -144,7 +146,7 @@ def related_order_ids(folder: Path) -> list[str]:
             if path.is_file():
                 found.update(_order_ids_in_text(path.name))
         return sorted(found)
-    for path in folder.rglob("*.xlsx"):
+    for path in report_paths(folder):
         found.update(_order_ids_in_text(path.name))
         if "板材清单" in path.name:
             try:
@@ -440,6 +442,7 @@ def repair_material_color_table(path: Path) -> dict:
         wb.close()
 
 
+@cached_report
 def parse_order_materials(order_id: str, path: Path) -> tuple[str, list[MaterialItem], dict[str, float]]:
     wb = load_workbook(path, data_only=True, read_only=True)
     if len(wb.sheetnames) != 1:
@@ -1160,7 +1163,7 @@ def generate_material_from_reports(folder: Path, order_id: str) -> Path:
     if destination.exists():
         raise RuleError("material_generation_failed", f"material 文件已存在：{destination.name}")
     reports = sorted(
-        path for path in folder.rglob("*.xlsx")
+        path for path in report_paths(folder)
         if not path.name.startswith("~$") and "板材清单" in path.name
     )
     if not reports:
@@ -1272,6 +1275,7 @@ def generate_material_from_reports(folder: Path, order_id: str) -> Path:
     return destination
 
 
+@cached_report
 def parse_material_room_rows(path: Path) -> list[tuple[str, list[MaterialItem], dict[str, float]]]:
     """Read room-level material quantities when the material workbook provides them."""
     wb = load_workbook(path, data_only=True, read_only=True)
@@ -1362,6 +1366,7 @@ def _next_value_on_row(ws, row: int, col: int) -> str:
     return ""
 
 
+@cached_report
 def parse_board_identity(path: Path) -> tuple[str, str]:
     wb = load_workbook(path, data_only=True, read_only=True)
     ws = wb[wb.sheetnames[0]]
@@ -1433,8 +1438,8 @@ def _choose_fittings(
     fallback_factory: str = "",
 ) -> tuple[dict[str, list[FittingItem]], list[str]]:
     paths = sorted(
-        path for path in folder.rglob("*.xlsx")
-        if not path.name.startswith("~$") and path.name.lower().startswith("fittingslist")
+        path for path in report_paths(folder)
+        if is_fittings_report(path)
     )
     selected, warnings, found_files, skipped_empty = select_latest_fittings(
         paths,
@@ -1500,7 +1505,30 @@ def _factory_names(
     fallback_factory: str = "",
 ) -> tuple[dict[str, str], list[str]]:
     names: dict[str, str] = {}
-    for path in folder.rglob("*.xlsx"):
+    trusted: set[str] = set()
+    known_relations: dict[str, str] = {}
+    connection = config.workflow_connection
+    owns_connection = connection is None
+    if connection is None and config.workflow_database.is_file():
+        connection = sqlite3.connect(f"file:{config.workflow_database}?mode=ro", uri=True)
+    try:
+        if connection is not None and connection.execute(
+            "select 1 from sqlite_master where type='table' and name='factory_orders'"
+        ).fetchone():
+            for factory, owner, name in connection.execute(
+                "select factory_order, order_id, factory_name from factory_orders "
+                "where aimes_status='active' and ownership_status='已确认'"
+            ):
+                known_relations[str(factory).upper()] = str(owner).upper()
+                if str(owner).upper() == order_id.upper():
+                    trusted.add(str(factory).upper())
+                    names[str(factory).upper()] = str(name or factory)
+    finally:
+        if owns_connection and connection is not None:
+            connection.close()
+    # Existing confirmed ownership is authoritative, even when a display name
+    # has no order prefix. Source reports still discover previously unknown IDs.
+    for path in report_paths(folder):
         if path.name.startswith("~$") or "板材清单" not in path.name:
             continue
         try:
@@ -1509,6 +1537,8 @@ def _factory_names(
             if allow_unscoped:
                 continue
             raise
+        if factory in known_relations:
+            continue
         if not allow_unscoped and not _factory_name_belongs_to_order(order_id, name):
             # A shared folder may contain board lists for a sibling order such
             # as PP0035. Ignore those rows here; they must not contaminate the
@@ -1524,18 +1554,19 @@ def _factory_names(
         # never tries to resolve a synthetic folder key as a real factory.
         names.setdefault(fallback_factory.strip(), fallback_name.strip())
     cache = load_factory_name_cache(config)
-    for factory in factories - set(names):
+    for factory in factories - set(names) - set(known_relations):
         if cache.get(factory):
             names[factory] = cache[factory]
-    missing = sorted(factories - set(names))
+    missing = sorted(factories - set(names) - set(known_relations))
     if missing:
         fetched = lookup_aimes_names(config, missing)
         names.update(fetched)
         cache.update(fetched)
-        save_factory_name_cache(config, cache)
+        if config.workflow_connection is None:
+            save_factory_name_cache(config, cache)
     foreign = [
         factory for factory, name in names.items()
-        if not allow_unscoped and not _factory_name_belongs_to_order(order_id, name)
+        if factory not in trusted and not allow_unscoped and not _factory_name_belongs_to_order(order_id, name)
     ]
     for factory in foreign:
         names.pop(factory, None)
@@ -1663,7 +1694,7 @@ def preview_order(
         raise RuleError("invalid_order_folder", f"订单文件夹名称不符合 PP####、PP####-# 或 CS###：{folder.name}")
     order_id = (requested_order_id or match.group(1)).upper()
     materials_files = sorted(
-        path for path in folder.rglob("*.xlsx")
+        path for path in report_paths(folder)
         if path.is_file() and path.suffix.lower() == ".xlsx"
         and "material" in path.name.lower()
         and not path.name.startswith("~$")
@@ -1881,6 +1912,9 @@ def persist_preview(config: Config, preview: OrderPreview) -> None:
     if connection is None:
         import sqlite3
         connection = sqlite3.connect(config.workflow_database)
+    if not connection.in_transaction:
+        connection.execute("begin")
+    connection.execute("savepoint persist_order_preview")
     try:
         connection.execute(
             "delete from material_items where order_id=? and source_type in ('aihouse','derived')",
@@ -1910,28 +1944,30 @@ def persist_preview(config: Config, preview: OrderPreview) -> None:
                 (preview.order_id.upper(), "edge", color, "", float(quantity), "m", color,
                  "aihouse", str(preview.materials_path), "", observed),
             )
-        connection.execute(
-            "delete from hardware_items where order_id=? and source_type='aicnc'",
-            (preview.order_id.upper(),),
-        )
+        # A material-only or partial preview must not erase other factories.
+        from .hardware_facts import replace_factory_hardware
         resolution_index = len(preview.materials) + len(preview.edge_banding)
-        for factory in preview.factories:
+        for factory in preview.factories if preview.include_hardware else []:
+            rows = []
             for item in factory.fittings:
                 accepted = resolution.get("accepted", [])[resolution_index] if resolution_index < len(resolution.get("accepted", [])) else {}
                 resolution_index += 1
                 if item.ignored or accepted.get("ignored") or ignored_hardware_reason(mappings, item.name, item.code) is not None:
                     continue
-                product_code = resolved_product_code(resolution, resolution_index - 1, item.code)
-                connection.execute(
-                    """insert into hardware_items(
-                        order_id,factory_order,scope,product_code,source_code,name,spec,quantity,unit,
-                        source_type,source_path,remarks,updated_at
-                    ) values(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (preview.order_id.upper(), factory.factory_order, "factory_order", product_code, item.code,
-                     item.name, item.size, float(item.quantity), item.unit, "aicnc",
-                     str(preview.folder), "", observed),
-                )
-        connection.commit()
+                rows.append({"order_id": preview.order_id.upper(), "factory_order": factory.factory_order,
+                    "product_code": resolved_product_code(resolution, resolution_index - 1, item.code),
+                    "source_code": item.code, "name": item.name, "spec": item.size,
+                    "quantity": float(item.quantity), "unit": item.unit})
+            replace_factory_hardware(connection, factory.factory_order, rows,
+                source_path=str(preview.folder), observed_at=observed,
+                reason="订单预览写入", allow_empty=bool(factory.fittings))
+        connection.execute("release persist_order_preview")
+        if owns_connection:
+            connection.commit()
+    except Exception:
+        connection.execute("rollback to persist_order_preview")
+        connection.execute("release persist_order_preview")
+        raise
     finally:
         if owns_connection:
             connection.close()
@@ -3337,6 +3373,7 @@ def main(
     parser.add_argument("--material-id", type=int)
     parser.add_argument("--ignore-key", action="append", default=[])
     parser.add_argument("--issue-key", default="")
+    parser.add_argument("--hardware-source-choices", default="{}")
     parser.add_argument("--factory-orders-json", default="[]")
     parser.add_argument("--materials-json", default="[]")
     args = parser.parse_args(argv)
@@ -3424,6 +3461,7 @@ def main(
                     config,
                     args.server_folder,
                     include_hardware=args.include_hardware == "true",
+                    hardware_source_choices=json.loads(args.hardware_source_choices),
                 )
             except ValueError as exc:
                 raise RuleError("invalid_arguments", str(exc)) from exc
@@ -3691,6 +3729,10 @@ def main(
             "action": args.command,
             "duration_seconds": round(time.perf_counter() - command_started, 6),
         }
+        if isinstance(result, dict) and "report_read_metrics" in result:
+            completion_details["report_read_metrics"] = result["report_read_metrics"]
+        if isinstance(result, dict) and "operation_timing" in result:
+            completion_details["operation_timing"] = result["operation_timing"]
         if args.command == "scan-server":
             server = result.get("server", {}) if isinstance(result, dict) else {}
             folder_file_timings = server.get("folder_file_timings", []) if isinstance(server, dict) else []

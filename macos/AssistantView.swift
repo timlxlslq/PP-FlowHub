@@ -807,9 +807,6 @@ struct AssistantView: View {
                 Divider()
 
                 currentOperationSummary
-                    .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
-                    .padding(.horizontal, 22)
-                    .padding(.vertical, 12)
             }
         }
     }
@@ -819,12 +816,13 @@ struct AssistantView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
                     assistantMetric("总订单数", value: effectiveOrders.count, symbol: "square.stack.3d.up", color: .primary)
-                    Divider().frame(height: 66)
+                    Divider().frame(height: 54)
                     assistantMetric("本月已完成", value: monthlyCompletedCount, symbol: "checkmark.circle", color: AppPalette.success)
-                    Divider().frame(height: 66)
+                    Divider().frame(height: 54)
                     assistantMetric("正在进行", value: ongoingOrders.count, symbol: "waveform.path.ecg", color: AppPalette.accent)
                 }
-                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 6)
 
                 Divider()
 
@@ -873,37 +871,32 @@ struct AssistantView: View {
                     .foregroundColor(color)
             }
         }
-        .frame(width: 140, height: 92, alignment: .leading)
+        .frame(width: 140, height: 78, alignment: .center)
         .padding(.horizontal, 16)
     }
 
     private var currentOperationSummary: some View {
         let operation = currentAssistantOperation
-        return HStack(spacing: 12) {
-            Image(systemName: operation.running ? "arrow.triangle.2.circlepath.circle.fill" : "pause.circle.fill")
-                .font(.system(size: 23))
-                .foregroundColor(operation.running ? AppPalette.accent : .secondary)
-                .symbolEffect(.rotate, options: .repeating, isActive: operation.running)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("当前操作")
-                    .font(.system(size: AssistantDashboardTypography.operationLabel, weight: .medium))
-                    .foregroundColor(.secondary)
+        return HStack(spacing: 10) {
+                Image(systemName: operation.running ? "arrow.triangle.2.circlepath.circle.fill" : "checkmark.circle.fill")
+                    .font(.system(size: 19))
+                    .foregroundColor(operation.running ? AppPalette.accent : AppPalette.success)
+                    .symbolEffect(.rotate, options: .repeating, isActive: operation.running)
                 Text(operation.title)
-                    .font(.system(size: AssistantDashboardTypography.operationTitle, weight: .semibold))
+                    .font(.system(size: 17, weight: .medium))
                     .lineLimit(1)
-                if !operation.detail.isEmpty {
-                    Text(operation.detail)
-                        .font(.system(size: AssistantDashboardTypography.operationDetail))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                }
+                    .help(operation.title)
+                Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 22)
+        .frame(maxWidth: .infinity, minHeight: 48, maxHeight: 48, alignment: .leading)
+        .overlay(alignment: .bottom) {
                 if operation.running {
                     ProgressView()
                         .progressViewStyle(.linear)
                         .tint(AppPalette.accent)
-                        .frame(maxWidth: 260)
+                        .frame(maxWidth: .infinity)
                 }
-            }
         }
     }
 
@@ -1155,17 +1148,21 @@ struct AssistantView: View {
             !model.assistantOrderList.isEmpty
     }
 
-    private var currentAssistantOperation: (title: String, detail: String, running: Bool) {
+    /// Show the active backend step in the compact, single-line status bar.
+    private var currentAssistantOperation: (title: String, running: Bool) {
         if model.assistantRunning {
-            return (displayedTask?.text ?? "正在执行助手命令", displayedTask?.status ?? "", true)
+            let status = displayedTask?.status.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return (status.isEmpty ? (displayedTask?.text ?? "正在执行助手命令") : status, true)
         }
         if model.inventoryRunning {
-            return ("正在处理库存系统", model.dashboardInventoryOperationStatus, true)
+            return (dashboardMessageDetail(model.dashboardInventoryOperationStatus), true)
         }
         if model.orderRunning || dashboardStatusIsInProgress(model.dashboardSyncStatus) {
-            return ("正在刷新订单数据", model.dashboardSyncStatus, true)
+            let status = [model.dashboardServerStatus, model.dashboardAimesStatus, model.dashboardSyncStatus]
+                .first(where: dashboardStatusIsInProgress)
+            return (status.map(dashboardMessageDetail) ?? "正在处理订单数据", true)
         }
-        return ("当前无正在进行的操作", "", false)
+        return ("操作完毕", false)
     }
 
     private func assistantStageSummary(_ item: OrderDashboardItem) -> String {

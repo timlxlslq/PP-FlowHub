@@ -1362,7 +1362,7 @@ class OrderWorkflowTests(unittest.TestCase):
         self.assertEqual(len(result["factories"]), 3)
         self.assertEqual(len(result["updated_orders"]), 2)
 
-    def test_duplicate_fittings_use_newest_and_tied_conflict_stops(self):
+    def test_duplicate_fittings_require_choice_regardless_of_time(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             older = root / "A" / "Fittingslist-old.xlsx"
@@ -1374,13 +1374,19 @@ class OrderWorkflowTests(unittest.TestCase):
             now = time.time()
             os.utime(older, (now - 30, now - 30))
             os.utime(newer, (now, now))
-            selected, warnings = _choose_fittings(root)
-            self.assertEqual(selected["F999"][0].quantity, 5)
-            self.assertTrue(any("修改时间最新" in warning for warning in warnings))
-            os.utime(older, (now, now))
-            with self.assertRaises(RuleError) as raised:
-                _choose_fittings(root)
-            self.assertEqual(raised.exception.code, "fittings_timestamp_tie")
+            from traveler_assistant.report_read_context import report_read_session
+            for tied in (False, True):
+                if tied:
+                    os.utime(older, (now, now))
+                with self.assertRaises(RuleError) as raised:
+                    _choose_fittings(root)
+                self.assertEqual(raised.exception.code, "fittings_selection_required")
+            options = raised.exception.context["conflicts"][0]["candidates"]
+            chosen = next(item for item in options if item["path"] == str(older.resolve()))
+            with report_read_session({"F999": chosen["id"]}):
+                selected, warnings = _choose_fittings(root)
+            self.assertEqual(selected["F999"][0].quantity, 2)
+            self.assertTrue(any("用户选择" in warning for warning in warnings))
 
     def test_empty_malformed_fittings_is_skipped_and_traveler_can_generate(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -858,6 +858,7 @@ func dashboardMessageDetail(_ text: String) -> String {
 }
 
 func dashboardStatusIsInProgress(_ text: String) -> Bool {
+    if ["✅", "⚠️", "❌"].contains(where: { text.hasPrefix($0) }) { return false }
     let detail = dashboardMessageDetail(text)
     return detail.contains("正在") || detail.contains("处理中")
 }
@@ -1735,9 +1736,17 @@ struct OrderDashboardView: View {
                     .font(.callout)
                     .lineLimit(1)
                 Spacer(minLength: 0)
-                Text(display.message.time)
-                    .font(.caption.monospacedDigit())
-                    .foregroundColor(.secondary)
+                if display.isRunning {
+                    TimelineView(.periodic(from: .now, by: 1)) { _ in
+                        if let elapsed = model.dashboardElapsedTime(display.message.source) {
+                            Text("已用 \(operationDurationText(elapsed))")
+                                .font(.caption.monospacedDigit()).foregroundColor(.secondary)
+                        }
+                    }
+                } else {
+                    Text(display.message.time)
+                        .font(.caption.monospacedDigit()).foregroundColor(.secondary)
+                }
             }
             .padding(.horizontal, 12)
             .frame(height: 44)
@@ -2405,24 +2414,12 @@ private func orderInstallationInstallerSuggestions(from orders: [OrderDashboardI
 private struct OrderAnnotationsSheet: View {
     @ObservedObject var model: AppModel
     let order: OrderDashboardItem
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(order.orderId)
-                    .font(.title2.weight(.semibold))
-                Spacer(minLength: 0)
-                Button("关闭") { dismiss() }
-                    .appActionButton(minWidth: 80)
-            }
-
-            ScrollView(.vertical) {
-                OrderAnnotationsEditor(model: model, order: order)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-            }
-            .scrollIndicators(.automatic)
-            .frame(maxHeight: 420)
+            Text(order.orderId)
+                .font(.title2.weight(.semibold))
+            OrderAnnotationsEditor(model: model, order: order)
         }
         .padding(AppLayout.contentPadding)
         .frame(minWidth: 640, idealWidth: 700)
@@ -2439,6 +2436,8 @@ private struct OrderAnnotationsEditor: View {
     @State private var actualDays: [OrderInstallationDraft]
     @State private var datePickerRowID: UUID?
     @State private var status = ""
+    @State private var saveSucceeded = false
+    @Environment(\.dismiss) private var dismiss
 
     init(model: AppModel, order: OrderDashboardItem) {
         self.model = model
@@ -2454,45 +2453,62 @@ private struct OrderAnnotationsEditor: View {
     }
 
     var body: some View {
-        AppSurfaceCard(padding: 14) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("订单说明")
-                    .font(.headline)
-                TextEditor(text: $note)
-                    .font(.body)
-                    .frame(minHeight: 54, maxHeight: 72)
-                    .padding(5)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(AppPalette.separator)
-                    )
-                    .overlay(alignment: .topLeading) {
-                        if note.isEmpty {
-                            Text("填写客户要求、待确认事项或特殊交付说明")
-                                .foregroundColor(.secondary)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 12)
-                                .allowsHitTesting(false)
-                        }
-                    }
+        VStack(alignment: .leading, spacing: 12) {
+            ScrollView(.vertical) {
+                AppSurfaceCard(padding: 14) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("订单说明")
+                            .font(.headline)
+                        TextEditor(text: $note)
+                            .font(.body)
+                            .frame(minHeight: 54, maxHeight: 72)
+                            .padding(5)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(AppPalette.separator)
+                            )
+                            .overlay(alignment: .topLeading) {
+                                if note.isEmpty {
+                                    Text("填写客户要求、待确认事项或特殊交付说明")
+                                        .foregroundColor(.secondary)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 12)
+                                        .allowsHitTesting(false)
+                                }
+                            }
 
-                installationRows(title: "计划安装日期", rows: $plannedDays)
-                installationRows(title: "实际安装开始日期", rows: $actualDays)
+                        installationRows(title: "计划安装日期", rows: $plannedDays)
+                        installationRows(title: "实际安装开始日期", rows: $actualDays)
 
-                HStack(spacing: 10) {
-                    if !status.isEmpty {
-                        Text(status)
-                            .font(.caption)
-                            .foregroundColor(status.contains("失败") ? AppPalette.danger : .secondary)
                     }
-                    Spacer(minLength: 0)
-                    Button("保存") {
-                        save()
-                    }
-                    .buttonStyle(.glassProminent)
-                    .disabled(model.orderRunning)
                 }
             }
+            .scrollIndicators(.automatic)
+            .frame(maxHeight: 420)
+            .disabled(model.orderRunning || saveSucceeded)
+
+            HStack(spacing: 8) {
+                if !status.isEmpty {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundColor(status.contains("失败") ? AppPalette.danger : .secondary)
+                        .accessibilityAddTraits(.updatesFrequently)
+                }
+                Spacer(minLength: 0)
+                Button("关闭") { dismiss() }
+                    .appActionButton(minWidth: 80)
+                    .disabled(model.orderRunning)
+                Button("保存") { save() }
+                    .buttonStyle(.glassProminent)
+                    .appActionButton(minWidth: 80)
+                    .disabled(model.orderRunning || saveSucceeded)
+            }
+        }
+        .task(id: saveSucceeded) {
+            guard saveSucceeded else { return }
+            // Keep success visible briefly before returning to the order center.
+            do { try await Task.sleep(for: .seconds(0.9)) } catch { return }
+            dismiss()
         }
     }
 
@@ -2626,6 +2642,10 @@ private struct OrderAnnotationsEditor: View {
             actualDays: actual,
             onStatusChange: { message in
                 status = message
+            },
+            onSuccess: {
+                status = "订单安排已保存"
+                saveSucceeded = true
             }
         )
     }
@@ -3262,16 +3282,47 @@ struct OutboundScopeSheet: View {
 
 struct PendingCenterSheet: View {
     @ObservedObject var model: AppModel
-    @State private var expandedIDs: Set<String> = []
+    @State private var selectedID: String?
+    @State private var searchText = ""
+    @State private var category = "全部"
     @State private var orderIDs: [String: String] = [:]
-    @State private var showAimesHistory = false
+    @State private var confirmationTitle = ""
+    @State private var pendingAction: (() -> Void)?
+    @State private var showActionConfirmation = false
+
+    private func confirm(_ title: String, action: @escaping () -> Void) {
+        confirmationTitle = title
+        pendingAction = action
+        showActionConfirmation = true
+    }
 
     private var items: [PendingCenterItem] { model.pendingCenterItems }
-    private var serverItems: [PendingCenterItem] { items.filter { $0.serverGroup != nil } }
-    private var selectedServerCount: Int {
-        serverItems.filter {
-            model.selectedServerFolderPaths.contains($0.folderPath) && !($0.serverGroup?.requiresManualReview ?? false)
-        }.count
+    private var visibleItems: [PendingCenterItem] {
+        items.filter {
+            (category == "全部" || $0.status == category) &&
+            (searchText.isEmpty || "\($0.title) \($0.subtitle) \($0.folderPath) \($0.issues.map(\.message).joined(separator: " "))".localizedCaseInsensitiveContains(searchText))
+        }
+    }
+
+    private var selectedItem: PendingCenterItem? {
+        visibleItems.first { $0.id == selectedID } ?? visibleItems.first
+    }
+
+    private func reconcileSelection() {
+        guard !visibleItems.contains(where: { $0.id == selectedID }) else { return }
+        selectedID = visibleItems.first?.id
+        model.selectedAimesReviewIDs.removeAll()
+        model.selectedServerFolderPaths.removeAll()
+    }
+
+    /// Always derive the action target from the visible selection.
+    private func preview(_ item: PendingCenterItem) {
+        guard !model.orderRunning, !item.folderPath.isEmpty else { return }
+        model.selectedAimesReviewIDs.removeAll()
+        model.processSelectedServerFolder(
+            URL(fileURLWithPath: inventoryMappingSourceFolderPath(item.folderPath)),
+            includeHardware: true
+        )
     }
 
     var body: some View {
@@ -3280,118 +3331,157 @@ struct PendingCenterSheet: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("待处理中心")
                         .font(.title2.weight(.semibold))
-                    Text("Server 文件夹、订单问题和 AIMES 待确认统一显示；后台仍按待扫描处理、需人工确认和处理失败分别保留状态。")
-                        .font(.callout)
+                    Text("查看问题、补充资料并核对预览；确认后才写入订单。")
+                        .font(.caption)
                         .foregroundColor(.secondary)
                 }
                 Spacer()
                 AppStatusBadge(text: "\(items.count) 项", kind: .warning)
+                Button("关闭", systemImage: "xmark") { model.showPendingCenterPrompt = false }
+                    .buttonStyle(.glass)
+                    .keyboardShortcut(.cancelAction)
             }
-
-            if items.isEmpty {
-                ContentUnavailableView(
-                    "当前没有待处理项目",
-                    systemImage: "checkmark.circle",
-                    description: Text("Server 扫描、订单校验和 AIMES 获取后会自动更新这里。")
-                )
-            } else {
-                AppSurfaceCard(padding: 0) {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(items) { item in
-                                pendingItemRow(item)
-                                if item.id != items.last?.id { Divider() }
+            HStack(alignment: .top, spacing: 14) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        TextField("搜索订单、问题或路径", text: $searchText)
+                            .textFieldStyle(.roundedBorder)
+                        Picker("类型", selection: $category) {
+                            ForEach(["全部", "待处理", "处理失败", "待人工确认", "需人工处理"], id: \.self) { type in
+                                Text("\(type) · \(type == "全部" ? items.count : items.filter { $0.status == type }.count)").tag(type)
                             }
                         }
+                        .labelsHidden()
+                        .frame(width: 112)
+                    }
+                    ScrollView {
+                        LazyVStack(spacing: 6) {
+                            ForEach(visibleItems) { item in queueRow(item) }
+                        }
+                    }
+                    if visibleItems.isEmpty {
+                        Text(items.isEmpty ? "当前没有待处理项目" : "没有符合筛选的项目")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                }
+                .frame(width: 280)
+                AppSurfaceCard(padding: 0) {
+                    if let item = selectedItem {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Text(item.title).font(.title3.weight(.semibold))
+                                Spacer()
+                                Text(item.status).font(.caption.weight(.semibold))
+                                    .foregroundColor(item.status == "处理失败" ? AppPalette.danger : AppPalette.accent)
+                            }
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 12) {
+                                    Text(item.subtitle).font(.caption).foregroundColor(.secondary)
+                                    Text(detailTitle(item)).font(.headline)
+                                    Text(detailExplanation(item)).font(.callout).foregroundColor(.secondary)
+                                    if !model.pendingMappingResumeMessage(for: item).isEmpty {
+                                        Text(model.pendingMappingResumeMessage(for: item))
+                                            .font(.callout).foregroundColor(AppPalette.warning)
+                                            .textSelection(.enabled)
+                                    }
+                                    pendingItemDetails(item)
+                                }.frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            Divider()
+                            HStack {
+                                Button("稍后处理") { model.showPendingCenterPrompt = false }
+                                    .buttonStyle(.glass)
+                                if !(item.aimesReviews + item.aimesFormatWarnings).isEmpty {
+                                    let reviews = (item.aimesReviews + item.aimesFormatWarnings).filter { model.selectedAimesReviewIDs.contains($0.id) }
+                                    Button("忽略选中项") {
+                                        let ids = Set(reviews.map(\.id))
+                                        let names = reviews.map { $0.factoryOrder.isEmpty ? $0.factoryName : $0.factoryOrder }.joined(separator: "、")
+                                        confirm("确认忽略 \(names)？") {
+                                            model.selectedAimesReviewIDs = ids
+                                            model.ignoreSelectedAimesFactories()
+                                        }
+                                    }
+                                    .buttonStyle(.glass)
+                                    .disabled(model.orderRunning || reviews.isEmpty)
+                                }
+                                Spacer()
+                                if item.status == "待处理" || item.status == "处理失败" {
+                                    if !item.folderPath.isEmpty {
+                                        Button(item.status == "处理失败" ? "重新读取并预览" : "选择并预览") { preview(item) }
+                                            .buttonStyle(.glassProminent)
+                                            .disabled(model.orderRunning || model.inventoryRunning)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(14)
+                    } else {
+                        ContentUnavailableView("请选择待处理项目", systemImage: "tray")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
             }
+            .frame(maxHeight: .infinity)
 
-            HStack(alignment: .center, spacing: 10) {
-                Text("文件夹按一条主记录显示；预览会读取板材、封边和五金，确认后再分别写入。")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Spacer()
-                if !model.selectedAimesReviewIDs.isEmpty {
-                    Button("忽略当前 AIMES 项") { model.ignoreSelectedAimesFactories() }
-                        .buttonStyle(.glass)
-                        .disabled(model.orderRunning)
-                }
-                Button("稍后处理") { model.showPendingCenterPrompt = false }
-                    .appActionButton(minWidth: 108)
-                    // Closing the informational sheet must remain available
-                    // while background AIMES/Server work is running.
-                    .disabled(false)
-                Button("预览并逐单确认") { model.processPendingServerChanges() }
-                    .buttonStyle(.glassProminent)
-                    .appActionButton(minWidth: 150)
-                    .disabled(model.orderRunning || selectedServerCount == 0)
-            }
-
-            aimesHistorySection
         }
         .padding(20)
         .background(LiquidGlassPreviewBackdrop())
+        .frame(width: 980, height: 620)
+        .onAppear { reconcileSelection() }
+        .onChange(of: visibleItems.map(\.id)) { _, _ in reconcileSelection() }
+        .alert(confirmationTitle, isPresented: $showActionConfirmation) {
+            Button("取消", role: .cancel) { pendingAction = nil }
+            Button("确认") {
+                guard !model.orderRunning, !model.inventoryRunning else { return }
+                pendingAction?()
+                pendingAction = nil
+            }
+        } message: {
+            Text("此操作会保存你的处理结果。请确认当前订单和处理范围无误。")
+        }
     }
 
-    @ViewBuilder
-    private func pendingItemRow(_ item: PendingCenterItem) -> some View {
-        let expanded = expandedIDs.contains(item.id)
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: 10) {
-                if let serverGroup = item.serverGroup, !serverGroup.requiresManualReview {
-                    let selected = model.selectedServerFolderPaths.contains(item.folderPath)
-                    Button {
-                        model.toggleServerFolderSelection(item.folderPath)
-                    } label: {
-                        Image(systemName: selected ? "checkmark.square.fill" : "square")
-                            .foregroundColor(selected ? AppPalette.accent : .secondary)
-                            .font(.system(size: 20, weight: .semibold))
-                            .frame(width: 24, height: 24)
-                    }
-                    .buttonStyle(.plain)
-                    .help("选择此文件夹自动处理")
-                } else {
-                    Image(systemName: item.status == "需人工确认" ? "person.crop.circle.badge.questionmark" : "exclamationmark.triangle.fill")
-                        .foregroundColor(item.status == "需人工确认" ? AppPalette.warning : AppPalette.danger)
-                        .frame(width: 24, height: 24)
-                }
-
-                Button {
-                    if expanded { expandedIDs.remove(item.id) } else { expandedIDs.insert(item.id) }
-                } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 8) {
-                            Text(item.title).font(.headline)
-                            Text(item.status)
-                                .font(.caption.weight(.semibold))
-                                .foregroundColor(item.status == "处理失败" ? AppPalette.danger : AppPalette.warning)
-                            Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                                .font(.caption.weight(.semibold))
-                                .foregroundColor(.secondary)
-                        }
-                        Text(item.subtitle).font(.callout).foregroundColor(.secondary)
-                        if !item.folderPath.isEmpty {
-                            Text(item.folderPath)
-                                .font(.caption.monospaced())
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(12)
-
-            if expanded {
-                pendingItemDetails(item)
-                    .padding(.leading, 58)
-                    .padding(.trailing, 12)
-                    .padding(.bottom, 12)
-            }
+    private func detailTitle(_ item: PendingCenterItem) -> String {
+        switch item.status {
+        case "处理失败": return "本次处理未完成"
+        case "待人工确认": return "核对来源并确认归属"
+        case "需人工处理": return "补充材料与商品映射"
+        default: return "本次来源变化"
         }
+    }
+
+    private func detailExplanation(_ item: PendingCenterItem) -> String {
+        switch item.status {
+        case "处理失败": return "请根据下方原因检查文件或连接，再重新读取。预览准备好后才能确认写入。"
+        case "待人工确认": return "请核对原始信息和建议值，再确认具体操作；缺少的资料需要先补齐。"
+        case "需人工处理": return "完成映射后会自动继续读取原订单并准备只读预览。"
+        default: return "扫描已完成。预览将读取下列文件，供你核对板材、封边和五金。"
+        }
+    }
+
+    private func queueRow(_ item: PendingCenterItem) -> some View {
+        Button {
+            selectedID = item.id
+            model.selectedAimesReviewIDs.removeAll()
+            model.selectedServerFolderPaths.removeAll()
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(item.title).font(.headline).lineLimit(1)
+                    Spacer()
+                    Text(item.status).font(.caption)
+                }
+                Text(item.issues.first?.message ?? item.subtitle)
+                    .font(.caption).foregroundColor(.secondary).lineLimit(2)
+                if let time = item.issues.map(\.lastSeen).filter({ !$0.isEmpty }).max() ?? item.serverGroup?.changes.map(\.eventTime).filter({ !$0.isEmpty }).max() {
+                    Text(appDisplayTimestamp(time)).font(.caption2).foregroundColor(.secondary)
+                }
+            }
+            .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+            .background(selectedItem?.id == item.id ? AppPalette.accent.opacity(0.10) : AppPalette.subtleSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(selectedItem?.id == item.id ? AppPalette.accent : .clear))
+        }.buttonStyle(.plain)
     }
 
     @ViewBuilder
@@ -3424,7 +3514,7 @@ struct PendingCenterSheet: View {
                                 .foregroundColor(.secondary)
                             Spacer()
                             Button("已人工处理") {
-                                model.markTemporaryFolderManual(group.folderPath)
+                                confirm("确认已在外部完成人工处理？") { model.markTemporaryFolderManual(group.folderPath) }
                             }
                             .buttonStyle(.glassProminent)
                             .disabled(model.orderRunning)
@@ -3477,18 +3567,21 @@ struct PendingCenterSheet: View {
                     ))
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 180)
-                    Button("自动处理") { model.autoResolveCurrentIssue(issue) }
+                    Button("自动处理") { confirm("确认处理 \(issue.factoryOrder) 的归属？") { model.autoResolveCurrentIssue(issue) } }
                         .buttonStyle(.glass)
                         .disabled(model.orderRunning)
-                    Button("确认归属") { model.resolveCurrentIssue(issue, orderID: orderIDs[issue.id] ?? "") }
+                    Button("确认归属") {
+                        let orderID = orderIDs[issue.id] ?? ""
+                        confirm("确认归属到 \(orderID)？") { model.resolveCurrentIssue(issue, orderID: orderID) }
+                    }
                         .buttonStyle(.glassProminent)
                         .disabled(model.orderRunning || (orderIDs[issue.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 } else if currentIssueRequiresInventoryMapping(issue) {
                     Button("处理订单文件映射") { model.requestInventoryMapping(folderPath: issue.path, message: issue.message) }
                         .buttonStyle(.glassProminent)
                         .disabled(model.orderRunning)
-                } else {
-                    Button("标记已处理") { model.resolveCurrentIssue(issue, orderID: "") }
+                } else if issue.kind == "server_missing_report" {
+                    Button("确认已补齐报表") { confirm("确认报表问题已处理？") { model.resolveCurrentIssue(issue, orderID: "") } }
                         .buttonStyle(.glass)
                         .disabled(model.orderRunning)
                 }
@@ -3519,12 +3612,13 @@ struct PendingCenterSheet: View {
             }
             Spacer(minLength: 8)
             if !item.suggestedOrderID.isEmpty {
-                Button("按 \(item.suggestedOrderID) 处理") { model.assignAimesFactoryToSuggestedOrder(item) }
+                Button("按 \(item.suggestedOrderID) 处理") { confirm("确认归属到 \(item.suggestedOrderID)？") { model.assignAimesFactoryToSuggestedOrder(item) } }
                     .buttonStyle(.glassProminent)
                     .disabled(model.orderRunning)
             }
         }
         .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(AppPalette.subtleSurface)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
@@ -3560,15 +3654,15 @@ struct PendingCenterSheet: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 220)
                 if !item.suggestedOrderID.isEmpty {
-                    Text("建议：(item.suggestedOrderID)")
+                    Text("建议：\(item.suggestedOrderID)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
                 Button("确认归属") {
-                    model.assignAimesFactoryToOrder(
-                        item,
-                        orderID: orderIDs[item.id] ?? item.suggestedOrderID
-                    )
+                    let orderID = orderIDs[item.id] ?? item.suggestedOrderID
+                    confirm("确认归属到 \(orderID)？") {
+                        model.assignAimesFactoryToOrder(item, orderID: orderID)
+                    }
                 }
                 .buttonStyle(.glassProminent)
                 .disabled(
@@ -3579,79 +3673,9 @@ struct PendingCenterSheet: View {
             }
         }
         .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(AppPalette.subtleSurface)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-
-    @ViewBuilder
-    private var aimesHistorySection: some View {
-        if model.hasAimesHistory {
-            VStack(alignment: .leading, spacing: 10) {
-                Button {
-                    showAimesHistory.toggle()
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: showAimesHistory ? "chevron.down" : "chevron.right")
-                            .font(.caption.weight(.semibold))
-                        Text("历史 AIMES 记录")
-                            .font(.headline)
-                        Text("已确认 \(model.assignedAimesFactories.count) · 已忽略 \(model.ignoredAimesFactories.count)")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .buttonStyle(.plain)
-
-                if showAimesHistory {
-                    AppSurfaceCard(padding: 0) {
-                        VStack(spacing: 0) {
-                            ForEach(model.assignedAimesFactories) { item in
-                                aimesHistoryRow(item, title: "已确认归属") {
-                                    model.restoreAimesFactoryAssignment(item)
-                                } actionTitle: {
-                                    "撤销归属"
-                                }
-                                if item.id != model.assignedAimesFactories.last?.id { Divider() }
-                            }
-                            if !model.assignedAimesFactories.isEmpty && !model.ignoredAimesFactories.isEmpty {
-                                Divider()
-                            }
-                            ForEach(model.ignoredAimesFactories) { item in
-                                aimesHistoryRow(item, title: "已忽略") {
-                                    model.restoreAimesFactory(item)
-                                } actionTitle: {
-                                    "恢复"
-                                }
-                                if item.id != model.ignoredAimesFactories.last?.id { Divider() }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func aimesHistoryRow(
-        _ item: AimesReviewItem,
-        title: String,
-        action: @escaping () -> Void,
-        actionTitle: () -> String
-    ) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("\(title) · \(item.factoryOrder.isEmpty ? "工厂单号为空" : item.factoryOrder)")
-                    .font(.subheadline.weight(.semibold))
-                Text("工厂单名称：\(item.factoryName.isEmpty ? "名称为空" : item.factoryName)")
-                    .font(.caption)
-                Text("销售单名称：\(item.salesOrderName.isEmpty ? "空" : item.salesOrderName)")
-                    .font(.caption)
-            }
-            Spacer(minLength: 12)
-            Button(actionTitle(), action: action)
-                .appActionButton(minWidth: title == "已忽略" ? 72 : 92)
-                .disabled(model.orderRunning)
-        }
-        .padding(12)
     }
 
     private func changeTypeName(_ type: String) -> String {
@@ -4151,11 +4175,57 @@ struct ServerChangesSheet: View {
     }
 }
 
+struct HardwareSourceSelectionSheet: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("选择工厂单五金来源").font(.title2.bold())
+            Text("同一工厂单的报表内容不同。请为每张工厂单选择一份完整报表；选择后重新预览，尚不写入数据库。")
+                .foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    ForEach(model.hardwareSourceConflicts) { conflict in
+                        Text(conflict.id).font(.headline)
+                        ForEach(conflict.candidates) { candidate in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Button {
+                                    model.hardwareSourceChoices[conflict.id] = candidate.id
+                                } label: {
+                                    HStack(alignment: .top) {
+                                        Image(systemName: model.hardwareSourceChoices[conflict.id] == candidate.id ? "largecircle.fill.circle" : "circle")
+                                        Text(candidate.path).multilineTextAlignment(.leading).textSelection(.enabled)
+                                    }
+                                }.buttonStyle(.plain)
+                                ForEach(Array(candidate.items.enumerated()), id: \.offset) { _, item in
+                                    Text(item).font(.callout).padding(.leading, 24)
+                                }
+                            }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                                .background(AppPalette.subtleSurface).clipShape(RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+                }
+            }
+            Divider()
+            HStack {
+                Button("稍后处理") { model.showHardwareSourceSelection = false }
+                Spacer()
+                Button("按所选来源重新预览") { model.confirmHardwareSourceSelection() }
+                    .buttonStyle(.glassProminent).disabled(!model.canResumeHardwareSourcePreview)
+            }
+        }.padding(22).frame(width: 820, height: 620)
+    }
+}
+
 struct ServerWriteConfirmationSheet: View {
     @ObservedObject var model: AppModel
     @State private var mappingTarget: PendingInventoryMappingTarget?
     @State private var ignoreTarget: PendingInventoryMappingTarget?
     @State private var skippedHardwareOrderIDs: Set<String> = []
+    @State private var showWriteConfirmation = false
+    private var canConfirmWrite: Bool {
+        !model.orderRunning && !model.inventoryRunning && !orders.isEmpty &&
+        !model.serverWriteConfirmationFinished && activeHardwareRequirements.isEmpty && invalidOrderValidations.isEmpty
+    }
     private var orders: [ServerWriteOrderPreview] { model.serverWritePreview?.orders ?? [] }
     private var activeHardwareRequirements: [ServerHardwareMappingRequirement] {
         model.serverHardwareMappingRequirements.filter { requirement in
@@ -4178,6 +4248,16 @@ struct ServerWriteConfirmationSheet: View {
                     Text("Server 材料已经按房间归属解析到订单；正式数据库尚未写入。板材、封边和已明确归属的工厂单五金在本界面一次确认。")
                         .font(.callout)
                         .foregroundColor(.secondary)
+                }
+            }
+
+            if let sources = model.serverWritePreview?.payload["hardware_selected_sources"] as? [[String: Any]], !sources.isEmpty {
+                DisclosureGroup("五金来源（\(sources.count) 张工厂单）") {
+                    ForEach(Array(sources.enumerated()), id: \.offset) { _, source in
+                        Text("\(source["factory_order"] as? String ?? "")：\(source["path"] as? String ?? "")")
+                            .font(.caption).textSelection(.enabled)
+                    }
+
                 }
             }
 
@@ -4275,16 +4355,23 @@ struct ServerWriteConfirmationSheet: View {
                 .appActionButton(minWidth: 92)
                 .disabled(model.orderRunning)
                 Button(model.serverWriteConfirmationFinished ? "已完成写入" : "确认写入订单材料和五金") {
-                    model.confirmServerMaterialPreview(
-                        skipHardwareOrderIDs: skippedHardwareOrderIDs
-                    )
+                    showWriteConfirmation = true
                 }
                 .buttonStyle(.glassProminent)
-                .disabled(model.orderRunning || model.inventoryRunning || orders.isEmpty || model.serverWriteConfirmationFinished || !activeHardwareRequirements.isEmpty || !invalidOrderValidations.isEmpty)
+                .disabled(!canConfirmWrite)
             }
         }
         .padding(20)
         .background(LiquidGlassPreviewBackdrop())
+        .alert("确认后写入", isPresented: $showWriteConfirmation) {
+            Button("取消", role: .cancel) { }
+            Button("确认写入") {
+                guard canConfirmWrite else { return }
+                model.confirmServerMaterialPreview(skipHardwareOrderIDs: skippedHardwareOrderIDs)
+            }
+        } message: {
+            Text("将写入 \(orders.map(\.orderID).joined(separator: "、")) 的订单材料及本次选定五金。已出货工厂单自动排除。")
+        }
         .sheet(item: $mappingTarget) { target in
             InventoryMappingSheet(
                 model: model,
@@ -4754,4 +4841,126 @@ struct FactoryStockComparisonSheet: View {
         .padding(.horizontal, 10)
         .background(row.sufficient ? Color.clear : AppPalette.danger.opacity(0.06))
     }
+}
+
+
+/// Settings entry for reviewing and restoring historical AIMES decisions.
+struct AimesHistorySheet: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var showAimesHistory = true
+    @State private var confirmationTitle = ""
+    @State private var pendingAction: (() -> Void)?
+    @State private var showActionConfirmation = false
+
+    private func confirm(_ title: String, action: @escaping () -> Void) {
+        confirmationTitle = title
+        pendingAction = action
+        showActionConfirmation = true
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("历史 AIMES 记录").font(.title2.weight(.semibold))
+                Spacer()
+                Button("关闭", systemImage: "xmark") { dismiss() }
+                    .buttonStyle(.glass)
+                    .keyboardShortcut(.cancelAction)
+            }
+            if model.hasAimesHistory {
+                ScrollView { aimesHistorySection }
+            } else {
+                ContentUnavailableView("暂无历史 AIMES 记录", systemImage: "clock")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .padding(20)
+        .frame(width: 760, height: 520)
+        .background(LiquidGlassPreviewBackdrop())
+        .alert(confirmationTitle, isPresented: $showActionConfirmation) {
+            Button("取消", role: .cancel) { pendingAction = nil }
+            Button("确认") {
+                guard !model.orderRunning, !model.inventoryRunning else { return }
+                pendingAction?()
+                pendingAction = nil
+            }
+        } message: {
+            Text("此操作会保存你的处理结果。请确认当前订单和处理范围无误。")
+        }
+    }
+
+    @ViewBuilder
+    private var aimesHistorySection: some View {
+        if model.hasAimesHistory {
+            VStack(alignment: .leading, spacing: 10) {
+                Button {
+                    showAimesHistory.toggle()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: showAimesHistory ? "chevron.down" : "chevron.right")
+                            .font(.caption.weight(.semibold))
+                        Text("历史 AIMES 记录")
+                            .font(.headline)
+                        Text("已确认 \(model.assignedAimesFactories.count) · 已忽略 \(model.ignoredAimesFactories.count)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .buttonStyle(.plain)
+
+                if showAimesHistory {
+                    AppSurfaceCard(padding: 0) {
+                        VStack(spacing: 0) {
+                            ForEach(model.assignedAimesFactories) { item in
+                                aimesHistoryRow(item, title: "已确认归属") {
+                                    model.restoreAimesFactoryAssignment(item)
+                                } actionTitle: {
+                                    "撤销归属"
+                                }
+                                if item.id != model.assignedAimesFactories.last?.id { Divider() }
+                            }
+                            if !model.assignedAimesFactories.isEmpty && !model.ignoredAimesFactories.isEmpty {
+                                Divider()
+                            }
+                            ForEach(model.ignoredAimesFactories) { item in
+                                aimesHistoryRow(item, title: "已忽略") {
+                                    model.restoreAimesFactory(item)
+                                } actionTitle: {
+                                    "恢复"
+                                }
+                                if item.id != model.ignoredAimesFactories.last?.id { Divider() }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func aimesHistoryRow(
+        _ item: AimesReviewItem,
+        title: String,
+        action: @escaping () -> Void,
+        actionTitle: @escaping () -> String
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(title) · \(item.factoryOrder.isEmpty ? "工厂单号为空" : item.factoryOrder)")
+                    .font(.subheadline.weight(.semibold))
+                Text("工厂单名称：\(item.factoryName.isEmpty ? "名称为空" : item.factoryName)")
+                    .font(.caption)
+                Text("销售单名称：\(item.salesOrderName.isEmpty ? "空" : item.salesOrderName)")
+                    .font(.caption)
+            }
+            Spacer(minLength: 12)
+            Button(actionTitle()) {
+                confirm("确认\(actionTitle())：\(item.factoryOrder)？", action: action)
+            }
+                .appActionButton(minWidth: title == "已忽略" ? 72 : 92)
+                .disabled(model.orderRunning)
+        }
+        .padding(12)
+    }
+
 }

@@ -9,6 +9,8 @@ index is also the recovery point for dashboard status and pending work.
 
 from __future__ import annotations
 
+from .hardware_facts import replace_factory_hardware, audit_factory_hardware, audit_hardware_integrity, preserve_confirmed_shipment
+
 import json
 import hashlib
 import os
@@ -28,6 +30,7 @@ from .core import (
     AIMES_BULK_FETCH_LIMIT,
     Config,
     RuleError,
+    progress,
     factory_name_order_mismatch,
     load_aimes_order_cache,
     load_factory_name_cache,
@@ -35,7 +38,8 @@ from .core import (
     save_factory_name_cache,
 )
 from .operation_log import log_database_statement
-from .fittings import select_latest_fittings
+from .fittings import is_fittings_report, select_latest_fittings, fittings_candidate
+from .report_read_context import report_paths, preview_read_session, current_report_context
 from .database import (
     collapse_actual_installation_days,
     ensure_outbound_document_factory_links,
@@ -1279,7 +1283,7 @@ class OrderIndexStore:
         ]
 
     def replace_aimes_review_rows(self, issues: list[dict]) -> None:
-        """Persist the current non-standard AIMES rows for temporary matching."""
+        """Persist the current non-standard AIMES rows for later user action."""
         self.connection.execute("delete from aimes_review_rows")
         self.connection.executemany(
             """
@@ -1302,6 +1306,42 @@ class OrderIndexStore:
                 for issue in issues
                 if str(issue.get("ignore_key", issue.get("id", ""))).strip()
             ],
+        )
+
+    def aimes_review_rows(self) -> list[dict]:
+        rows = self.connection.execute(
+            """
+            select ignore_key, factory_order, factory_name, sales_order_name,
+                   reason, suggested_order_id, split_time, last_seen
+            from aimes_review_rows
+            order by last_seen desc, factory_order
+            """
+        ).fetchall()
+        return [
+            {
+                "id": row[0],
+                "ignore_key": row[0],
+                "factory_order": row[1],
+                "factory_name": row[2],
+                "sales_order_name": row[3],
+                "reason": row[4],
+                "suggested_order_id": row[5],
+                "split_time": row[6],
+                "last_seen": row[7],
+            }
+            for row in rows
+        ]
+
+    def aimes_review_row(self, ignore_key: str) -> dict | None:
+        return next(
+            (row for row in self.aimes_review_rows() if row["ignore_key"] == ignore_key),
+            None,
+        )
+
+    def remove_aimes_review_row(self, ignore_key: str) -> None:
+        self.connection.execute(
+            "delete from aimes_review_rows where ignore_key = ?",
+            (ignore_key,),
         )
 
     def assign_aimes_factory(self, issue: dict, order_id: str) -> None:
@@ -1327,6 +1367,7 @@ class OrderIndexStore:
                 _now(),
             ),
         )
+        self.remove_aimes_review_row(issue["ignore_key"])
 
     def restore_aimes_assignment(self, ignore_key: str) -> None:
         row = self.connection.execute(
@@ -1374,6 +1415,7 @@ class OrderIndexStore:
                 "delete from factory_orders where factory_order = ?",
                 (issue["factory_order"],),
             )
+        self.remove_aimes_review_row(issue["ignore_key"])
 
     def restore_aimes_factory(self, ignore_key: str) -> None:
         self.connection.execute(
@@ -2433,11 +2475,11 @@ class OrderIndexStore:
 
 def _report_files(folder: Path) -> list[tuple[Path, str]]:
     result = []
-    for path in folder.rglob("*.xlsx"):
+    for path in report_paths(folder):
         if path.name.startswith("~$"):
             continue
         lowered = path.name.lower()
-        if lowered.startswith("fittingslist"):
+        if is_fittings_report(path):
             result.append((path, "fittings"))
         elif "板材清单" in path.name:
             result.append((path, "board"))
@@ -2537,111 +2579,18 @@ def _hardware_report_paths(
     paths: Iterable[Path],
     source_folder: Path,
 ) -> list[Path]:
-    """Exclude nested recut Fittingslists when a base report exists."""
-    all_paths = sorted({Path(path) for path in paths}, key=lambda item: str(item).casefold())
-    base_paths = [
-        path for path in all_paths
-        if not _is_recut_server_report(path, source_folder)
-    ]
-    return base_paths or all_paths
+    """Every report is a candidate; folder names never decide hardware scope."""
+    return sorted({Path(path) for path in paths}, key=lambda item: str(item).casefold())
 
 
-def _replace_aicnc_hardware_for_factory_orders(
-    store: "OrderIndexStore",
-    factory_orders: Iterable[str],
-) -> None:
-    """Replace AICNC hardware projections using factory-order ownership."""
-    normalized = sorted({
-        str(factory_order or "").strip().upper()
-        for factory_order in factory_orders
-        if str(factory_order or "").strip()
-    })
-    if not normalized:
-        return
-    placeholders = ",".join("?" for _ in normalized)
-    store.connection.execute(
-        f"delete from hardware_items where source_type='aicnc' "
-        f"and factory_order in ({placeholders})",
-        tuple(normalized),
-    )
+def _selected_hardware_reports(source_rows: Iterable[tuple[str, str]]) -> dict:
+    paths = [Path(path) for path, folder in source_rows if path and folder]
+    selected, _, _, _ = select_latest_fittings(paths)
+    return selected
 
 
-def _aicnc_hardware_projection_signature(
-    factory_order: str,
-    product_code: str,
-    source_code: str,
-    name: str,
-    spec: str,
-    quantity: float,
-    unit: str,
-) -> tuple:
-    """Normalize business hardware fields while ignoring source metadata."""
-    return (
-        str(factory_order or "").strip().upper(),
-        str(product_code or "").strip().upper(),
-        str(source_code or "").strip().upper(),
-        str(name or "").strip(),
-        str(spec or "").strip(),
-        round(float(quantity or 0), 6),
-        str(unit or "").strip(),
-    )
-
-
-def _aicnc_hardware_projection_matches(
-    store: "OrderIndexStore",
-    factory_order: str,
-    desired_rows: Iterable[dict],
-) -> bool:
-    """Return whether one factory order already has the desired projection."""
-    current_rows = store.connection.execute(
-        """
-        select factory_order, product_code, source_code, name, spec, quantity, unit
-        from hardware_items
-        where source_type='aicnc' and factory_order=?
-        order by id
-        """,
-        (str(factory_order or "").strip().upper(),),
-    ).fetchall()
-    current = sorted(
-        _aicnc_hardware_projection_signature(*row)
-        for row in current_rows
-    )
-    desired = sorted(
-        _aicnc_hardware_projection_signature(
-            factory_order,
-            row.get("product_code", ""),
-            row.get("source_code", ""),
-            row.get("name", ""),
-            row.get("spec", ""),
-            row.get("quantity", 0),
-            row.get("unit", ""),
-        )
-        for row in desired_rows
-    )
-    return current == desired
-
-
-def _selected_hardware_report_paths(
-    source_rows: Iterable[tuple[str, str]],
-) -> set[str]:
-    """Select one non-recut Fittingslist block per factory and folder."""
-    grouped: dict[str, list[Path]] = defaultdict(list)
-    for path, source_folder in source_rows:
-        if path and source_folder:
-            grouped[str(source_folder)].append(Path(path))
-    selected_paths: set[str] = set()
-    for source_folder, paths in grouped.items():
-        candidates = _hardware_report_paths(paths, Path(source_folder))
-        try:
-            selected, _, _, _ = select_latest_fittings(candidates)
-        except RuleError:
-            # The normal sync pass records the detailed report error. Keep the
-            # candidate paths here so the preview does not silently erase all
-            # hardware while that error is being shown.
-            selected_paths.update(str(path) for path in candidates)
-        else:
-            selected_paths.update(str(item.path) for item in selected.values())
-    return selected_paths
+def _selected_hardware_report_paths(source_rows: Iterable[tuple[str, str]]) -> set[str]:
+    return {str(source.path) for source in _selected_hardware_reports(source_rows).values()}
 
 
 _OPTIMIZATION_ROOT_RELATIVE_PATHS = (
@@ -3330,6 +3279,16 @@ def _refresh_outbound_status(
     ]
     if hardware_records:
         matching_records = hardware_records
+        # Confirmed factory-linked shipments are immutable business facts.
+        # Current source differences are audited separately, never unshipping.
+        confirmed = [str(record.get("document_number", "")).strip()
+                     for record in hardware_records
+                     if record.get("status") == "已出库"
+                     and str(record.get("factory_order", "")).strip().upper()
+                         == str(factory.get("factory_order", "")).strip().upper()
+                     and record.get("document_number")]
+        if confirmed:
+            return "已出库", "、".join(dict.fromkeys(confirmed))
     has_inventory_record = bool(matching_records)
     if outbound_mode == "customer_supplied" and not has_inventory_record:
         try:
@@ -3536,6 +3495,7 @@ def reconcile_outbound_statuses(
 
     updated = 0
     for factory in factories:
+        audit_factory_hardware(store.connection, factory["factory_order"])
         order_factories = by_order.get(_outbound_key(factory["order_id"]), [])
         status, matched_document = _refresh_outbound_status(
             config,
@@ -3617,8 +3577,9 @@ def reconcile_outbound_statuses(
             ),
         )
         updated += 1
+    audit_hardware_integrity(store.connection)
     resolved_issues = _resolve_fully_shipped_server_issues(config, store)
-    if updated or resolved_issues:
+    if updated or resolved_issues or store.connection.in_transaction:
         store.commit()
     if owns_store:
         store.close()
@@ -4265,15 +4226,12 @@ def sync_aimes_index(config: Config, *, force: bool = False, if_needed: bool = F
         reconcile_outbound_statuses(config, store)
     today = date.today().isoformat()
     cached_source_rows = load_aimes_order_cache(config)
-    cached_rows, cached_issues = _partition_aimes_rows(
+    cached_rows, _cached_issues = _partition_aimes_rows(
         cached_source_rows,
         store.ignored_aimes_keys(),
         store.aimes_assignments(),
     )
-    # Format-invalid rows are transient fetch warnings, not persistent review
-    # records. Clear rows written by older versions before returning anything.
-    store.replace_aimes_review_rows([])
-    store.commit()
+    persisted_issues = store.aimes_review_rows()
     already_succeeded_today = store.has_successful_aimes_sync_on(today)
     should_fetch = force or (if_needed and not already_succeeded_today)
     if not should_fetch:
@@ -4286,12 +4244,12 @@ def sync_aimes_index(config: Config, *, force: bool = False, if_needed: bool = F
                 "changed": False,
                 "count": len(cached_rows),
                 "issue_count": 0,
-                "warning_count": 0,
+                "warning_count": len(persisted_issues),
                 "duration_seconds": round(time.perf_counter() - operation_started, 2),
                 "error": "",
             },
             "aimes_issues": [],
-            "aimes_warnings": [],
+            "aimes_warnings": persisted_issues,
             "ignored_aimes": store.ignored_aimes_factories(),
             "assigned_aimes": store.assigned_aimes_factories(),
             "database": str(store.path),
@@ -4364,12 +4322,12 @@ def sync_aimes_index(config: Config, *, force: bool = False, if_needed: bool = F
                 "changed": False,
                 "count": len(cached_rows),
                 "issue_count": 0,
-                "warning_count": 0,
+                "warning_count": len(persisted_issues),
                 "duration_seconds": round(time.perf_counter() - operation_started, 2),
                 "error": message,
             },
             "aimes_issues": [],
-            "aimes_warnings": [],
+            "aimes_warnings": persisted_issues,
             "ignored_aimes": store.ignored_aimes_factories(),
             "assigned_aimes": store.assigned_aimes_factories(),
             "database": str(store.path),
@@ -4425,7 +4383,7 @@ def sync_aimes_index(config: Config, *, force: bool = False, if_needed: bool = F
         "label": "精确核验已删除工厂单",
         "duration_seconds": round(time.perf_counter() - verify_started, 6),
     })
-    store.replace_aimes_review_rows([])
+    store.replace_aimes_review_rows(issues)
     finished = _now()
     elapsed_seconds = round(time.perf_counter() - operation_started, 6)
     aimes_stage_durations = _complete_aimes_stage_durations(
@@ -6221,10 +6179,10 @@ def _server_folders_for_sync(
             candidate = selected.expanduser().resolve()
             if not candidate.is_dir() or containing_root(candidate) is None:
                 raise RuleError("server_folder_invalid", f"所选 Server 文件夹无法访问或不在 Server 根目录内：{selected}")
-            if not _is_standard_order_folder(candidate.name) and not _direct_report_files(candidate) and not _report_files(candidate):
+            if not _is_standard_order_folder(candidate.name) and not _report_files(candidate):
                 raise RuleError(
                     "server_folder_invalid",
-                    "选错了文件夹：请选择订单文件夹，或选择包含 material、板材清单或 Fittingslist 的临时订单文件夹。",
+                    f"无法识别所选文件夹：{candidate}。该目录及子目录中未找到可识别的 material、板材清单或 Fittingslist .xlsx 报表。请选择包含这些报表的订单目录；若选择的是优化结果目录，请返回上一级订单目录。",
                 )
             folders.append(candidate)
         return root, list(dict.fromkeys(folders))
@@ -6382,6 +6340,20 @@ def _merge_database_factory_candidates(
     return found
 
 
+def _preview_fittings_groups(path: Path, cache: dict | None = None) -> list:
+    """Reuse parsed hardware facts within one preview; never across requests."""
+    from .order_workflow import parse_fittings_groups
+
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    if cache is not None and key in cache:
+        return cache[key]
+    groups = parse_fittings_groups(path)
+    if cache is not None:
+        cache[key] = groups
+    return groups
+
+
 def sync_order_index(
     config: Config,
     *,
@@ -6396,6 +6368,7 @@ def sync_order_index(
     refresh_outbound_statuses: bool = True,
     reconcile_outbound: bool = True,
     server_snapshot_path: Path | None = None,
+    fittings_cache: dict | None = None,
 ) -> dict:
     """Refresh AIMES/Server facts into the local order index and return summaries.
 
@@ -6451,6 +6424,7 @@ def sync_order_index(
         store.ignored_aimes_keys(),
         store.aimes_assignments(),
     )
+    persisted_aimes_warnings = store.aimes_review_rows()
     automatic_aimes = aimes_if_needed and not (
         store.has_successful_aimes_sync_on(today)
     )
@@ -6535,8 +6509,9 @@ def sync_order_index(
             store.add_change(severity="error", kind="aimes", message=message)
     if not aimes_succeeded:
         aimes_rows = cached_aimes_rows
-        aimes_warnings = []
-    store.replace_aimes_review_rows([])
+        aimes_warnings = persisted_aimes_warnings
+    else:
+        store.replace_aimes_review_rows(aimes_warnings)
     finish_phase("load_aimes_and_local_state")
 
     snapshot_data = None
@@ -6999,6 +6974,8 @@ def sync_order_index(
                     continue
                 if (
                     not file_change_type
+                    and not full_refresh
+                    and not (kind == "fittings" and current_report_context() is not None and current_report_context().choices)
                     and kind in {"board", "fittings"}
                     and _merge_cached_server_candidate(
                         store,
@@ -7124,7 +7101,7 @@ def sync_order_index(
                     # raise a secondary UnboundLocalError for order_hint.
                     order_hint = folder_order_ids[0] if len(folder_order_ids) == 1 else ""
                     try:
-                        groups = parse_fittings_groups(path)
+                        groups = _preview_fittings_groups(path, fittings_cache)
                         factory_orders = [factory_order for factory_order, _ in groups]
                         server_factory_orders.update(factory_order.upper() for factory_order in factory_orders)
                         selected_groups = [
@@ -7232,34 +7209,11 @@ def sync_order_index(
                                             "unit": item.unit,
                                         })
                                 for factory_order, hardware_rows in hardware_rows_by_factory.items():
-                                    # A path change alone is not a business
-                                    # change. Keep the existing rows when the
-                                    # complete factory-order projection is
-                                    # already identical; otherwise replace it
-                                    # after the whole file passed resolution.
-                                    if _aicnc_hardware_projection_matches(
-                                        store,
-                                        factory_order,
-                                        hardware_rows,
-                                    ):
-                                        continue
-                                    _replace_aicnc_hardware_for_factory_orders(
-                                        store,
-                                        [factory_order],
+                                    replace_factory_hardware(
+                                        store.connection, factory_order, hardware_rows,
+                                        source_path=str(path), observed_at=server_seen,
+                                        allow_empty=True,
                                     )
-                                    for row in hardware_rows:
-                                        store.connection.execute(
-                                            """insert into hardware_items(
-                                                order_id,factory_order,scope,product_code,source_code,name,spec,quantity,unit,
-                                                source_type,source_path,remarks,updated_at
-                                            ) values(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                                            (
-                                                row["order_id"], row["factory_order"], "factory_order",
-                                                row["product_code"], row["source_code"], row["name"],
-                                                row["spec"], row["quantity"], row["unit"], "aicnc",
-                                                str(path), "", server_seen,
-                                            ),
-                                        )
                                 resolved_mapping_order_ids.add(order_hint.upper())
                         store.update_source_file_identity(
                             path,
@@ -7545,7 +7499,7 @@ def sync_order_index(
             # the root material workbook and would erase recut increments
             # before the confirmation payload was built.
             preview = preview_order(
-                config, Path(source_folder), order_id, persist_facts=False
+                config, Path(source_folder), order_id, persist_facts=False, include_hardware=include_hardware
             )
             factory_ids = {factory.factory_order for factory in preview.factories}
             if not factory_ids:
@@ -7651,6 +7605,7 @@ def sync_order_index(
         server_folder_count=folder_count,
         error="；".join(errors),
     )
+    audit_hardware_integrity(store.connection)
     store.commit()
     if reconcile_outbound:
         reconcile_outbound_statuses(config, store)
@@ -8068,6 +8023,7 @@ def _refresh_server_preview_hardware(
     *,
     skip_hardware_order_ids: Iterable[str] = (),
     preview_store: OrderIndexStore | None = None,
+    fittings_cache: dict | None = None,
 ) -> list[dict]:
     """Rebuild preview hardware with the current SKU rules.
 
@@ -8099,10 +8055,11 @@ def _refresh_server_preview_hardware(
             if _path_in_folders(str(source_folder or ""), folder_paths)
             and str(path or "")
         ]
-        paths = sorted(_selected_hardware_report_paths(scoped_rows))
+        selected_reports = _selected_hardware_reports(scoped_rows)
+        paths = sorted({str(source.path) for source in selected_reports.values()})
         for path in paths:
             try:
-                groups = parse_fittings_groups(Path(path))
+                groups = _preview_fittings_groups(Path(path), fittings_cache)
             except Exception:
                 # The regular Server parser already records malformed report
                 # issues.  This helper only owns SKU resolution.
@@ -8111,6 +8068,9 @@ def _refresh_server_preview_hardware(
             group_rows = []
             file_missing: list[dict] = []
             for factory_order, items in groups:
+                source = selected_reports.get(factory_order.upper())
+                if source is None or str(source.path) != path:
+                    continue
                 factory = preview.connection.execute(
                     """select order_id, outbound_status from factory_orders
                        where factory_order=? and aimes_status='active'""",
@@ -8196,28 +8156,10 @@ def _refresh_server_preview_hardware(
                         "unit": str(item.unit or ""),
                     })
             for factory_order, hardware_rows in hardware_rows_by_factory.items():
-                # A changed source path with identical business data should
-                # not cause a needless delete/reinsert in the preview DB.
-                if _aicnc_hardware_projection_matches(
-                    preview,
-                    factory_order,
-                    hardware_rows,
-                ):
-                    continue
-                _replace_aicnc_hardware_for_factory_orders(preview, [factory_order])
-                for row in hardware_rows:
-                    preview.connection.execute(
-                        """insert into hardware_items(
-                            order_id, factory_order, scope, product_code, source_code, name, spec,
-                            quantity, unit, source_type, source_path, active, updated_at
-                        ) values(?,?,?,?,?,?,?,?,?,?,?,1,?)""",
-                        (
-                            row["order_id"], row["factory_order"], "factory_order",
-                            row["product_code"], row["source_code"], row["name"],
-                            row["spec"], row["quantity"], row["unit"], "aicnc",
-                            path, _now(),
-                        ),
-                    )
+                replace_factory_hardware(
+                    preview.connection, factory_order, hardware_rows,
+                    source_path=path, observed_at=_now(), allow_empty=True,
+                )
         preview.commit()
     finally:
         if owns_preview:
@@ -8467,6 +8409,11 @@ def _server_preview_payload(
             if selected_source_paths else "0",
             tuple(selected_source_paths),
         ),
+        "hardware_source_versions": table_records(
+            "hardware_source_versions",
+            "factory_order in ({})".format(",".join("?" for _ in selected_factory_orders))
+            if selected_factory_orders else "0", tuple(selected_factory_orders),
+        ),
         "hardware_items": table_records(
             "hardware_items",
             "factory_order in ({})".format(",".join("?" for _ in selected_factory_orders))
@@ -8537,6 +8484,8 @@ def _server_preview_has_business_changes(payload: dict) -> bool:
 def _server_preview_hardware_source_items(
     preview_store: OrderIndexStore,
     folder_paths: list[str],
+    *,
+    fittings_cache: dict | None = None,
 ) -> list[dict]:
     """Capture parsed Fittingslist facts for later in-memory SKU resolution."""
     from .order_workflow import parse_fittings_groups
@@ -8550,17 +8499,21 @@ def _server_preview_hardware_source_items(
         if _path_in_folders(str(source_folder or ""), folder_paths)
         and str(path or "")
     ]
-    selected_paths = _selected_hardware_report_paths(scoped_rows)
+    selected_reports = _selected_hardware_reports(scoped_rows)
+    selected_paths = {str(source.path) for source in selected_reports.values()}
     result: list[dict] = []
     for path, source_folder in scoped_rows:
         path = str(path or "")
         if not path or path not in selected_paths:
             continue
         try:
-            groups = parse_fittings_groups(Path(path))
+            groups = _preview_fittings_groups(Path(path), fittings_cache)
         except Exception:
             continue
         for factory_order, items in groups:
+            source = selected_reports.get(factory_order.upper())
+            if source is None or str(source.path) != path:
+                continue
             factory = preview_store.connection.execute(
                 "select order_id from factory_orders where factory_order=?",
                 (str(factory_order).strip().upper(),),
@@ -8585,11 +8538,13 @@ def _server_preview_hardware_source_items(
     return result
 
 
+@preview_read_session
 def preview_server_changes(
     config: Config,
     selected_folders: list[Path],
     *,
     include_hardware: bool = True,
+    hardware_source_choices: dict[str, str] | None = None,
 ) -> dict:
     """Parse selected Server folders into a process-local preview.
 
@@ -8614,8 +8569,31 @@ def preview_server_changes(
         })
         stage_started = now
 
+    fittings_cache: dict = {}
     normalized_folders = [folder.expanduser().resolve() for folder in selected_folders]
     _server_folders_for_sync(config, None, selected_folders=normalized_folders)
+    if not isinstance(hardware_source_choices or {}, dict):
+        raise ValueError("五金来源选择必须是工厂单到报表的映射")
+    progress("正在读取五金报表并检查来源冲突")
+    selected_sources = {}
+    if include_hardware:
+        from .order_workflow import _fittings_report_is_empty
+        paths = [path for folder in normalized_folders for path, kind in _report_files(folder)
+                 if kind == "fittings"]
+        try:
+            selected_sources, _, _, _ = select_latest_fittings(paths, is_empty_report=_fittings_report_is_empty)
+        except RuleError as exc:
+            if exc.code == "fittings_selection_required":
+                finish_timing_stage("source_selection", "检查五金来源")
+                return {"operation_timing": {"total_seconds": round(time.perf_counter() - timing_started, 6), "stages": timing_stages},
+                        "hardware_source_selection": {
+                    "source_folders": [str(folder) for folder in normalized_folders],
+                    "include_hardware": include_hardware,
+                    "choices": hardware_source_choices or {},
+                    "conflicts": exc.context["conflicts"],
+                }}
+            # Preserve existing detailed workbook validation/error presentation.
+    finish_timing_stage("source_selection", "检查五金来源")
     memory = sqlite3.connect(":memory:")
     if config.workflow_database.is_file():
         source = sqlite3.connect(config.workflow_database)
@@ -8635,6 +8613,7 @@ def preview_server_changes(
         finish_timing_stage("preview_database", "复制中央数据库到内存预览")
         # The preview intentionally never runs temporary-order outbound or
         # traveler generation. Those are separate user-approved operations.
+        progress("正在读取材料并核对数据库中的工厂单归属")
         sync_order_index(
             stage_config,
             selected_folders=normalized_folders,
@@ -8644,6 +8623,7 @@ def preview_server_changes(
             validate_selected_orders=True,
             refresh_outbound_statuses=False,
             reconcile_outbound=False,
+            fittings_cache=fittings_cache,
         )
         finish_timing_stage("server_parse", "读取、解析并校验 Server 文件")
         material_issues = preview_store.connection.execute(
@@ -8661,7 +8641,7 @@ def preview_server_changes(
                 )
                 raise RuleError(
                     "material_validation",
-                    f"材料文件尚未通过校验：{summary}。请手工修正 Room/section 后重新扫描 Server",
+                    f"材料文件尚未通过校验：{summary}。请处理上述映射或文件校验问题后重新预览",
                     issues=issue_details,
                 )
         preview_store.connection.executemany(
@@ -8669,27 +8649,33 @@ def preview_server_changes(
             [(str(folder),) for folder in normalized_folders],
         )
         preview_store.commit()
-        payload = _server_preview_payload(
-            config, None, "", normalized_folders, include_hardware,
-            preview_store=preview_store,
-        )
-        payload["hardware_mapping_requirements"] = (
+        hardware_mapping_requirements = (
             _refresh_server_preview_hardware(
                 config, None, [str(folder) for folder in normalized_folders],
-                preview_store=preview_store,
+                preview_store=preview_store, fittings_cache=fittings_cache,
             )
             if include_hardware else []
         )
-        # Hardware rows are rebuilt after the mapping check, so regenerate the
-        # diff payload once more to include the resolved factory-order facts.
+        # Build the final diff only after hardware mapping has been resolved.
+        progress("正在组装材料、五金及写入差异预览")
         payload = _server_preview_payload(
             config, None, "", normalized_folders, include_hardware,
             preview_store=preview_store,
         ) | {
             "validation_recomputed": True,
-            "hardware_mapping_requirements": payload["hardware_mapping_requirements"],
+            "hardware_source_choices": hardware_source_choices or {},
+            "hardware_source_selection": {
+                "source_folders": [str(folder) for folder in normalized_folders],
+                "include_hardware": include_hardware,
+                "choices": hardware_source_choices or {},
+                "conflicts": list(current_report_context().source_conflicts.values()),
+            },
+            "hardware_selected_sources": [dict(factory_order=factory, **fittings_candidate(source))
+                                          for factory, source in selected_sources.items()],
+            "hardware_mapping_requirements": hardware_mapping_requirements,
             "hardware_source_items": _server_preview_hardware_source_items(
-                preview_store, [str(folder) for folder in normalized_folders]
+                preview_store, [str(folder) for folder in normalized_folders],
+                fittings_cache=fittings_cache,
             ) if include_hardware else [],
         }
         if not payload["orders"]:
@@ -9161,16 +9147,17 @@ def _confirm_memory_preview(
             current_factory = str(row.get("factory_order", "")).strip().upper()
             current_order = str(row.get("order_id", "")).strip().upper()
             _insert_memory_records(production.connection, "factory_orders", [row])
+            preserve_confirmed_shipment(production.connection, current_factory)
             if current_order in skipped_orders:
                 continue
-            production.connection.execute(
-                "delete from hardware_items where factory_order=?",
-                (current_factory,),
-            )
-            _insert_memory_records(
-                production.connection,
-                "hardware_items",
-                [item for item in hardware_rows if str(item.get("factory_order", "")).strip().upper() == current_factory],
+            replace_factory_hardware(
+                production.connection, current_factory,
+                [item for item in hardware_rows
+                 if str(item.get("factory_order", "")).strip().upper() == current_factory
+                 and item.get("source_type") == "aicnc"],
+                reason="确认 Server 五金预览",
+                allow_empty=any(str(group.get("factory_order", "")).strip().upper() == current_factory
+                    for group in payload.get("hardware_source_items", [])),
             )
 
         source_paths = {
@@ -9607,25 +9594,27 @@ def confirm_server_material_allocations(
                     f"insert or replace into factory_orders({','.join(factory_columns)}) values({factory_placeholders})",
                     tuple(preview_factory),
                 )
+                preserve_confirmed_shipment(production.connection, factory_order)
                 if order_id in skipped_hardware_orders:
                     # The order-level choice means this Server confirmation
                     # must not change hardware facts for any factory order in
                     # the order.  The factory identity/material facts still
                     # commit in the same transaction.
                     continue
-                production.connection.execute(
-                    "delete from hardware_items where factory_order=?",
+                cursor = preview.connection.execute(
+                    "select * from hardware_items where factory_order=? and active=1 and source_type='aicnc' order by id",
                     (factory_order,),
                 )
-                preview_hardware = preview.connection.execute(
-                    "select * from hardware_items where factory_order=? and active=1 order by id",
-                    (factory_order,),
-                ).fetchall()
-                if preview_hardware:
-                    production.connection.executemany(
-                        f"insert into hardware_items({','.join(hardware_columns)}) values({hardware_placeholders})",
-                        [tuple(row) for row in preview_hardware],
-                    )
+                names = [column[0] for column in cursor.description]
+                replace_factory_hardware(
+                    production.connection, factory_order,
+                    [dict(zip(names, row)) for row in cursor.fetchall()],
+                    reason="确认 Server 五金预览",
+                    allow_empty=bool(preview.connection.execute(
+                        "select 1 from hardware_source_versions where factory_order=? and row_count=0",
+                        (factory_order,),
+                    ).fetchone()),
+                )
                 for table in batch_tables:
                     columns = [
                         item[1]
@@ -10086,11 +10075,18 @@ def list_order_index(config: Config) -> dict:
     if config.reconcile_outbound_on_read:
         reconcile_outbound_statuses(config, store)
     cached_source_rows = load_aimes_order_cache(config)
-    _, aimes_warnings = _partition_aimes_rows(
+    _, cached_aimes_warnings = _partition_aimes_rows(
         cached_source_rows,
         store.ignored_aimes_keys(),
         store.aimes_assignments(),
     )
+    aimes_warnings_by_key = {
+        issue["ignore_key"]: issue
+        for issue in store.aimes_review_rows()
+    }
+    for issue in cached_aimes_warnings:
+        aimes_warnings_by_key.setdefault(issue["ignore_key"], issue)
+    aimes_warnings = list(aimes_warnings_by_key.values())
     result = {
         "orders": store.summaries(),
         "changes": store.latest_changes(),
@@ -10137,11 +10133,15 @@ def save_order_annotations(
 
 def ignore_aimes_factories(config: Config, ignore_keys: list[str]) -> dict:
     store = OrderIndexStore(config.workflow_database)
-    _, issues = _partition_aimes_rows(
+    _, cached_issues = _partition_aimes_rows(
         load_aimes_order_cache(config),
         store.ignored_aimes_keys(),
         store.aimes_assignments(),
     )
+    issues_by_key = {issue["ignore_key"]: issue for issue in store.aimes_review_rows()}
+    for issue in cached_issues:
+        issues_by_key.setdefault(issue["ignore_key"], issue)
+    issues = list(issues_by_key.values())
     by_key = {issue["ignore_key"]: issue for issue in issues}
     unknown = [key for key in ignore_keys if key not in by_key]
     if unknown:
@@ -10167,18 +10167,24 @@ def assign_aimes_factory_order(config: Config, ignore_key: str, order_id: str) -
     order_id = _valid_aimes_order_id(order_id)
     if not order_id:
         raise ValueError("手工确认的订单号不符合当前订单规则，请使用 PP 加 4 位数字或 CS 加 3 位数字")
-    raw_rows = load_aimes_order_cache(config)
-    raw = next((row for row in raw_rows if _aimes_ignore_key(row) == ignore_key), None)
-    issue = _aimes_row_issue(raw or {})
-    if issue is None:
-        raise ValueError("所选 AIMES 工厂单已不需要人工处理，请刷新后重试")
-    if not FACTORY_RE.fullmatch(issue["factory_order"]):
-        raise ValueError("工厂单号不符合规则，无法自动归属")
-
     store = OrderIndexStore(config.workflow_database)
     if ignore_key in store.ignored_aimes_keys():
         store.close()
         raise ValueError("该工厂单已经被忽略，请先恢复后再处理")
+    issue = store.aimes_review_row(ignore_key)
+    if issue is None:
+        raw_rows = load_aimes_order_cache(config)
+        raw = next((row for row in raw_rows if _aimes_ignore_key(row) == ignore_key), None)
+        if raw is None:
+            store.close()
+            raise ValueError("所选 AIMES 异常记录已不在待处理清单中，请重新获取 AIMES 数据后重试")
+        issue = _aimes_row_issue(raw)
+    if issue is None:
+        store.close()
+        raise ValueError("所选 AIMES 工厂单已不需要人工处理，请刷新后重试")
+    if not FACTORY_RE.fullmatch(issue["factory_order"]):
+        store.close()
+        raise ValueError("工厂单号不符合规则，无法自动归属")
     store.assign_aimes_factory(issue, order_id)
     seen_at = _now()
     store.upsert_order(order_id, aimes_seen=seen_at)
