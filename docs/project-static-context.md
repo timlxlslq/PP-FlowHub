@@ -13,25 +13,18 @@
 
 ## 2. 技术架构
 
-```text
-SwiftUI App / CLI
-  -> 本地命令解析器（常用命令零 Token）
-  -> Workflow Agent（仅处理模糊表达）
-  -> order / traveler / inventory Skills
-  -> Typed Tool Gateway + 本地审批
-  -> Python 确定性业务引擎
-  -> SQLite / Excel / SMB / Playwright
-```
+当前入口分为订单中心直接调用 `order/order-service` 和助手调用本地解析器/Gateway 两条路径；二者都落到 Python 确定性业务引擎。Workflow Agent 与单职责 Skills 是逐步建设中的长期方向，现有 Skills 主要是资料和边界说明。
 
 - SwiftUI：界面、语音转文字、预览、确认、串行任务队列和状态展示；不承载 Excel 业务规则。
 - 本地解析器：把常用文字/语音表达转换成类型化动作；不能直接写真实系统。
 - Agent：只理解模糊表达并输出结构化路由；不能直接读写 Excel、Server 或库存系统。Agent 不可用时，本地确定性流程仍应可运行。
-- Skill：承载领域步骤、规则和引用；不要在 Skill 中复制 Python 业务实现。
+- Skill：仅为稳定、重复且输入输出明确的流程提供步骤、规则和引用；不要在 Skill 中复制 Python 业务实现。
 - Tool Gateway：工具白名单、参数校验、审批边界和执行入口；业务计算仍由 Python 完成。
 - Python：确定性解析、业务计算、Excel 读写、Server 扫描、库存映射、出库和复查。
 - SQLite：订单索引/同步证据、批次、材料、五金、出库单据、商品主资料、备份记录、缓存和相关状态。
 - 外部边界：`openpyxl` 处理 Excel，SMB 访问 Server，Playwright 驱动库存网页，Swift Security Framework/`keychain-read` 处理钥匙串。
-- macOS 最低系统版本为 14.0；Python 要求 >=3.10；项目依赖固定在 `pyproject.toml`，包括 `openpyxl==3.1.5` 和 `openai-agents==0.19.2`。
+- 构建目标、依赖和运行环境以 [README](../README.md)、当前工程配置和 [发布流程](release-testing.md) 为准，不在此处重复维护易变版本细节。
+- `wecom_service.py` 当前是隔离的 SmartSheet 读取实验，尚未接入 App 或自动同步；WeCom 写入和正式草稿流程不属于当前能力。
 
 ## 3. 数据与身份约束
 
@@ -45,10 +38,10 @@ SwiftUI App / CLI
 
 ## 4. 固定业务规则
 
-- 订单号：PP 加 4 位数字并可带数字后缀，或 CS 加 3 位数字；非法或包含 `test` 的 AIMES 行只作为本次获取警告，不写入业务数据库、不进入待处理中心，必须到 AIMES 修改原始销售单名称。
+- 订单号：PP 加 4 位数字并可带数字后缀，或 CS 加 3 位数字；非法或包含 `test` 的 AIMES 行不进入有效映射和正常订单索引，但保留为获取警告和人工复核项，必须到 AIMES 修改原始销售单名称或完成归属处理。详见 [业务规则](business-rules.md)。
 - 房间不能被猜测地分配到多个工厂单；无法可靠匹配时必须请求人工分配。
 - Server 默认区分 `Optimized Orders`（自有订单）和 `CUT TO SIZE`（来料加工）；目录时间变化本身不代表业务内容变化，优先使用文件/业务内容指纹。
-- 截止日期由用户调整；未生成 Traveler 的订单不追踪源文件变化，已生成后也要以业务内容指纹而非单纯修改时间决定是否更新。
+- 截止日期由用户调整；订单中心扫描不以 Traveler 是否存在为前提。旧的独立 Traveler 更新流程才按已有文件监测来源，是否需要更新最终以业务内容指纹而非单纯修改时间决定。
 - Traveler 模板为 `resources/templates/Work Order Traveler.xlsx`，前三个工作表及顺序固定为 `WorkOrderTraveler`、`Usage List`、`Picking List`。
 - 新 Traveler 不覆盖旧文件；更新前备份，在临时路径生成并重新打开验证后原子替换。模板样式、合并单元格、尺寸和公式兼容性必须保留。
 - `Usage List` 使用从第 3 行开始的明细；多颜色占多行；汇总规则以模板约定为准。自动 material/Traveler 只能使用兼容的 `SUM`/`SUMIF`，不能引入 `UNIQUE`/`FILTER` 动态数组公式。
@@ -79,24 +72,13 @@ SwiftUI App / CLI
 
 ## 7. 固定验证与发布门禁
 
-代码或 App 修改完成后，按以下顺序验证；结论必须区分“源码/离线测试”“构建成功”“正式安装”“真实外部系统行为”：
-
-1. `./scripts/test-release`：全量 Python `unittest`、macOS UI 回归、PP0067 workbook E2E、`git diff --check`。
-2. 发布门禁还必须验证 xlsx ZIP/OOXML、禁止不安全动态数组公式、独立工作簿渲染、自动 material 的 Color Table、模板样式/合并单元格和关键单元格。
-3. `./scripts/build-app`：生成新的未签名 `/tmp/pp-flowhub-build/PP FlowHub.app`；不能复用旧构建。
-4. 正式安装必须从普通 Aqua Terminal 运行 `./scripts/install-app`：检查 Apple Development 身份、固定 Bundle Identifier、签名/TeamIdentifier/Designated Requirement、可执行文件哈希和钥匙串 helper，再原子替换 `/Applications/PP FlowHub.app`。
-5. 安装成功后仍需重新启动已安装 App 做 launch/行为检查；旧进程不会自动替换，验证前应退出并重新打开。
-6. 真实 Server、库存网页、钥匙串和 `/Applications` 状态是动态外部证据；离线夹具或单元测试不能代替生产验证。无法访问时必须明确标为待验证。
+代码或 App 修改后的完整门禁、一次串行构建、普通 Terminal/Aqua 签名安装和安装版检查，统一以 [发布测试与安装验收](release-testing.md) 为准。用户已长期授权 Codex 自动完成；后台 identity 不可用时优先切换可用普通会话，工具拒绝或签名失败则保留产物并如实报告。纯 Markdown 修改只做差异、链接和一致性检查，不构建或安装。
 
 ## 8. 后续任务的上下文读取协议
 
-每次执行任务前先用简短三行说明：
+按任务相关性读取最小充分的源码、权威文档、工作树差异和动态证据。只有相关文件发生变化、任务进入新领域或出现矛盾时才扩大范围；当前 Git 状态、测试结果、日志、`data/`、Server/库存可达性、钥匙串、构建产物、已安装 App 和真实 UI 行为均需在相关任务中重新核对。
 
-- **复用静态上下文**：列出本次相关的本文件章节和对应权威文档。
-- **新读取动态信息**：只列出本次重新检查的代码、diff、日志、测试结果、运行状态或外部状态。
-- **无需重复读取**：列出本次未重复读取的稳定文档/源码区域；只有它们发生修改、任务涉及新领域或出现矛盾时才重读。
-
-以下内容默认不作为静态事实，必须在相关任务中重新读取：当前 Git diff/分支、未提交文件、测试通过数量和耗时、异常日志、`data/` 内容、Server/库存可达性、登录/钥匙串状态、构建产物、已安装 App、真实用户界面行为，以及项目交接记录中的“待办/部分完成”状态。
+本文不要求每次任务重复固定背景仪式。遇到来源冲突时仍须沿调用链核对并说明证据范围，不能把旧交接记录或生成快照直接当作当前运行事实。
 
 ## 9. 权威文档索引
 

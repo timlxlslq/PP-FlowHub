@@ -31,6 +31,27 @@
 `docs/learning/02-macos-code-signing-tcc.md` 和
 `docs/learning/03-server-scan-performance-observation.md` 是专题材料，分别在阅读 macOS 集成和 Server 扫描时使用。
 
+## 学习和任务阅读约定
+
+- 先用一个可运行的小问题理解输入、输出、异常和副作用，再逐步扩大到模块和调用链。
+- 每个学习阶段写清当前目标、已确认事实、未验证假设和下一步；不要用复杂设计模式、元编程或过度抽象代替基本 Python 结构。
+- 任务阅读范围按相关性决定：UI 读入口和调用链，业务读对应模块与数据模型，文档读权威来源，发布读发布文档和脚本帮助；不要求每次全仓通读。
+- 有教学价值的实现阶段补充现有 learning 文档，避免新建重复的百科或空目录。
+
+复杂功能、跨模块修改、重大重构或明显架构取舍任一成立时，沿用 `docs/superpowers/plans/` 中的计划或新增有实际内容的计划；简单修改不建计划。计划文首记录目标、状态、约束、步骤、验证、完成项和剩余决策。
+
+## 阅读范围速查
+
+| 任务 | 先读 | 再核对 |
+| --- | --- | --- |
+| 助手或订单入口 | `AssistantView.swift`、`OrderDashboardView.swift`、对应 CLI | Gateway、Python 入口、相关测试 |
+| 材料、五金或库存 | `business-rules.md`、`inventory-outbound-rules.md` | `inventory.py`、`order_workflow.py`、SQLite 事实 |
+| Server/AIMES 变化 | `order_index.py` 与业务规则 | 日志、快照、preview/confirm 分支和回归 |
+| App 或发布 | `release-testing.md`、构建/安装脚本 | 当前构建产物、安装状态和实际入口 |
+| 文档或教学 | 本文对应章节和权威文档 | 链接、命令和源码名称 |
+
+05–08 和 schema 参考是生成的定位索引；它们便于找符号，不替代当前源码。每份文档只维护自己的权威范围，历史记录保留背景但不替代现行规则。
+
 ## 二、先建立一张“心智地图”
 
 ### 2.1 运行时结构
@@ -52,6 +73,8 @@ Typed Tool Gateway
         ↓
 SQLite、Excel、Server 文件夹、库存网页
 ```
+
+上图的 Agent/Gateway 分支只表示助手自然语言入口；订单中心主要直接调用 `order/order-service`。完整当前分层见 [系统架构](../architecture/system-architecture.md)。
 
 这里的“层”可以理解为不同职责的边界：
 
@@ -277,7 +300,7 @@ quantity += 1
 
 ## 六、安全的学习和修改流程
 
-每次准备修改时：
+每次准备修改时，按本次任务相关性选择必要步骤；文档修改只做轻量差异、链接和一致性检查，代码或 App 修改才进入相应测试、构建和安装门禁：
 
 1. 先查看 `git status` 和 `git diff`，确认没有覆盖现有工作。
 2. 先用只读命令、测试夹具和 SQLite 查询验证当前行为。
@@ -312,3 +335,9 @@ quantity += 1
 - 只讨论但尚未决定的需求：明确标记为待确认，不写成已经实现的规则。
 
 这份指南描述的是阅读和维护方法，不替代业务规则、发布门禁或当前动态交接记录。
+
+## 九、外部学习资料
+
+- [Harness Engineering](https://openai.com/index/harness-engineering/)：帮助理解如何把运行约束、验证和工具边界写成可执行的工程环境；本项目对应 `AGENTS.md`、测试门禁和发布验收。
+- [AGENTS.md 指南](https://developers.openai.com/codex/guides/agents-md/)：说明如何用分层规则指导代码任务；本项目按任务相关性读取规则，不要求每次重复全仓背景。
+- [Rethinking Skills and Prompts for GPT-6 Astra](https://developers.openai.com/blog/rethinking-skills-and-prompts-for-gpt-6-astra)：强调窄而具体的 Skill 触发和按需读取；本项目只在稳定、重复且输入输出明确时提炼 Skill。

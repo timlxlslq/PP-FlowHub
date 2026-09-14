@@ -11,6 +11,7 @@ import json
 import re
 import shutil
 import sqlite3
+import database
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -330,8 +331,7 @@ def ensure_schema(path: Path) -> None:
                 started_at text not null,
                 finished_at text not null,
                 status text not null,
-                database_fingerprint text not null default '',
-                error text not null default ''
+                database_fingerprint text not null default ''
             );
             create index if not exists idx_backup_records_finished on backup_records(finished_at desc);
             create table if not exists inventory_resolution_rules(

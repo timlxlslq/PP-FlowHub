@@ -1,5 +1,7 @@
 # PP FlowHub 用户操作与业务调用链全解
 
+> **学习快照（2026-09）**：本文依据阶段性源码整理调用链，行号和部分入口会变化；当前行为以 [系统架构](../architecture/system-architecture.md)、[业务规则](../business-rules.md) 和 [发布流程](../release-testing.md) 及当前源码为准，不把本文当作当前待办或授权。
+
 本文回答一个固定问题：**用户在 App 里做了一件事后，代码从哪里开始、传入什么、下一步调用谁、最终读写什么？**
 
 文档依据 2026-08-30 当前源码整理。函数级全集请配合以下自动生成文档：
@@ -237,7 +239,7 @@ order_workflow.main(command="sync-aimes")
 
 输出：`orders`、`aimes` 状态、warnings、ignored/assigned 列表、stage durations 和 operation trace。
 
-关键边界：`sync_aimes_index()` 只刷新 AIMES 身份，不扫描 Server。格式异常行作为待处理中心中的警告跳过有效业务写入；失败时可以返回缓存，但缓存不能表述成刚刚在线验证成功。
+关键边界：`sync_aimes_index()` 只刷新 AIMES 身份，不扫描 Server。格式异常行保存在 `aimes_review_rows`，并由读层投影为待人工确认的警告；它跳过有效业务写入。失败时可以返回缓存，但缓存不能表述成刚刚在线验证成功。
 
 ## 7. Server 扫描、预览与确认
 

@@ -695,6 +695,9 @@ func orderDashboardOutboundDisplay(status: String, documentNumber: String) -> St
 }
 
 func orderDashboardStageMatchesFilter(_ stage: String, statusFilter: String) -> Bool {
+    if statusFilter == "全部订单" {
+        return true
+    }
     if statusFilter == "未完成订单" || statusFilter == "全部状态" {
         return !orderDashboardIsCompleted(stage)
     }
@@ -863,6 +866,21 @@ func dashboardStatusIsInProgress(_ text: String) -> Bool {
     return detail.contains("正在") || detail.contains("处理中")
 }
 
+func dashboardMessageIsRunning(_ message: DashboardMessage) -> Bool {
+    if message.state == "running" { return true }
+    // Keep compatibility with older callers that did not set the explicit
+    // running state. Terminal markers always win over text matching.
+    guard message.state == "info" else { return false }
+    return dashboardStatusIsInProgress(message.detail)
+}
+
+private let dashboardStatusPlaceholders: Set<String> = [
+    "订单数据尚未同步",
+    "库存操作尚未执行",
+    "AIMES 尚未检查",
+    "Server 尚未扫描",
+]
+
 func dashboardMessages(
     syncStatus: String,
     syncTime: String,
@@ -877,7 +895,8 @@ func dashboardMessages(
     manualPathsBySource: [String: [String]] = [:],
     contextDetailsBySource: [String: [String]] = [:],
     durationsBySource: [String: TimeInterval] = [:],
-    operationDurationsBySource: [String: [DashboardOperationDuration]] = [:]
+    operationDurationsBySource: [String: [DashboardOperationDuration]] = [:],
+    sessionMessages: [DashboardMessage]? = nil
 ) -> [DashboardMessage] {
     // When the AIMES status is also copied into syncStatus, prefer the AIMES
     // message so its authoritative duration, stages, and warning details are
@@ -885,15 +904,17 @@ func dashboardMessages(
     let statuses = [
         ("inventory", "库存操作", inventoryStatus, inventoryTime),
         ("aimes", "AIMES", aimesStatus, aimesTime),
-        ("sync", "订单数据", syncStatus, syncTime),
         ("server", "Server", serverStatus, serverTime),
+        ("sync", "订单数据", syncStatus, syncTime),
     ]
     var seenDetails: Set<String> = []
     var currentStatuses: [DashboardMessage] = []
     for (source, title, rawDetail, time) in statuses {
         let detail = dashboardMessageDetail(rawDetail).trimmingCharacters(in: .whitespacesAndNewlines)
+        let state = dashboardStatusIsInProgress(rawDetail) ? "running" : dashboardMessageState(rawDetail)
         guard !detail.isEmpty,
-              !(source == "inventory" && detail == "库存操作尚未执行"),
+              !dashboardStatusPlaceholders.contains(detail),
+              sessionMessages == nil || state == "running",
               seenDetails.insert(detail).inserted else { continue }
         currentStatuses.append(DashboardMessage(
             id: "status:\(source)",
@@ -901,7 +922,7 @@ func dashboardMessages(
             time: time,
             title: title,
             detail: detail,
-            state: dashboardMessageState(rawDetail),
+            state: state,
             manualPaths: manualPathsBySource[source] ?? [],
             operationDetails: operationDetailsBySource[source] ?? [],
             contextDetails: contextDetailsBySource[source] ?? [],
@@ -910,7 +931,7 @@ func dashboardMessages(
         ))
     }
     currentStatuses.sort { ($0.time, $0.id) < ($1.time, $1.id) }
-    let history = activity.reversed().map { step in
+    let history = sessionMessages ?? activity.reversed().map { step in
         DashboardMessage(
             id: "activity:\(step.id.uuidString)",
             source: "activity",
@@ -926,6 +947,9 @@ func dashboardMessages(
         )
     }
     let combined = history + currentStatuses
+    if sessionMessages != nil {
+        return combined
+    }
     return combined.enumerated()
         .sorted { left, right in
             if left.element.time != right.element.time {
@@ -938,7 +962,7 @@ func dashboardMessages(
 
 func dashboardVisibleMessages(_ messages: [DashboardMessage], isRunning: Bool) -> [DashboardMessage] {
     guard isRunning else { return messages }
-    return messages.filter { !dashboardStatusIsInProgress($0.detail) }
+    return messages.filter { !dashboardMessageIsRunning($0) }
 }
 
 func dashboardCurrentOperation(
@@ -946,7 +970,7 @@ func dashboardCurrentOperation(
     isRunning: Bool
 ) -> DashboardOperationDisplay? {
     if isRunning,
-       let running = messages.last(where: { dashboardStatusIsInProgress($0.detail) }) {
+       let running = messages.last(where: dashboardMessageIsRunning) {
         return DashboardOperationDisplay(message: running, isRunning: true)
     }
     if let completed = messages.last(where: { ["success", "warning", "failure"].contains($0.state) }) {
@@ -965,7 +989,7 @@ func dashboardMessageScrollKey(_ messages: [DashboardMessage]) -> String {
 }
 
 func dashboardMessageSupportsHoverDetail(_ message: DashboardMessage) -> Bool {
-    !dashboardStatusIsInProgress(message.detail)
+    !dashboardMessageIsRunning(message)
         && (message.state == "warning" || message.state == "failure"
             || !message.manualPaths.isEmpty
             || !message.operationDetails.isEmpty
@@ -1562,6 +1586,7 @@ struct OrderDashboardView: View {
 
             Menu {
                 Button("未完成订单") { statusFilter = "未完成订单" }
+                Button("全部订单") { statusFilter = "全部订单" }
                 ForEach(orderDashboardStatuses, id: \.self) { status in
                     Button(status) { statusFilter = status }
                 }
@@ -1651,7 +1676,7 @@ struct OrderDashboardView: View {
             serverStatus: model.dashboardServerStatus,
             serverTime: model.dashboardServerStatusTime,
             activity: model.dashboardActivity,
-            operationDetailsBySource: model.dashboardOperationDetails,
+            operationDetailsBySource: model.dashboardMessageOperationDetails,
             manualPathsBySource: [
                 "sync": latestActivityPaths,
                 "aimes": aimesManualPaths,
@@ -1663,7 +1688,8 @@ struct OrderDashboardView: View {
                 "server": serverActionDetails,
             ],
             durationsBySource: model.dashboardOperationDurations,
-            operationDurationsBySource: model.dashboardOperationStageDurations
+            operationDurationsBySource: model.dashboardOperationStageDurations,
+            sessionMessages: model.dashboardSessionMessages
         )
         let operationRunning = model.orderRunning
             || model.inventoryRunning
@@ -1707,7 +1733,7 @@ struct OrderDashboardView: View {
                                         }
                                         }
                                         .padding(.horizontal, 12)
-                                        .frame(height: dashboardMessageRowHeight)
+                                        .frame(minHeight: dashboardMessageRowHeight)
                                     }
                                     .id(message.id)
                                     if message.id != visibleMessages.last?.id { Divider() }
@@ -3337,9 +3363,6 @@ struct PendingCenterSheet: View {
                 }
                 Spacer()
                 AppStatusBadge(text: "\(items.count) 项", kind: .warning)
-                Button("关闭", systemImage: "xmark") { model.showPendingCenterPrompt = false }
-                    .buttonStyle(.glass)
-                    .keyboardShortcut(.cancelAction)
             }
             HStack(alignment: .top, spacing: 14) {
                 VStack(alignment: .leading, spacing: 10) {
@@ -3388,9 +3411,9 @@ struct PendingCenterSheet: View {
                                 }.frame(maxWidth: .infinity, alignment: .leading)
                             }
                             Divider()
-                            HStack {
-                                Button("稍后处理") { model.showPendingCenterPrompt = false }
-                                    .buttonStyle(.glass)
+                            HStack(spacing: 8) {
+                                Spacer()
+                                postponeButton
                                 if !(item.aimesReviews + item.aimesFormatWarnings).isEmpty {
                                     let reviews = (item.aimesReviews + item.aimesFormatWarnings).filter { model.selectedAimesReviewIDs.contains($0.id) }
                                     Button("忽略选中项") {
@@ -3404,7 +3427,6 @@ struct PendingCenterSheet: View {
                                     .buttonStyle(.glass)
                                     .disabled(model.orderRunning || reviews.isEmpty)
                                 }
-                                Spacer()
                                 if item.status == "待处理" || item.status == "处理失败" {
                                     if !item.folderPath.isEmpty {
                                         Button(item.status == "处理失败" ? "重新读取并预览" : "选择并预览") { preview(item) }
@@ -3416,8 +3438,16 @@ struct PendingCenterSheet: View {
                         }
                         .padding(14)
                     } else {
-                        ContentUnavailableView("请选择待处理项目", systemImage: "tray")
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        VStack(spacing: 12) {
+                            ContentUnavailableView("请选择待处理项目", systemImage: "tray")
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            Divider()
+                            HStack {
+                                Spacer()
+                                postponeButton
+                            }
+                        }
+                        .padding(14)
                     }
                 }
             }
@@ -3439,6 +3469,13 @@ struct PendingCenterSheet: View {
         } message: {
             Text("此操作会保存你的处理结果。请确认当前订单和处理范围无误。")
         }
+    }
+
+    // Keep a dismissal action available even when the queue or filter is empty.
+    private var postponeButton: some View {
+        Button("稍后处理") { model.showPendingCenterPrompt = false }
+            .buttonStyle(.glass)
+            .keyboardShortcut(.cancelAction)
     }
 
     private func detailTitle(_ item: PendingCenterItem) -> String {
@@ -4187,23 +4224,7 @@ struct HardwareSourceSelectionSheet: View {
                     ForEach(model.hardwareSourceConflicts) { conflict in
                         Text(conflict.id).font(.headline)
                         ForEach(conflict.candidates) { candidate in
-                            VStack(alignment: .leading, spacing: 8) {
-                                Button {
-                                    model.hardwareSourceChoices[conflict.id] = candidate.id
-                                } label: {
-                                    HStack(alignment: .top) {
-                                        Image(systemName: model.hardwareSourceChoices[conflict.id] == candidate.id ? "largecircle.fill.circle" : "circle")
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            Text(candidate.label).fontWeight(.semibold)
-                                            Text(candidate.path).multilineTextAlignment(.leading).textSelection(.enabled)
-                                        }
-                                    }
-                                }.buttonStyle(.plain)
-                                ForEach(Array(candidate.items.enumerated()), id: \.offset) { _, item in
-                                    Text(item).font(.callout).padding(.leading, 24)
-                                }
-                            }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(AppPalette.subtleSurface).clipShape(RoundedRectangle(cornerRadius: 10))
+                            sourceCard(candidate, factoryOrder: conflict.id)
                         }
                     }
                 }
@@ -4217,6 +4238,69 @@ struct HardwareSourceSelectionSheet: View {
             }
         }.padding(22).frame(width: 820, height: 620)
     }
+
+    private func formatQuantity(_ value: Double) -> String {
+        value.rounded() == value ? String(format: "%.0f", value) : String(format: "%.2f", value)
+    }
+
+    // The full card is one button, including its rows and padded empty space.
+    private func sourceCard(_ candidate: HardwareSourceCandidate, factoryOrder: String) -> some View {
+        let selected = model.hardwareSourceChoices[factoryOrder] == candidate.id
+        let reportURL = URL(fileURLWithPath: candidate.path)
+        let folder = reportURL.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
+        return Button {
+            model.hardwareSourceChoices[factoryOrder] = candidate.id
+        } label: {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                        .foregroundStyle(selected ? Color.accentColor : .secondary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(folder).font(.headline)
+                        Text(reportURL.lastPathComponent).font(.subheadline)
+                        Text(candidate.path)
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(candidate.items.enumerated()), id: \.offset) { _, item in
+                        HStack(alignment: .top, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.name).font(.callout)
+                                if !item.spec.isEmpty {
+                                    Text(item.spec).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            Text(item.code.isEmpty ? "—" : item.code)
+                                .font(.caption.monospaced()).foregroundStyle(.secondary)
+                                .frame(width: 110, alignment: .leading)
+                            Text("× \(formatQuantity(item.quantity)) \(item.unit)")
+                                .font(.caption.monospacedDigit())
+                                .frame(width: 100, alignment: .trailing)
+                        }
+                    }
+                }
+                .padding(.leading, 24)
+            }
+            .multilineTextAlignment(.leading)
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? Color.accentColor.opacity(0.08) : AppPalette.subtleSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 1.5)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("选择此报表，\(folder)，\(reportURL.lastPathComponent)")
+        .accessibilityValue(selected ? "已选中" : "未选中")
+    }
+
 }
 
 struct ServerWriteConfirmationSheet: View {

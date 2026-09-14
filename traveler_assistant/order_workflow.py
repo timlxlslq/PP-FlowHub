@@ -1947,7 +1947,7 @@ def persist_preview(config: Config, preview: OrderPreview) -> None:
                  "aihouse", str(preview.materials_path), "", observed),
             )
         # A material-only or partial preview must not erase other factories.
-        from .hardware_facts import replace_factory_hardware
+        from .hardware_facts import replace_factory_hardware, server_hardware_quantity
         resolution_index = len(preview.materials) + len(preview.edge_banding)
         for factory in preview.factories if preview.include_hardware else []:
             rows = []
@@ -1956,10 +1956,12 @@ def persist_preview(config: Config, preview: OrderPreview) -> None:
                 resolution_index += 1
                 if item.ignored or accepted.get("ignored") or ignored_hardware_reason(mappings, item.name, item.code) is not None:
                     continue
+                product_code = resolved_product_code(resolution, resolution_index - 1, item.code)
                 rows.append({"order_id": preview.order_id.upper(), "factory_order": factory.factory_order,
-                    "product_code": resolved_product_code(resolution, resolution_index - 1, item.code),
+                    "product_code": product_code,
                     "source_code": item.code, "name": item.name, "spec": item.size,
-                    "quantity": float(item.quantity), "unit": item.unit})
+                    **server_hardware_quantity(product_code, item.quantity, item.unit,
+                        factory_order=factory.factory_order, name=item.name)})
             replace_factory_hardware(connection, factory.factory_order, rows,
                 source_path=str(preview.folder), observed_at=observed,
                 reason="订单预览写入", allow_empty=bool(factory.fittings))

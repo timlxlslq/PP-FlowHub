@@ -1,39 +1,107 @@
-# 发布测试与安装流程
+# 发布测试与安装验收
 
-## 背景
+## 验收目标
 
-仅验证 Python 可以重新打开 `.xlsx` 不足以证明 Excel 会接受该文件；仅测试源码也不足以证明 `/Applications` 中运行的是同一版本。
+发布验收要回答两个问题：中央 SQLite 中的订单、工厂单、材料、五金、生产和出货事实，是否与界面显示一致；AIMES、Server、库存系统之间的边界，是否能从日志、单据号和数据库记录追溯。
+
+Traveler 是按需导出能力，不是查询订单、登记生产或确认出货的前置条件。材料需求优先读取 SQLite；若缺少材料事实，或读取 SQLite 时出现受支持的读取异常，则回退到订单材料预览，且仍需材料校验。material 工作簿也参与材料事实的生成与解析。
+
+自动测试是回归入口和业务不变量检查，不代表所有分支、外部服务或真实用户流程都已验收。正式结论必须分别报告源码/离线测试、构建、签名安装和安装版业务验证。
 
 ## Codex 发布测试门禁
 
-测试和构建由 Codex 执行，正式安装脚本不重复执行这些步骤。Codex 发布门禁依次完成：
+纯 Markdown 修改只做差异、链接/命令和一致性检查，不触发 `test-release`、`build-app` 或 `install-app`；代码或 App 修改仍按下述完整门禁执行。
 
-1. 全量 Python 回归测试。
-2. macOS UI 编译与模型集成测试。
-3. 使用真实 PP0067 目录复制品，从缺少 material 开始完成“自动生成 material → 生成 Traveler”。
-4. 检查 xlsx ZIP/OOXML 完整性，并拒绝 Usage List 中不安全的 `UNIQUE` / `FILTER` 动态数组公式。
-5. 用独立电子表格引擎导入并渲染生成的 Traveler。
-6. 校验自动 material 的 Color Table：颜色、3/4 Panel、1/4 Panel、封边汇总均正确；公式只使用兼容的 `SUM` / `SUMIF`，不含 `UNIQUE` / `FILTER`。
-7. 将自动 material 与人工模板比较合并单元格、列宽和关键单元格样式，并用独立工作簿渲染器生成整表图片检查可读性。
-8. 重新构建 App；不能复用测试前的旧构建。
+代码或 App 改动后，先定位受影响的业务链，确认测试覆盖真实 payload、重复操作、失败恢复和状态边界，再使用唯一门禁入口：
 
-完成上述门禁后，Codex 会生成 `/tmp/pp-flowhub-build/PP FlowHub.app`，并提醒从普通 Aqua Terminal 执行 `scripts/install-app`。
+```bash
+./scripts/test-release
+```
 
-## Aqua Terminal 安装步骤
+该入口的实际执行顺序如下：
 
-`scripts/install-app` 只负责以下与正式安装直接相关的工作，不运行测试、不重新编译：
+| 顺序 | 命令 | 实际覆盖 | 明确未覆盖 |
+| --- | --- | --- | --- |
+| 1 | [Python 回归](../scripts/test-release) | 运行 `tests/test_*.py`，覆盖隔离夹具、SQLite 事实、订单索引、AIMES 适配、Server 预览/扫描、库存状态、生产与出货边界、工作簿解析和源数据保护。关键入口见 [test_order_index.py](../tests/test_order_index.py)、[test_inventory.py](../tests/test_inventory.py)、[test_order_workflow.py](../tests/test_order_workflow.py)。 | 以隔离夹具和 mock 验证，不构成现场 Server/SMB、AIMES 或金蝶服务、数据库验收。 |
+| 2 | [macOS UI 回归](../scripts/test-macos-ui) | 编译 `OperationLog.swift`、`TravelerAssistant.swift`、`AssistantView.swift`、`OrderDashboardView.swift` 与 [test_macos_ui.swift](../tests/test_macos_ui.swift)，执行订单中心、助手、待处理、消息、进度、生产/出货显示和源码约束断言。 | 这是测试二进制直接调用的 Swift/model 回归，不是已安装 App 的真实窗口点击、键盘操作、外部服务或现场数据库验收。 |
+| 3 | [AIMES 表格离线回归](../scripts/test-aimes-table) | [test_aimes_table.mjs](../tests/test_aimes_table.mjs) 用 Playwright 本地页面 markup 验证延迟表头/行、加载遮罩、空表、缺列和未就绪错误；`page.route("**/*", route => route.abort())` 禁止网络。 | 不验证 AIMES 登录、真实工厂单、真实页面结构、真实返回数据或完整 `aimes_lookup.mjs` 查询链。 |
+| 4 | [PP0067 workbook 专项](../scripts/test-workbook-e2e) | 将 [data/local-source/Optimized Orders/PP0067](<../data/local-source/Optimized Orders/PP0067>) 复制到临时目录，执行 `generate-material` → `update-related`；检查 ZIP/OOXML、禁止 `UNIQUE`/`FILTER`、要求 `SUMIF` 和 Color Table 数值；用 [verify_workbook.mjs](../tools/verify_workbook.mjs) 的 artifact-tool 导入、检查和渲染 material/Traveler。 | 不是现场 Server 文件、不是用户当前 workbook、不是打开 Microsoft Excel；渲染成功不等于 Excel 实际打开或人工视觉验收。 |
+| 5 | `git diff --check` | 检查提交差异中的空白错误。 | 不检查业务逻辑、数据一致性或运行结果。 |
 
-1. 检查有效的 Apple Development identity。
-2. 检查 Codex 已生成的临时 App、固定 Bundle Identifier 和可执行文件路径。
-3. 复制临时 App、签名并验证 Bundle Identifier、TeamIdentifier、Designated Requirement、代码签名和可执行文件哈希。
-4. 原子替换 `/Applications/PP FlowHub.app`。
-5. 将已消费的构建副本移到 `/tmp/pp-flowhub-build-archive`，避免 Finder 将构建产物误显示为第二个 App。
+`test-release` 不包含 `build-app` 或 `install-app`。通过 wrapper 后不要重复运行其中已经完成的子门禁；只有新增修改、修复失败或需要定位回归时，才运行相应的必要完整门禁。
 
-## 缺陷复盘原则
+## 业务规则验收清单
 
-- 测试必须覆盖真实返回结构。例如 `preview-related` 的业务错误位于 `errors`，不能只模拟顶层 `fatal`。
-- 测试必须覆盖真实用户入口和真实样本，不能只测内部辅助函数。
-- 可变的真实订单不能直接充当“缺文件”等负向测试前提；负向场景必须在临时目录创建隔离夹具，避免用户操作改变测试结论。
-- 文件类功能至少使用两个独立读取器；涉及 Excel 兼容性时，还要检查 OOXML 中会触发修复的具体记录。
-- “构建成功”和“正式安装成功”是两个不同检查点；最终结论以 `/Applications` 中的哈希为准。
-- 安装后正在运行的旧进程不会自动替换，交付时必须明确要求用户用 `⌘Q` 退出后重新打开。
+下表是发布后选择实际入口的依据。每行描述必须保持的业务边界和现有回归入口；它不是“所有代码分支已覆盖”的声明。
+
+| 业务链 | 必须验证的行为 | 现有自动测试入口 |
+| --- | --- | --- |
+| 启动与同步 | 启动按本地缓存 → 当日 AIMES 检查 → Server 扫描；手动获取 AIMES 与手动扫描 Server 相互独立，手动 `force` 不会隐式重扫 Server；重复运行不能把成功事实误报成新的外部操作。 | [test_order_index.py](../tests/test_order_index.py) 的 AIMES daily/force 测试；[test_macos_ui.swift](../tests/test_macos_ui.swift) 的启动进度与历史测试。 |
+| AIMES 事实与进度 | 成功标志、缓存、警告和持久事实一致；失败保留可用缓存；后台 progress、阶段耗时和完成消息按同一次运行保存。非法销售单名称不进入有效映射缓存，而进入持久 `aimes_review_rows`；Swift 将 `aimesFormatWarnings` 投影为待人工确认，并支持确认归属或忽略。 | [test_core.py](../tests/test_core.py) 的错误分类/脱敏/exact verify；[test_order_index.py](../tests/test_order_index.py) 的 warning、review、重开、确认/忽略和按日跳过；[test_report_selection.py](../tests/test_report_selection.py) 的流式进度；[test_macos_ui.swift](../tests/test_macos_ui.swift) 的 AIMES 会话消息。 |
+| Server 发现到确认 | `scan-server` 可写本地快照、`current_issues`、XML baseline、扫描策略，并按精确工厂单保存 `nesting_result.xml` 优化证据；发现需处理的报表变化时，才由选择/预览进入显式业务确认。扫描不能自动确认材料/五金事实，也不能自动推进报表处理基线。 | [test_order_index.py](../tests/test_order_index.py) 的 preview/confirm/scan 测试，尤其 `test_server_preview_requires_factory_confirmation_before_production_write`、`test_server_scan_is_non_mutating_until_full_processing`。 |
+| 报表变更与五金来源 | 报表内容变化要重新进入预览；已确认五金来源按工厂单保护，内容未变化时重复预览不能切换或重复替换；失败写入必须回滚。 | [test_report_selection.py](../tests/test_report_selection.py) 的 source choice/restart 测试；[test_hardware_facts.py](../tests/test_hardware_facts.py) 的 projection、rollback 和 confirmed shipment 测试。 |
+| SKU 映射与待处理 | 未完成映射且未按规则有效忽略的项目，阻止需要映射的写入；有效忽略按规则排除，不能绕过其他校验；“稍后处理”只是动作，不解决问题；映射保存成功后回读并继续原文件夹预览；不得重复提交业务写入或丢失已确认映射。 | [test_inventory.py](../tests/test_inventory.py) 的 mapping/block 测试；[test_macos_ui.swift](../tests/test_macos_ui.swift) 的 pending mapping callback/resume 测试；[test_order_index.py](../tests/test_order_index.py) 的 pending/review 持久化测试。 |
+| 生产与出货 | 订单级板材/封边生产消耗写入生产事实；工厂单五金出货写入出货事实。已确认无可出库五金时仅按规则更新出货状态，不创建虚假库存单据；生产不等于工厂单出货。 | [test_production.py](../tests/test_production.py)；[test_inventory.py](../tests/test_inventory.py) 的 production/outbound separation、factory selection 和 shipped-block 测试；[test_macos_ui.swift](../tests/test_macos_ui.swift) 的生产/出货显示测试。 |
+| 外部单据与本地同步 | 外部库存单据成功而本地同步失败时，先按单据号和本地事实对账；没有确认前不能盲目重试扣减或删除已成功的外部单据。 | [test_inventory.py](../tests/test_inventory.py) 的 outbound timeout、operation journal、document reconciliation 测试；[test_workflow_database.py](../tests/test_workflow_database.py) 的出货关系迁移测试。 |
+| 订单中心与助手读层 | 订单中心、助手、成本和阶段进度来自持久事实的读层聚合；业务事件时间（优化、生产、出库）与操作耗时分开显示。 | [test_order_index.py](../tests/test_order_index.py) 的 summary/status/timing 测试；[test_macos_ui.swift](../tests/test_macos_ui.swift) 的 dashboard、cost、production/outbound 和 duration 测试。 |
+| 会话消息 | 每次 App 会话从空集合起步；当前操作随 progress 更新，完成记录追加步骤和耗时；同一变化重复回读不增加历史消息，两次独立操作即使结果相同也各自保留。progress 更新不要求每一步都单独成为历史消息行。 | [test_macos_ui.swift](../tests/test_macos_ui.swift) 的 `testDashboardActivityIsScopedToAppSession`、`testDashboardSessionMessagesAndAimesProgress`、`testDashboardStartupProgressAndHistory`。 |
+| Traveler/material 文件专项 | 只验证文件生成、解析与导出专项：material 生成、Traveler 更新、OOXML 公式安全、Color Table 数值和 artifact-tool 渲染。 | [test-workbook-e2e](../scripts/test-workbook-e2e)、[test_order_workflow.py](../tests/test_order_workflow.py)。 |
+
+## Traveler 与 material 的专项边界
+
+PP0067 测试使用 `data/local-source/Optimized Orders/PP0067` 的本地复制品，并在临时目录执行：
+
+```text
+generate-material → update-related
+```
+
+专项检查包括：
+
+- ZIP/OOXML 可以读取，Usage List 和 material 不含 `UNIQUE`/`FILTER`；
+- 公式使用兼容的 `SUM`/`SUMIF`；
+- Color Table、Panel/edge 汇总和 PP0067 样本数值正确；
+- artifact-tool 能导入、检查并输出各工作表渲染图。
+
+这条脚本没有打开 Microsoft Excel，也没有完成现场 Server 或人工视觉验收。涉及模板、合并单元格、列宽、打印区域或页面布局时，保持至少两个独立读取器校验，并补充人工/视觉检查，不能把当前脚本描述成完成了全部模板比对。
+
+## 构建与正式安装
+
+门禁通过后只进行一次串行构建：
+
+```bash
+./scripts/build-app
+```
+
+[build-app](../scripts/build-app) 实际检查固定 Bundle Identifier、Python 依赖、Node 架构和动态库，编译 Swift 与钥匙串 helper，复制 Python/Node/Playwright/项目资源，先执行打包 Node 的 `--version` 验证能启动，再验证绝对路径能 import Playwright 且 `chromium.launch` 接口存在；Playwright 只做 import 与接口检查，不启动浏览器，最后生成 `/tmp/pp-flowhub-build/PP FlowHub.app`。应记录 `CFBundleName`、`CFBundleExecutable`、`CFBundleIdentifier`、版本、可执行文件 mtime/SHA-256 和关键资源是否与当前源一致。
+
+构建成功不等于正式安装成功。构建成功后，由 Codex 主动自动通过可用的普通 macOS Terminal/Aqua 会话签名安装，无需重复确认。运行绝对路径：
+
+```bash
+/Users/lantian/Documents/pp-flowhub/scripts/install-app
+```
+
+[install-app](../scripts/install-app) 不运行测试或重新编译。它检查 Apple Development identity、临时 App、Bundle Identifier 和可执行文件；分别签名/验证钥匙串 helper 和 App，检查 Authority、TeamIdentifier、Designated Requirement；随后原子替换 `/Applications/PP FlowHub.app`，校验安装后的可执行文件 SHA-256、Bundle 和 keychain helper probe，最后归档已消费的构建副本。
+
+后台会话看不到签名 identity 时，应优先使用可用的普通 Terminal/Aqua。若工具明确拒绝或签名安装失败，保留构建产物并报告失败位置；不能降低签名标准、使用 ad-hoc 签名或为了签名失败重复构建。安装过程本身不证明业务流程通过。
+
+## 安装版实际入口验收
+
+安装后按改动影响选择真实入口：
+
+1. 先确认 `/Applications/PP FlowHub.app` 的 Bundle Identifier 和可执行文件 SHA-256，退出旧进程，再重新打开安装版 App。
+2. 至少验证本次改动对应的订单中心、助手、AIMES、Server、待处理或生产/出货入口；后端启动、状态文本、事实回读和失败恢复要分别记录。
+3. 真实库存扣减、业务事实确认和 Server 写入只在本次任务明确授权的业务操作范围内执行；发布授权不等于任意真实出库授权。默认优先使用隔离夹具或测试环境。
+4. 如果外部服务不可用或测试不便由 Codex 完成，说明未验证项，给出用户可执行的操作步骤和预期结果；不能把离线测试、源码约束或渲染图写成现场验收。
+5. 验证完成后退出本次启动的 PP FlowHub 和安装 Terminal，不关闭用户的其他 Terminal 窗口。
+
+## 结果记录
+
+每次发布记录以下五层证据：
+
+- 改动影响的业务链和对应回归入口；
+- 自动门禁结果（通过数量、跳过项、失败位置）；
+- build 产物路径、Bundle metadata、Node/Playwright 和关键 SHA-256；
+- Aqua Terminal 签名安装结果、安装包 SHA-256 和 `/Applications` 路径；
+- 安装版实际入口结果、未覆盖项和失败原因。
+
+“存在测试文件”不等于覆盖全部业务；“构建成功”不等于签名安装成功；“安装成功”不等于真实 Server、AIMES、库存或 Excel 用户流程验收。

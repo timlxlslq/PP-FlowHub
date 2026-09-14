@@ -1,5 +1,7 @@
 # 将“工作流程助手”项目搬到 Cursor
 
+> **历史迁移参考（2026-09）**：本文保留迁移时的旧路径和命令，不代表当前环境、当前待办或用户授权。当前项目入口、规则和发布流程以 [README](../README.md)、[系统架构](architecture/system-architecture.md)、[业务规则](business-rules.md) 和 [发布流程](release-testing.md) 为准。
+
 ## 1. 在当前 Mac 上直接使用
 
 Cursor 本质上是代码编辑器，这个项目不需要转换格式。

@@ -1,0 +1,15 @@
+{
+  "applied": true,
+  "order_id": "PP0008",
+  "factory_order": "F2609100248",
+  "sku": "M1097",
+  "source_quantity": 4,
+  "old_quantity": 4,
+  "quantity": 2,
+  "unit": "对",
+  "backup": "/Users/lantian/Documents/pp-flowhub/data/database-backups/workflow-20260910-085146-pre-PP0008-rail-pairs.sqlite3",
+  "source_path": "/Volumes/server/Optimized Orders/pp0008/PP0008-DB34/Report/FittingslistPC124429962609100001.xlsx",
+  "unrelated_hardware_unchanged": true,
+  "production_outbound_materials_and_source_decisions_unchanged": true,
+  "integrity_check": "ok"
+}

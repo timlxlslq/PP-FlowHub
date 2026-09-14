@@ -72,6 +72,9 @@ private struct MacOSUIRegressionTests {
         testOrderDetailMaterialRows()
         testOrderDashboardRules()
         testDashboardActivityIsScopedToAppSession()
+        testDashboardSessionMessagesAndAimesProgress()
+        testDashboardStartupProgressAndHistory()
+        testDashboardAimesStatusResolution()
         testPendingServerSelectionAndRefreshContract()
         testPendingInventorySourceFolderPath()
         testPendingMaterialMappingIssueRoute()
@@ -654,6 +657,22 @@ private struct MacOSUIRegressionTests {
         require(duplicateStatusMessages.filter { $0.detail.contains("销售单格式异常") }.count == 1, "相同状态消息没有正确去重")
         require(duplicateAimes?.duration == 17.36, "相同状态去重时错误保留了订单数据耗时")
         require(duplicateAimes?.operationDurations.first?.label == "登录 AIMES", "相同状态去重时 AIMES 阶段明细丢失")
+        let serverMirrorPriority = dashboardMessages(
+            syncStatus: "✅ 操作完成",
+            syncTime: "12:03:01",
+            aimesStatus: "AIMES 尚未检查",
+            aimesTime: "12:03:02",
+            serverStatus: "✅ 操作完成",
+            serverTime: "12:03:03",
+            activity: [],
+            durationsBySource: ["sync": 1.0, "server": 2.0]
+        )
+        let mirroredOperation = serverMirrorPriority.first { $0.detail == "操作完成" }
+        require(
+            mirroredOperation?.source == "server"
+                && mirroredOperation?.duration == 2.0,
+            "Server 状态与同步镜像相同时应保留真实来源及其耗时"
+        )
 
         let serverFolder = "/Volumes/server/Optimized Orders/pp0035-2"
         let serverChanges = [
@@ -1072,6 +1091,425 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    private static func testDashboardSessionMessagesAndAimesProgress() {
+        let model = AppModel()
+        require(model.dashboardSessionMessages.isEmpty, "新的 App 会话消息记录必须从空开始")
+
+        model.dashboardActivity.insert(
+            InventoryStep(time: "23:59:59", title: "已有操作", detail: "已完成", state: "success"),
+            at: 0
+        )
+        let activityCount = model.dashboardSessionMessages.filter { $0.source == "activity" }.count
+        require(activityCount == 1, "手工 activity 没有追加到会话消息")
+
+        let change: [String: Any] = [
+            "id": "change-1",
+            "observed_at": "2099-01-01T00:00:01",
+            "severity": "info",
+            "kind": "aimes",
+            "order_id": "PP0001",
+            "factory_order": "F0001",
+            "path": "/tmp/aimes.xlsx",
+            "message": "AIMES 发生变化",
+        ]
+        func aimesPayload(changed: Bool, changes: [[String: Any]], duration: Double) -> [String: Any] {
+            [
+                "orders": [[String: Any]](),
+                "changes": changes,
+                "aimes": [
+                    "attempted": true,
+                    "succeeded": true,
+                    "skipped_today": false,
+                    "changed": changed,
+                    "count": 1,
+                    "issue_count": 0,
+                    "warning_count": 0,
+                    "duration_seconds": duration,
+                    "error": "",
+                ],
+                "aimes_stage_durations": [[
+                    "stage": "fetch",
+                    "label": "读取 AIMES",
+                    "duration_seconds": duration == 1.0 ? 0.5 : duration,
+                ]],
+            ]
+        }
+        let changedPayload = aimesPayload(changed: true, changes: [change], duration: 1.0)
+        model.pendingOrderRunner = { _, _, completion in completion(changedPayload) }
+        model.syncDashboardAimes(force: true)
+        model.pendingOrderRunner = { _, _, completion in
+            completion(aimesPayload(changed: true, changes: [change], duration: 1.25))
+        }
+        model.syncDashboardAimes(force: true)
+        var emptyChangesPayload = aimesPayload(changed: true, changes: [], duration: 1.5)
+        emptyChangesPayload.removeValue(forKey: "changes")
+        model.pendingOrderRunner = { _, _, completion in completion(emptyChangesPayload) }
+        model.syncDashboardAimes(force: true)
+        require(
+            model.dashboardSessionMessages.filter { $0.source == "activity" }.count == activityCount + 1,
+            "重复 AIMES payload 不应重复追加 activity，也不应清空旧 activity"
+        )
+        require(
+            model.dashboardSessionMessages.filter { $0.source == "aimes" }.count == 3,
+            "多次 AIMES 完成结果必须各保留一条会话消息"
+        )
+        require(
+            model.dashboardSessionMessages.first(where: { $0.source == "aimes" })?.operationDurations.map(\.label) == ["读取 AIMES"],
+            "首次 AIMES 阶段耗时被第二次操作覆盖"
+        )
+        require(
+            model.dashboardSessionMessages.filter { $0.source == "aimes" }.map { $0.operationDurations.first?.duration ?? -1 } == [0.5, 1.25, 1.5],
+            "不同 AIMES 获取的阶段耗时没有按会话消息分别保留"
+        )
+        let activityAfterEmptyChanges = model.dashboardSessionMessages.filter { $0.source == "activity" }.count
+        require(activityAfterEmptyChanges == activityCount + 1, "AIMES changed=true 但 changes 为空时不应丢失已有 activity/journal")
+
+        model.pendingOrderRunner = { _, _, completion in completion(emptyChangesPayload) }
+        model.refreshDashboardOrdersAfterOutbound()
+        require(
+            model.dashboardSessionMessages.filter { $0.source == "activity" }.count == activityAfterEmptyChanges,
+            "includeChanges=false 的订单刷新不应清空会话 activity"
+        )
+
+        var finish: (([String: Any]) -> Void)?
+        model.pendingOrderRunner = { _, _, completion in finish = completion }
+        model.syncDashboardAimes(force: true)
+        model.consumeOrderLogChunk("{\"event\":\"progress\",\"message\":\"登录 AIMES")
+        require(model.dashboardOperationProgress["aimes"]?.isEmpty == true, "未结束 JSON 行不应提前处理")
+        model.consumeOrderLogChunk("\"}\n{\"event\":\"progress\",\"message\":\"读取 AIMES 表格\"}\n")
+        require(
+            model.dashboardAimesStatus == "正在读取 AIMES 表格"
+                && model.dashboardOperationProgress["aimes"]?.count == 2,
+            "分块 AIMES progress 没有实时进入当前操作步骤"
+        )
+        finish?([
+            "orders": [[String: Any]](),
+            "aimes": [
+                "attempted": true,
+                "succeeded": true,
+                "skipped_today": false,
+                "changed": false,
+                "count": 1,
+                "issue_count": 0,
+                "warning_count": 0,
+                "duration_seconds": 2.0,
+                "error": "",
+            ],
+            "aimes_stage_durations": [[
+                "stage": "fetch",
+                "label": "读取 AIMES",
+                "duration_seconds": 1.5,
+            ]],
+        ])
+        let completed = model.dashboardSessionMessages.last(where: { $0.source == "aimes" })
+        require(
+            completed?.operationDetails.contains(where: { $0.contains("登录 AIMES") }) == true
+                && completed?.operationDetails.contains(where: { $0.contains("读取 AIMES 表格") }) == true
+                && completed?.operationDurations.map(\.label) == ["读取 AIMES"],
+            "AIMES 完成消息没有保留 progress 步骤和最终阶段耗时"
+        )
+
+        let batchModel = AppModel()
+        let latestWarning: [String: Any] = [
+            "id": "change-latest",
+            "observed_at": "2099-01-01T00:00:02",
+            "severity": "warning",
+            "kind": "aimes",
+            "message": "最新 AIMES 警告",
+        ]
+        let oldestChange: [String: Any] = [
+            "id": "change-oldest",
+            "observed_at": "2099-01-01T00:00:01",
+            "severity": "info",
+            "kind": "aimes",
+            "message": "较早 AIMES 变化",
+        ]
+        batchModel.pendingOrderRunner = { _, _, completion in
+            completion(aimesPayload(changed: true, changes: [latestWarning, oldestChange], duration: 1.0))
+        }
+        batchModel.syncDashboardAimes(force: true)
+        require(
+            batchModel.dashboardActivity.first?.detail == "最新 AIMES 警告"
+                && batchModel.dashboardSessionMessages.filter { $0.source == "activity" }.map(\.detail) == ["较早 AIMES 变化", "最新 AIMES 警告"],
+            "批量 AIMES changes 没有保持 dashboardActivity 最新优先和 journal 新旧顺序"
+        )
+
+        let failedModel = AppModel()
+        failedModel.pendingOrderRunner = { _, onFailure, _ in onFailure() }
+        failedModel.syncDashboardAimes(force: true)
+        require(
+            failedModel.dashboardSessionMessages.filter { $0.source == "aimes" }.count == 1
+                && failedModel.dashboardSessionMessages.filter { $0.source == "sync" }.isEmpty,
+            "AIMES 失败应保留一条 AIMES 会话记录，且同步镜像不应重复记录"
+        )
+
+        let skippedModel = AppModel()
+        skippedModel.pendingOrderRunner = { _, _, completion in
+            completion([
+                "orders": [[String: Any]](),
+                "aimes": [
+                    "attempted": false,
+                    "succeeded": false,
+                    "skipped_today": true,
+                    "changed": false,
+                    "count": 1,
+                    "issue_count": 0,
+                    "warning_count": 0,
+                ],
+            ])
+        }
+        skippedModel.syncDashboardAimes(force: false)
+        require(
+            skippedModel.dashboardSessionMessages.filter { $0.source == "aimes" }.count == 1
+                && skippedModel.dashboardSessionMessages.filter { $0.source == "sync" }.isEmpty,
+            "AIMES 当日跳过应保留一条 AIMES 会话记录，且同步镜像不应重复记录"
+        )
+
+        let midnight = dashboardMessages(
+            syncStatus: "订单数据尚未同步",
+            syncTime: "00:00:02",
+            aimesStatus: "AIMES 尚未检查",
+            aimesTime: "00:00:03",
+            serverStatus: "Server 尚未扫描",
+            serverTime: "00:00:04",
+            activity: [],
+            sessionMessages: [
+                DashboardMessage(id: "one", source: "activity", time: "23:59:59", title: "操作", detail: "跨午夜前", state: "success"),
+                DashboardMessage(id: "two", source: "activity", time: "00:00:01", title: "操作", detail: "跨午夜后", state: "success"),
+            ]
+        )
+        require(midnight.map(\.id) == ["one", "two"], "会话消息不能按 HH:mm:ss 在跨午夜时重排")
+    }
+
+    private static func testDashboardStartupProgressAndHistory() {
+        let model = AppModel()
+        var commands: [[String]] = []
+        var observedStatuses: [String] = []
+        let emptyOrders: [[String: Any]] = []
+
+        func aimesResult() -> [String: Any] {
+            [
+                "orders": emptyOrders,
+                "changes": [[String: Any]](),
+                "aimes": [
+                    "attempted": true,
+                    "succeeded": true,
+                    "skipped_today": false,
+                    "changed": false,
+                    "count": 2,
+                    "issue_count": 0,
+                    "warning_count": 0,
+                    "duration_seconds": 2.0,
+                    "error": "",
+                ],
+            ]
+        }
+
+        model.pendingOrderRunner = { arguments, _, completion in
+            commands.append(arguments)
+            observedStatuses.append(arguments[0] + ":" + model.dashboardSyncStatus)
+            switch arguments[0] {
+            case "list-index":
+                completion(["orders": emptyOrders, "changes": [[String: Any]]()])
+            case "backup-status":
+                completion(["requires_user_attention": true])
+            case "backup-now":
+                completion(["path": "/tmp/pp-flowhub-test-backup.sqlite3"])
+            case "sync-aimes":
+                model.consumeOrderLogChunk(
+                    "{\"event\":\"progress\",\"message\":\"启动 AIMES 浏览器\",\"stage\":\"browser_launch\",\"stage_label\":\"启动 AIMES 浏览器\",\"duration_seconds\":0.37}\n"
+                )
+                require(!model.dashboardSyncStatus.contains("启动 AIMES 浏览器"), "已完成 AIMES stage 不应继续显示为当前阶段")
+                model.consumeOrderLogChunk("{\"event\":\"progress\",\"message\":\"读取 AIMES 表格\"}\n")
+                observedStatuses.append("aimes-progress:" + model.dashboardSyncStatus)
+                let inFlightMessages = dashboardMessages(
+                    syncStatus: model.dashboardSyncStatus,
+                    syncTime: model.dashboardSyncStatusTime,
+                    aimesStatus: model.dashboardAimesStatus,
+                    aimesTime: model.dashboardAimesStatusTime,
+                    serverStatus: model.dashboardServerStatus,
+                    serverTime: model.dashboardServerStatusTime,
+                    activity: [],
+                    sessionMessages: model.dashboardSessionMessages
+                )
+                let current = dashboardCurrentOperation(messages: inFlightMessages, isRunning: true)
+                let visible = dashboardVisibleMessages(inFlightMessages, isRunning: true)
+                require(current?.message.detail == "正在读取 AIMES 表格", "消息框当前行没有选择最新 AIMES stage")
+                require(visible.contains { $0.detail == "启动 AIMES 浏览器已完成" }, "消息框历史没有保留已完成 AIMES stage")
+                require(visible.contains { $0.detail == "本地订单缓存已显示" && $0.state == "success" }, "消息框历史没有保留缓存完成步骤")
+                require(visible.contains { $0.detail == "今日数据库备份已完成" && $0.state == "success" }, "消息框历史没有保留备份完成步骤")
+                require(current != nil, "消息框没有产生当前操作行")
+                require(!visible.contains { $0.id == current!.message.id }, "消息框当前行不应重复出现在历史列表")
+                completion(aimesResult())
+            case "scan-server":
+                model.consumeOrderLogChunk(
+                    "{\"event\":\"progress\",\"message\":\"核验 Server 订单\",\"stage\":\"server_scan\",\"stage_label\":\"核验 Server 订单\",\"duration_seconds\":0.52}\n"
+                )
+                require(!model.dashboardSyncStatus.contains("核验 Server 订单"), "已完成 Server stage 不应继续显示为当前阶段")
+                model.consumeOrderLogChunk("{\"event\":\"progress\",\"message\":\"读取 Server 目录\"}\n")
+                observedStatuses.append("server-progress:" + model.dashboardSyncStatus)
+                completion([
+                    "orders": emptyOrders,
+                    "changes": [[String: Any]](),
+                    "server": [
+                        "changes": [[String: Any]](),
+                        "scan_stats": ["optimization_artifact_refresh_count": 0],
+                    ],
+                ])
+            default:
+                fail("启动合同测试收到未知命令：" + arguments.joined(separator: " "))
+            }
+        }
+
+        model.startOrderDashboard()
+        require(
+            commands.map { $0.first ?? "" } == ["list-index", "backup-status", "backup-now", "sync-aimes", "scan-server"],
+            "订单中心启动没有按缓存、备份、AIMES、Server 顺序执行"
+        )
+        require(observedStatuses.contains(where: { $0.contains("list-index:正在读取本地订单缓存") }), "缓存阶段没有显示实际进行状态")
+        require(observedStatuses.contains(where: { $0.contains("backup-status:正在检查本机数据库备份") }), "备份检查阶段没有显示实际进行状态")
+        require(observedStatuses.contains(where: { $0.contains("backup-now:正在自动备份") }), "自动备份阶段没有显示实际进行状态")
+        require(observedStatuses.contains(where: { $0.contains("aimes-progress:正在读取 AIMES 表格") }), "AIMES progress 没有成为当前阶段")
+        require(observedStatuses.contains(where: { $0.contains("server-progress:正在处理：读取 Server 目录") }), "Server progress 没有成为当前阶段")
+
+        let stageMessages = model.dashboardSessionMessages.filter { $0.id.hasPrefix("stage:") }
+        require(stageMessages.map(\.detail).contains("启动 AIMES 浏览器已完成"), "AIMES stage 完成消息没有进入会话历史")
+        require(stageMessages.map(\.detail).contains("核验 Server 订单已完成"), "Server stage 完成消息没有进入会话历史")
+        require(stageMessages.first(where: { $0.detail == "启动 AIMES 浏览器已完成" })?.duration == 0.37, "AIMES stage 完成耗时没有保留")
+        require(stageMessages.allSatisfy { $0.state == "success" && $0.operationDurations.count == 1 }, "stage 完成消息状态或耗时缺失")
+        require(stageMessages.map(\.id).count == Set(stageMessages.map(\.id)).count, "同一启动中的 stage 完成消息 ID 重复")
+        require(model.dashboardSessionMessages.contains { $0.detail == "本地订单缓存已显示" }, "缓存完成步骤没有进入会话历史")
+        require(model.dashboardSessionMessages.contains { $0.detail == "今日数据库备份已完成" }, "备份完成步骤没有进入会话历史")
+        require(!model.dashboardSessionMessages.contains { $0.state == "success" && $0.detail.contains("正在") }, "已完成消息不应保留正在进行文案")
+        let terminalWithRunningWord = DashboardMessage(
+            id: "terminal-running-word",
+            source: "sync",
+            time: "12:00:00",
+            title: "订单数据",
+            detail: "本地缓存已显示；正在后台检查数据",
+            state: "success"
+        )
+        require(!dashboardMessageIsRunning(terminalWithRunningWord), "明确完成 state 不应因正文含正在而回到当前行")
+        require(
+            dashboardVisibleMessages([terminalWithRunningWord], isRunning: true).count == 1,
+            "明确完成消息在运行期间也必须保留在历史列表"
+        )
+
+        let visible = dashboardMessages(
+            syncStatus: model.dashboardSyncStatus,
+            syncTime: model.dashboardSyncStatusTime,
+            aimesStatus: model.dashboardAimesStatus,
+            aimesTime: model.dashboardAimesStatusTime,
+            serverStatus: model.dashboardServerStatus,
+            serverTime: model.dashboardServerStatusTime,
+            activity: [],
+            sessionMessages: model.dashboardSessionMessages
+        )
+        require(!visible.contains { $0.detail.contains("尚未") }, "启动消息列表不应显示尚未扫描占位")
+
+        let beforeSecondRun = stageMessages.count
+        model.pendingOrderRunner = { _, _, completion in
+            model.consumeOrderLogChunk(
+                "{\"event\":\"progress\",\"message\":\"启动 AIMES 浏览器\",\"stage\":\"browser_launch\",\"stage_label\":\"启动 AIMES 浏览器\",\"duration_seconds\":0.41}\n"
+            )
+            completion(aimesResult())
+        }
+        model.syncDashboardAimes(force: true)
+        let afterSecondRun = model.dashboardSessionMessages.filter { $0.id.hasPrefix("stage:") }
+        require(afterSecondRun.count == beforeSecondRun + 1, "新一轮相同 stage 应保留新的完成历史")
+
+        let duplicateModel = AppModel()
+        duplicateModel.pendingOrderRunner = { _, _, completion in
+            duplicateModel.consumeOrderLogChunk(
+                "{\"event\":\"progress\",\"message\":\"启动 AIMES 浏览器\",\"stage\":\"browser_launch\",\"stage_label\":\"启动 AIMES 浏览器\",\"duration_seconds\":0.37}\n" +
+                "{\"event\":\"progress\",\"message\":\"启动 AIMES 浏览器\",\"stage\":\"browser_launch\",\"stage_label\":\"启动 AIMES 浏览器\",\"duration_seconds\":0.38}\n"
+            )
+            completion(aimesResult())
+        }
+        duplicateModel.syncDashboardAimes(force: true)
+        require(duplicateModel.dashboardSessionMessages.filter { $0.id.hasPrefix("stage:") }.count == 1, "同一轮重复 stage 事件不应重复写入历史")
+    }
+
+    private static func testDashboardAimesStatusResolution() {
+        let failedWithCachedWarnings = dashboardAimesStatusUpdate(
+            attempted: true,
+            succeeded: false,
+            skippedToday: false,
+            changed: false,
+            count: 73,
+            issueCount: 0,
+            warningCount: 1,
+            error: "Traceback: Error Domain=NSPOSIXErrorDomain Code=2"
+        )
+        require(
+            failedWithCachedWarnings.status.contains("失败")
+                && !failedWithCachedWarnings.status.contains("成功")
+                && !failedWithCachedWarnings.failureAlert.lowercased().contains("traceback")
+                && !failedWithCachedWarnings.failureAlert.contains("Code=2"),
+            "AIMES 本次失败即使带有缓存异常也必须显示失败，并保存脱敏错误"
+        )
+
+        let successfulWithWarnings = dashboardAimesStatusUpdate(
+            attempted: true,
+            succeeded: true,
+            skippedToday: false,
+            changed: true,
+            count: 73,
+            issueCount: 0,
+            warningCount: 2,
+            error: ""
+        )
+        require(
+            successfulWithWarnings.status.contains("成功")
+                && successfulWithWarnings.status.contains("2 条销售单格式异常")
+                && successfulWithWarnings.failureAlert.isEmpty,
+            "AIMES 成功后的销售单格式异常提示丢失"
+        )
+
+        let skippedWithCachedWarnings = dashboardAimesStatusUpdate(
+            attempted: false,
+            succeeded: false,
+            skippedToday: true,
+            changed: false,
+            count: 73,
+            issueCount: 0,
+            warningCount: 2,
+            error: ""
+        )
+        require(
+            skippedWithCachedWarnings.status == "✅ 今天已成功获取过 AIMES，本次略过"
+                && skippedWithCachedWarnings.failureAlert.isEmpty,
+            "AIMES 当日跳过不能被缓存异常改写为本次成功"
+        )
+
+        let successfulWithoutChanges = dashboardAimesStatusUpdate(
+            attempted: true,
+            succeeded: true,
+            skippedToday: false,
+            changed: false,
+            count: 50,
+            issueCount: 0,
+            warningCount: 0,
+            error: ""
+        )
+        require(
+            successfulWithoutChanges.status == "✅ 获取 AIMES 数据成功，最近 50 条无变化（50 条）",
+            "AIMES 成功无变化时提示错误"
+        )
+
+        let missingResult = dashboardAimesStatusUpdate(
+            attempted: false,
+            succeeded: false,
+            skippedToday: false,
+            changed: false,
+            count: 0,
+            issueCount: 0,
+            warningCount: 0,
+            error: ""
+        )
+        require(!missingResult.status.contains("成功"), "缺失或无效的 AIMES 结果不能显示成功")
+    }
+
     private static func testPendingServerSelectionAndRefreshContract() {
         let dashboardSource = try! String(
             contentsOfFile: "macos/OrderDashboardView.swift",
@@ -1413,6 +1851,10 @@ private struct MacOSUIRegressionTests {
     }
 
     private static func testOrderOutboundFactorySelection() {
+        let dashboardSource = try! String(
+            contentsOfFile: "macos/OrderDashboardView.swift",
+            encoding: .utf8
+        )
         require(orderDashboardFactorySelectionColumnWidth >= 48, "工厂单选择框列宽过窄")
         let first = toggledOrderFactorySelection([], factoryOrder: "F100")
         let both = toggledOrderFactorySelection(first, factoryOrder: "F200")
@@ -1459,8 +1901,12 @@ private struct MacOSUIRegressionTests {
         require(
             !orderDashboardStageMatchesFilter("已出货", statusFilter: "未完成订单")
                 && orderDashboardStageMatchesFilter("已出货", statusFilter: "已出货")
-                && orderDashboardStageMatchesFilter("已优化", statusFilter: "未完成订单"),
-            "订单中心默认列表没有隐藏已完成订单，或状态筛选无法查看已出货订单"
+                && orderDashboardStageMatchesFilter("已优化", statusFilter: "未完成订单")
+                && orderDashboardStageMatchesFilter("已出货", statusFilter: "全部订单")
+                && orderDashboardStageMatchesFilter("数据异常", statusFilter: "全部订单")
+                && orderDashboardStageMatchesFilter("已优化", statusFilter: "全部状态")
+                && dashboardSource.contains("Button(\"全部订单\") { statusFilter = \"全部订单\" }"),
+            "订单中心状态筛选未保持默认未完成语义，或全部订单未覆盖所有状态"
         )
     }
 

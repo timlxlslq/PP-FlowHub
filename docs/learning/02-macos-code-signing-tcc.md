@@ -16,7 +16,7 @@ PP FlowHub.app/Contents/MacOS/PPFlowHub
 
 `codesign --sign -` 是 ad-hoc signing。它没有可持续识别开发者的 Apple 证书身份，重新构建时 CodeDirectory 通常会变化，macOS 的 TCC（Transparency, Consent, and Control）权限可能把新构建视为不同的代码，从而再次请求麦克风、语音识别、文件夹等权限。
 
-本项目的本地开发构建不允许 `codesign --sign -`，也不允许在 Apple Development、Distribution 和 Developer ID 之间自动切换。签名职责与构建职责分离：`scripts/build-app` 在 Codex 中只编译和组装未签名 App；`scripts/install-app` 才读取 Apple Development identity 并签名安装。
+本项目的本地开发构建不允许 `codesign --sign -`，也不允许在 Apple Development、Distribution 和 Developer ID 之间自动切换。签名职责与构建职责分离：`scripts/build-app` 在 Codex 中只编译和组装未签名 App；`scripts/install-app` 才读取 Apple Development identity 并签名安装，正式发布由 Codex 自动完成这两个阶段。
 
 ## Codex Background Security Session 与 Aqua Terminal
 
@@ -25,7 +25,7 @@ Codex 的 shell 可能运行在 macOS 的 Background Security Session 和 seatbe
 因此，项目采用以下开发流程：
 
 1. 在 Codex 中运行 `scripts/test-release` 和 `scripts/build-app`，完成测试、Swift 编译、资源打包和固定 Bundle Identifier 校验。构建脚本向 Swift linker 传入 `-no_adhoc_codesign`，这个阶段不读取钥匙串，也不进行 ad-hoc signing。
-2. 从普通 macOS Terminal/Aqua 登录会话运行 `scripts/install-app`。该脚本只读取 Codex 已生成的临时 App，检查 Apple Development identity，在临时副本上签名并验证后安装；它不执行测试，也不重新编译。
+2. 由 Codex 通过可用的普通 macOS Terminal/Aqua 登录会话运行绝对路径 `"/Users/lantian/Documents/pp-flowhub/scripts/install-app"`。该脚本只读取 Codex 已生成的临时 App，检查 Apple Development identity，在临时副本上签名并验证后安装；它不执行测试，也不重新编译。
 3. 只有临时 App 通过 Bundle Identifier、TeamIdentifier、Designated Requirement、`codesign --verify --deep --strict` 和可执行文件哈希校验后，脚本才原子替换 `/Applications/PP FlowHub.app`。
 
 ### 资源目录中的钥匙串读取辅助程序必须显式签名
@@ -34,15 +34,15 @@ Codex 的 shell 可能运行在 macOS 的 Background Security Session 和 seatbe
 
 Codex 构建产物默认放在 `/tmp/pp-flowhub-build/PP FlowHub.app`，不再放在项目的 `build/` 目录。这样未签名的构建副本不会和 `/Applications` 中的正式 App 一起被 Finder/Launchpad 识别为第二个应用。安装成功后，构建输入会移动到 `/tmp/pp-flowhub-build-archive/` 留作可恢复归档。
 
-每次 `scripts/build-app` 生成新的 App bundle 后，都必须提醒操作者从普通 macOS Terminal/Aqua 会话运行：
+每次 `scripts/build-app` 生成新的 App bundle 后，Codex 都必须主动通过可用的普通 macOS Terminal/Aqua 会话运行：
 
 ```bash
 ./scripts/install-app
 ```
 
-Codex 的构建输出只是未签名构建产物，不代表 `/Applications` 中的 App 已更新。若 Aqua Terminal 中找不到该构建产物，`install-app` 会直接退出并提示先回到 Codex 执行 `scripts/build-app`。
+Codex 的构建输出只是未签名构建产物，不代表 `/Applications` 中的 App 已更新。若 Aqua Terminal 中找不到该构建产物，`install-app` 会直接退出并提示先回到 Codex 执行 `scripts/build-app`；Codex 应先核对本次构建结果与归档位置，恢复有效产物后继续安装；确实需要重新构建时按发布门禁处理。
 
-如果 `install-app` 找不到 Apple Development identity，它会提示“请从普通 macOS Terminal/Aqua 登录会话运行此命令”，不会创建证书、导出私钥、修改 keychain ACL，也不会使用 ad-hoc signing。
+如果 `install-app` 找不到 Apple Development identity，Codex 应优先使用可用的普通 macOS Terminal/Aqua 会话；若工具明确拒绝或仍不可用，应保留构建产物并准确报告，不创建证书、导出私钥、修改 keychain ACL，也不使用 ad-hoc signing。
 
 ## Designated Requirement 与 TCC
 
@@ -77,4 +77,4 @@ codesign -d --requirements - /tmp/pp-flowhub-build/PP FlowHub.app
 codesign --verify --deep --strict /tmp/pp-flowhub-build/PP FlowHub.app
 ```
 
-当前 Codex Background Security Session 若没有可见的 Apple Development identity，`build-app` 仍可完成未签名构建；`install-app` 会停止在替换现有 App 之前，并要求从普通 macOS Terminal/Aqua 登录会话重新运行，不会用 ad-hoc 签名冒充稳定开发签名。
+当前 Codex Background Security Session 若没有可见的 Apple Development identity，`build-app` 仍可完成未签名构建；Codex 应优先改用可用的普通 macOS Terminal/Aqua 会话运行 `install-app`。若工具明确拒绝或签名安装仍失败，必须保留产物并报告，不会用 ad-hoc 签名冒充稳定开发签名。

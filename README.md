@@ -1,20 +1,26 @@
 # PP FlowHub
 
-这是一个本地优先、Agent 辅助的 macOS 生产工作流应用。它从服务器发现订单，生成或更新 Work Order Traveler，查询库存，并在用户确认后执行出库。
+这是一个本地优先的内部 Workflow Assistant。当前主产品是 SwiftUI 生产工作流 App，Python 业务模块和有限的结构化路由正在建设中；现有 Agent/Skills 资料不代表已经接入完整自动 Workflow Agent。应用从 Server 发现订单，按需生成或更新 Work Order Traveler，查询库存，并在用户确认后执行出库。
 
 ## 架构
 
+订单中心和助手是两条当前入口，最终共用确定性的 Python 业务模块：
+
 ```text
-SwiftUI App
-  → scripts/pp-flowhub 进程入口
-  → Python CLI
-  → 本地命令解析器（常用命令零 Token）/ Workflow Agent（仅模糊表达）
-  → Typed Tool Gateway + 本地审批（助手命令）
-  → Python 确定性引擎
-  → Excel / SMB / Playwright / SQLite
+SwiftUI App → scripts/pp-flowhub order / order-service → Python 业务引擎
+
+SwiftUI App → scripts/pp-flowhub assistant
+           → 本地命令解析器（常用命令零 Token）
+           → 有限 Workflow Agent（仅模糊表达）
+           → Typed Tool Gateway + 本地审批
+           → Python 业务引擎
+
+Python 业务引擎 → Excel / SMB / Playwright / SQLite
 ```
 
-Agent 不直接修改 Excel、服务器或库存系统。Agent 不可用时，App 和 CLI 仍可执行本地可确定流程。模糊语句由官方 OpenAI Agents SDK 路由，当前使用面向成本敏感任务的 `gpt-5.6-luna`；成功路由会按完全相同的规范化语句记入本地 SQLite，下次零 Token 执行。
+Agent 不直接修改 Excel、Server 或库存系统。Agent 不可用时，App 和 CLI 仍可执行本地可确定流程。助手路由只负责把模糊语句转换为结构化动作，Gateway 和 Python 仍负责参数校验、业务规则、审批和写入。
+
+长期分层方向见 [系统架构](docs/architecture/system-architecture.md)。
 
 ## Agent 开发环境
 
@@ -25,7 +31,7 @@ python3 -m venv .venv
 .venv/bin/python3 -m pip install "openpyxl==3.1.5" "openai-agents==0.19.2"
 ```
 
-API Key 保存在被 Git 忽略的 `.env.local`，不会写入源码或 SQLite。构建脚本会从 `.venv` 自动发现 Python 基础运行时，并从 PATH 或项目 `node_modules` 链接自动发现 Node/Playwright；必要时可用 `TRAVELER_PYTHON_BASE`、`TRAVELER_NODE` 和 `TRAVELER_NODE_MODULES` 覆盖。
+API Key 保存在被 Git 忽略的 `.env.local`，不会写入源码或 SQLite。构建脚本会从 `.venv` 自动发现 Python 基础运行时，并按显式 `TRAVELER_NODE`、项目 `node_modules` 链接同根的 `bin/node`、PATH 的顺序发现 Node；构建前会拒绝非系统动态库依赖，并在打包后验证 App 内 Node 与 Playwright。必要时可用 `TRAVELER_PYTHON_BASE`、`TRAVELER_NODE` 和 `TRAVELER_NODE_MODULES` 覆盖。
 
 库存系统的 Playwright 操作默认使用后台无头浏览器，不会弹出 Chrome 或抢占键盘、鼠标焦点。只有在处理登录、验证码或排查网页结构时，才临时设置 `TRAVELER_BROWSER_VISIBLE=1` 使用可见浏览器。
 
@@ -45,11 +51,14 @@ API Key 保存在被 Git 忽略的 `.env.local`，不会写入源码或 SQLite�
 
 ## 开发验证
 
+正式发布时由 Codex 按 [发布测试与安装流程](docs/release-testing.md) 完成完整门禁；`test-release` 已包含全量 Python、macOS UI、AIMES 离线表格、工作簿 E2E 和差异检查，不要再重复执行其中的子测试：
+
 ```bash
-PYTHONPATH=".:vendor" .venv/bin/python3 -m unittest discover -s tests -v
-./scripts/test-macos-ui
+./scripts/test-release
 ./scripts/build-app
 ```
+
+构建成功后，Codex 会通过可用的普通 macOS Terminal/Aqua 会话自动运行绝对路径 `/Users/lantian/Documents/pp-flowhub/scripts/install-app`，完成正式签名安装和安装版检查；详细规则见上述流程文档。
 
 正式业务规则见 [docs/business-rules.md](docs/business-rules.md)，系统分层见 [docs/architecture/system-architecture.md](docs/architecture/system-architecture.md)。
 
@@ -64,3 +73,6 @@ PYTHONPATH=".:vendor" .venv/bin/python3 -m unittest discover -s tests -v
 - [测试、脚本与工具全符号中文参考](docs/learning/08-support-test-symbol-reference.md)：测试意图和辅助过程。
 - [用户操作与业务调用链全解](docs/learning/09-user-operation-call-chains.md)：从页面入口到 CLI、Python、SQLite/Excel/外部系统的人工校验链路。
 - [Product Design 订单中心审查](docs/learning/10-product-design-order-center-audit.md)：基于已安装 App 截图的真实页面状态、UX 问题和后续设计探索建议。
+- [数据库与 WeCom 同步学习说明](docs/learning/11-database-guide.md)：中央 SQLite 路径、连接/事务边界、表关系和隔离教学示例。
+- [数据库地图](docs/learning/12-database-map.md)：两个正式 SQLite 运行库的角色、表分层和完整字段入口。
+- [当前数据库字段字典](docs/learning/database-map/current-schema.md)：两个正式运行库的当前表字段、约束和源码证据。

@@ -9,7 +9,7 @@ index is also the recovery point for dashboard status and pending work.
 
 from __future__ import annotations
 
-from .hardware_facts import replace_factory_hardware, audit_factory_hardware, audit_hardware_integrity, preserve_confirmed_shipment
+from .hardware_facts import server_hardware_quantity, replace_factory_hardware, audit_factory_hardware, audit_hardware_integrity, preserve_confirmed_shipment
 
 import json
 import hashlib
@@ -656,11 +656,19 @@ def _business_validation_message(exc: Exception) -> str:
 
 
 def _business_aimes_message(exc: Exception) -> str:
-    message = str(exc).strip().casefold()
-    if any(word in message for word in ("password", "credential", "账号", "密码", "登录")):
+    raw_message = str(exc).strip()
+    message = raw_message.casefold()
+    code = str(getattr(exc, "code", "") or "").strip().casefold()
+    if code == "aimes_table_not_ready" or "aimes_table_not_ready" in message or "表格尚未加载完成" in message:
+        return "AIMES 工厂订单表尚未加载完成。请稍后重新获取。"
+    if code == "aimes_table_schema" or "缺少必要列" in message or "表头" in message:
+        return "AIMES 工厂订单表缺少必要列。请确认当前表格包含工厂单号、工厂单名称、销售单名称和拆单时间列后重新获取。"
+    if code == "aimes_credentials" or any(word in message for word in ("password", "credential", "账号或密码错误", "用户名或密码", "登录失败", "凭证无效")):
         return "AIMES 登录未成功。请在设置中确认用户名和密码后重新获取。"
-    if any(word in message for word in ("timeout", "timed out", "network", "connection", "网络")):
+    if code == "aimes_timeout" or any(word in message for word in ("timeout", "timed out", "network", "connection", "网络", "超时")):
         return "AIMES 暂时没有响应。请确认网络连接正常，稍后重新获取。"
+    if code == "aimes_factory_name_missing" or "找不到工厂单名称" in message:
+        return "AIMES 未返回所需工厂单名称。请确认工厂单仍存在且可查询，然后重新获取。"
     return "AIMES 数据获取未完成。请确认网络、账号密码和 AIMES 可用状态后重新获取。"
 
 
@@ -7208,8 +7216,10 @@ def sync_order_index(
                                             "source_code": item.code,
                                             "name": item.name,
                                             "spec": item.size,
-                                            "quantity": float(item.quantity),
-                                            "unit": item.unit,
+                                            **server_hardware_quantity(
+                                                product_code, item.quantity, item.unit,
+                                                factory_order=normalized_factory_order, name=item.name,
+                                            ),
                                         })
                                 for factory_order, hardware_rows in hardware_rows_by_factory.items():
                                     replace_factory_hardware(
@@ -7256,7 +7266,7 @@ def sync_order_index(
                             changed_order_ids.update(
                                 order_id.upper() for order_id in folder_order_ids if order_id
                             )
-                    except Exception:
+                    except Exception as exc:
                         if _fittings_report_is_empty(path):
                             store.add_change(
                                 severity="info",
@@ -7267,7 +7277,11 @@ def sync_order_index(
                             )
                         else:
                             issue_key = f"report_error:{path}"
-                            issue_message = _business_report_message("fittings", path)
+                            issue_message = (
+                                str(exc) if isinstance(exc, RuleError)
+                                and exc.code == "server_rail_pair_quantity_invalid"
+                                else _business_report_message("fittings", path)
+                            )
                             current_issue_keys.add(issue_key)
                             store.upsert_active_issue(
                                 issue_key=issue_key,
@@ -8157,8 +8171,10 @@ def _refresh_server_preview_hardware(
                         "source_code": str(item.code or ""),
                         "name": str(item.name or ""),
                         "spec": str(item.size or ""),
-                        "quantity": float(item.quantity or 0),
-                        "unit": str(item.unit or ""),
+                        **server_hardware_quantity(
+                            product_code, item.quantity, str(item.unit or ""),
+                            factory_order=factory_order, name=item.name,
+                        ),
                     })
             for factory_order, hardware_rows in hardware_rows_by_factory.items():
                 replace_factory_hardware(
@@ -8443,6 +8459,15 @@ def _server_preview_payload(
                 ",".join("?" for _ in selected_factory_orders)
             ) if selected_factory_orders else "0",
             tuple(selected_factory_orders),
+        ),
+        "optimization_artifacts": table_records(
+            "optimization_artifacts",
+            "factory_order in ({}) and order_id in ({})".format(
+                ",".join("?" for _ in selected_factory_orders),
+                ",".join("?" for _ in order_ids),
+            ) if selected_factory_orders and order_ids else "0",
+            tuple(selected_factory_orders) + tuple(sorted(order_ids))
+            if selected_factory_orders and order_ids else (),
         ),
         "server_material_allocations": table_records(
             "server_material_allocations",
@@ -8826,6 +8851,13 @@ def _memory_factory_selection(payload: dict, order_id: str = "", factory_order: 
     selected: set[tuple[str, str]] = set()
     wanted_order = str(order_id or "").strip().upper()
     wanted_factory = str(factory_order or "").strip().upper()
+    payload_order_ids = {
+        str(item.get("order_id", "")).strip().upper()
+        for item in payload.get("orders", [])
+        if isinstance(item, dict) and str(item.get("order_id", "")).strip()
+    }
+    if wanted_order:
+        payload_order_ids.add(wanted_order)
     for order in payload.get("orders", []):
         if not isinstance(order, dict):
             continue
@@ -8855,7 +8887,7 @@ def _memory_factory_selection(payload: dict, order_id: str = "", factory_order: 
     for row in payload.get('write_records', {}).get('factory_orders', []):
         factory = str(row.get('factory_order', '')).upper()
         owner = str(row.get('order_id', '')).upper()
-        if factory in payload.get('hardware_source_decisions', {}) and owner:
+        if factory in payload.get('hardware_source_decisions', {}) and owner in payload_order_ids:
             if (not wanted_factory or factory == wanted_factory) and (not wanted_order or owner == wanted_order):
                 selected.add((factory, owner))
     return sorted(selected)
@@ -8920,7 +8952,7 @@ def _insert_memory_records(connection: sqlite3.Connection, table: str, rows: lis
     }
     for row in rows:
         values = {key: value for key, value in row.items() if key in target_columns}
-        if table in {"material_items", "hardware_items", "batch_evidence", "server_material_allocations"}:
+        if table in {"material_items", "hardware_items", "batch_evidence", "server_material_allocations", "optimization_artifacts"}:
             values.pop("id", None)
         if not values:
             continue
@@ -8928,6 +8960,45 @@ def _insert_memory_records(connection: sqlite3.Connection, table: str, rows: lis
         placeholders = ",".join("?" for _ in columns)
         connection.execute(
             f"insert or replace into {table}({','.join(columns)}) values({placeholders})",
+            tuple(values[column] for column in columns),
+        )
+
+
+def _upsert_memory_optimization_artifacts(
+    connection: sqlite3.Connection,
+    rows: list[dict],
+) -> None:
+    """Merge selected optimization evidence without replacing its history."""
+    target_columns = {
+        str(row[1])
+        for row in connection.execute("pragma table_info(optimization_artifacts)").fetchall()
+    }
+    columns = [
+        "source_path", "order_id", "factory_order", "file_modified_at",
+        "file_created_at", "completed_at", "copied_at", "first_seen_at",
+        "last_seen_at", "size",
+    ]
+    columns = [column for column in columns if column in target_columns]
+    for row in rows:
+        values = {column: row.get(column) for column in columns}
+        if not values.get("source_path") or not values.get("factory_order"):
+            continue
+        placeholders = ",".join("?" for _ in columns)
+        connection.execute(
+            f"""
+            insert into optimization_artifacts({','.join(columns)})
+            values({placeholders})
+            on conflict(source_path, file_modified_at, size, factory_order)
+            do update set
+                order_id=excluded.order_id,
+                file_created_at=excluded.file_created_at,
+                copied_at=excluded.copied_at,
+                last_seen_at=case
+                    when optimization_artifacts.last_seen_at > excluded.last_seen_at
+                    then optimization_artifacts.last_seen_at
+                    else excluded.last_seen_at
+                end
+            """,
             tuple(values[column] for column in columns),
         )
 
@@ -8996,16 +9067,19 @@ def _materialize_memory_hardware(
             )
             if identity in ignored:
                 continue
+            product_code = resolved_product_code(resolution, index, str(item.get("code", "")))
             resolved_rows.append({
                 "order_id": order_id,
                 "factory_order": factory_order,
                 "scope": "factory_order",
-                "product_code": resolved_product_code(resolution, index, str(item.get("code", ""))),
+                "product_code": product_code,
                 "source_code": str(item.get("code", "")),
                 "name": str(item.get("name", "")),
                 "spec": str(item.get("spec", "")),
-                "quantity": float(item.get("quantity", 0) or 0),
-                "unit": str(item.get("unit", "")),
+                **server_hardware_quantity(
+                    product_code, item.get("quantity", 0), str(item.get("unit", "")),
+                    factory_order=factory_order, name=str(item.get("name", "")),
+                ),
                 "source_type": "aicnc",
                 "source_path": str(group.get("source_path", "")),
                 "active": 1,
@@ -9068,6 +9142,24 @@ def _confirm_memory_preview(
             f"五金跳过选择包含本次预览之外的订单：{'、'.join(sorted(invalid_skips))}",
         )
 
+    selected_evidence_pairs = {
+        (
+            str(row.get("factory_order", "")).strip().upper(),
+            str(row.get("order_id", "")).strip().upper(),
+        )
+        for row in records.get("optimization_artifacts", [])
+        if str(row.get("factory_order", "")).strip()
+        and str(row.get("order_id", "")).strip().upper() in selected_order_ids
+        and (not factory_order or str(row.get("factory_order", "")).strip().upper() == str(factory_order).strip().upper())
+    }
+    optimization_rows = [
+        row for row in records.get("optimization_artifacts", [])
+        if (
+            str(row.get("factory_order", "")).strip().upper(),
+            str(row.get("order_id", "")).strip().upper(),
+        ) in selected_evidence_pairs
+    ]
+
     validation_finished = time.perf_counter()
 
     if (
@@ -9084,23 +9176,32 @@ def _confirm_memory_preview(
         baseline_entries = _server_scan_xml_entries(baseline_folders)
         production = OrderIndexStore(config.workflow_database)
         try:
+            production.connection.execute("begin")
+            _upsert_memory_optimization_artifacts(production.connection, optimization_rows)
             production.save_server_scan_xml_baseline(
                 baseline_folders,
                 baseline_entries,
                 observed_at=_now(),
             )
             production.commit()
+        except Exception:
+            production.connection.rollback()
+            raise
         finally:
             production.close()
         finished = time.perf_counter()
         return {
             "server_write_confirmed": True,
             "server_write_skipped": True,
-            "server_write_skip_reason": "板材、五金和工厂单信息没有实际变化，仅更新 Server XML 扫描基线",
+            "server_write_skip_reason": (
+                "板材、五金和工厂单信息没有实际变化，仅更新 Server XML 扫描基线"
+                + ("并保存优化证据" if optimization_rows else "")
+            ),
             "server_material_write_confirmed": False,
             "server_factory_hardware_write_confirmed": False,
             "orders": sorted(selected_order_ids),
             "factory_orders": sorted(selected_factory_ids),
+            "optimization_artifact_count": len(optimization_rows),
             "hardware_count": 0,
             "hardware_skipped_orders": sorted(skipped_orders),
             "database": str(config.workflow_database),
@@ -9143,7 +9244,7 @@ def _confirm_memory_preview(
         if str(row.get("factory_order", "")).strip().upper() in selected_factory_ids
         and str(row.get("order_id", "")).strip().upper() not in skipped_orders
     ]
-    if not order_rows and not factory_rows and not material_rows:
+    if not order_rows and not factory_rows and not material_rows and not optimization_rows:
         raise ValueError("本次预览没有可写入的订单、材料或工厂单")
 
     production = OrderIndexStore(config.workflow_database)
@@ -9236,6 +9337,7 @@ def _confirm_memory_preview(
             "production_batches",
             [row for row in records.get("production_batches", []) if str(row.get("batch_number", "")) in batch_numbers],
         )
+        _upsert_memory_optimization_artifacts(production.connection, optimization_rows)
         baseline_folders = [
             Path(str(folder))
             for folder in payload.get("source_folders", [])
@@ -9261,6 +9363,7 @@ def _confirm_memory_preview(
         "server_factory_hardware_write_confirmed": bool(factory_rows),
         "orders": sorted(selected_order_ids),
         "factory_orders": sorted(selected_factory_ids),
+        "optimization_artifact_count": len(optimization_rows),
         "hardware_count": len(hardware_rows),
         "hardware_skipped_orders": sorted(skipped_orders),
         "database": str(config.workflow_database),

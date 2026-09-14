@@ -1,6 +1,8 @@
 # 待处理中心工作流 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **历史计划参考（2026-09）**：本文记录当时的设计和执行步骤，不代表当前待办、授权或已交付能力。当前任务范围与实现以 [系统架构](../../architecture/system-architecture.md)、[业务规则](../../business-rules.md) 和 [发布流程](../../release-testing.md) 为准。
+
+> 原计划曾要求使用特定 Superpowers 子技能逐项执行；该要求只属于当时的历史流程，当前不作为强制技能或授权条件。Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将待处理中心实现为一个尺寸适合二级界面的、按待处理类型显示专属详情和动作的 SwiftUI 页面，并在人工映射完成后自动续跑原操作至只读预览。
 

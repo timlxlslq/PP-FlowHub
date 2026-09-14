@@ -49,13 +49,13 @@ if [[ ! -x "$PYTHON_BASE/bin/python3" || ! -f "$PYTHON_BASE/lib/libpython3.12.dy
 fi
 
 NODE_BIN="${TRAVELER_NODE:-}"
-if [[ -z "$NODE_BIN" ]] && command -v node >/dev/null 2>&1; then
-  NODE_BIN="$(command -v node)"
-fi
 if [[ -z "$NODE_BIN" && -L "$ROOT/node_modules" ]]; then
   NODE_MODULES_TARGET="$(readlink "$ROOT/node_modules")"
   NODE_CANDIDATE="$(dirname "$NODE_MODULES_TARGET")/bin/node"
   if [[ -x "$NODE_CANDIDATE" ]]; then NODE_BIN="$NODE_CANDIDATE"; fi
+fi
+if [[ -z "$NODE_BIN" ]] && command -v node >/dev/null 2>&1; then
+  NODE_BIN="$(command -v node)"
 fi
 if [[ -z "$NODE_BIN" || ! -x "$NODE_BIN" ]]; then
   echo "Node.js not found. Set TRAVELER_NODE to an executable Node.js path." >&2
@@ -70,6 +70,27 @@ for package in playwright playwright-core; do
     exit 2
   fi
 done
+
+# The App copies only the executable, so a Node binary with Homebrew or other
+# non-system dynamic-library dependencies would be broken after installation.
+# Reject it before Swift compilation instead of silently selecting another
+# runtime or producing an App that fails at launch.
+if ! NODE_ARCHS="$(/usr/bin/lipo -archs "$NODE_BIN" 2>/dev/null)"; then
+  echo "Unable to inspect Node architecture: $NODE_BIN" >&2
+  exit 2
+fi
+if ! grep -Eq "(^|[[:space:]])${TARGET_ARCH}([[:space:]]|$)" <<<"$NODE_ARCHS"; then
+  echo "Node architecture mismatch: target=$TARGET_ARCH, Node=$NODE_ARCHS ($NODE_BIN)" >&2
+  exit 2
+fi
+NODE_LOADS="$(/usr/bin/otool -arch "$TARGET_ARCH" -L "$NODE_BIN" | awk 'NR > 1 { print $1 }')"
+NODE_NON_SYSTEM_LOADS="$(printf '%s\n' "$NODE_LOADS" | awk '$1 !~ /^\/usr\/lib\// && $1 !~ /^\/System\/Library\// && $1 != "" { print $1 }')"
+if [[ -n "$NODE_NON_SYSTEM_LOADS" ]]; then
+  echo "Node has non-system dynamic-library dependencies and cannot be copied safely: $NODE_BIN" >&2
+  echo "$NODE_NON_SYSTEM_LOADS" >&2
+  echo "Set TRAVELER_NODE to a self-contained Node.js runtime." >&2
+  exit 2
+fi
 
 mkdir -p "$BUILD_ROOT"
 mkdir -p "$CONTENTS/MacOS" "$RESOURCES"
@@ -96,7 +117,8 @@ cp "$NODE_BIN" "$RESOURCES/bin/node"
 cp "$STAGING_DIR/keychain-read" "$RESOURCES/bin/keychain-read"
 cp -RL "$NODE_MODULES/playwright" "$RESOURCES/node_modules/playwright"
 cp -RL "$NODE_MODULES/playwright-core" "$RESOURCES/node_modules/playwright-core"
-chmod +x "$RESOURCES/bin/node"
+# Homebrew's Node runtime may be read-only; xattr cleanup needs owner write.
+chmod u+w,a+x "$RESOURCES/bin/node"
 chmod +x "$RESOURCES/bin/keychain-read"
 chmod +x "$RESOURCES/runtime/python/bin/python3"
 chmod +x "$RESOURCES/scripts/pp-flowhub"
@@ -104,6 +126,24 @@ find "$APP" -name .DS_Store -delete
 find "$APP" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 find "$APP" -depth -type d -name __pycache__ -empty -delete
 /usr/bin/xattr -cr "$APP"
+PACKAGED_NODE="$RESOURCES/bin/node"
+if ! PACKAGED_NODE_VERSION="$("$PACKAGED_NODE" --version 2>&1)"; then
+  echo "Packaged Node failed to start: $PACKAGED_NODE" >&2
+  echo "$PACKAGED_NODE_VERSION" >&2
+  exit 2
+fi
+echo "Packaged Node verified: $PACKAGED_NODE_VERSION"
+PACKAGED_PLAYWRIGHT="$RESOURCES/node_modules/playwright"
+if ! "$PACKAGED_NODE" -e '
+  const playwrightPath = process.argv[1];
+  const playwright = require(playwrightPath);
+  if (!playwright.chromium || typeof playwright.chromium.launch !== "function") {
+    throw new Error("playwright.chromium.launch is unavailable");
+  }
+' "$PACKAGED_PLAYWRIGHT"; then
+  echo "Packaged Playwright failed explicit absolute-path validation: $PACKAGED_PLAYWRIGHT" >&2
+  exit 2
+fi
 if ! STAGED_BUNDLE_IDENTIFIER="$(/usr/bin/plutil -extract CFBundleIdentifier raw "$CONTENTS/Info.plist" 2>/dev/null)" \
   || [[ "$STAGED_BUNDLE_IDENTIFIER" != "$EXPECTED_BUNDLE_IDENTIFIER" ]]; then
   echo "Staged App Bundle Identifier changed unexpectedly: ${STAGED_BUNDLE_IDENTIFIER:-<missing>}" >&2

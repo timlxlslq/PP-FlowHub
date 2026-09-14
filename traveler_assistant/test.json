@@ -1,0 +1,819 @@
+{'errcode': 0, 'errmsg': 'ok', 'next': 59, 'records': [
+        {'create_time': '2026-06-17 01: 01: 18', 
+         'creator_name': '恩', 
+         'record_id': 'ry3m4S', 
+         'update_time': '2026-07-28 04: 52: 02', 
+         'updater_name': 'Bonnie at work', 
+         'values': {
+                   'Invoice No.': [
+                    {'text': 'no inv open', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': 'vzv 3 bathroom', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0051', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-06-12 01: 26: 38', 'creator_name': '恩', 'record_id': 'rDUszT', 'update_time': '2026-08-19 01: 18: 24', 'updater_name': 'Dola', 'values': {'Finish Panel Sheet': [
+                    {'text': '1 sheet*Antracita SM\n', 'type': 'text'
+                    },
+                    {'text': '2  sheets*Woodline 3', 'type': 'text'
+                    }
+                ], 'Invoice No.': [
+                    {'text': 'no inv open', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': 'VZV,
+                        3 VANITY - 16047 gledhill st, North Hill  8/14高', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oo4Zt4', 'style': 12, 'text': 'PP Carpetry-M'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0046', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-04-19 01: 46: 18', 'creator_name': '张小虎murphy13324624818', 'record_id': 're9IqD', 'update_time': '2026-07-17 00: 49: 25', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': '2595', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oo4Zt4', 'style': 12, 'text': 'PP Carpetry-M'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0007', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-05-05 15: 00: 00', 'Produced Time': '2026-05-06 00: 00: 00'
+            }
+        },
+        {'create_time': '2026-04-29 00: 21: 20', 'creator_name': 'Tim', 'record_id': 'rIMmVg', 'update_time': '2026-09-10 05: 17: 14', 'updater_name': 'Bonnie at work', 'values': {'Finish Panel Sheet': [
+                    {'text': 'Walnut, Rosales 3*8mm*8 boards', 'type': 'text'
+                    }
+                ], 'Invoice No.': [
+                    {'text': '#6910, Shauna', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '4645 denny ave, toluca lake ca 91602', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oo4Zt4', 'style': 12, 'text': 'PP Carpetry-M'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0008', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-09-10 15: 00: 00', 'Qty of 9mm': 8
+            }
+        },
+        {'create_time': '2026-05-13 07: 25: 38', 'creator_name': 'Christine ', 'record_id': 'rqm4do', 'update_time': '2026-09-12 01: 16: 23', 'updater_name': 'Dola', 'values': {'Note': [
+                    {'text': 'bakersfield', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0014', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-05-18 23: 10: 55', 'creator_name': 'Tim', 'record_id': 'rCAbHd', 'update_time': '2026-07-17 00: 49: 25', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': 'B2', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oo4Zt4', 'style': 12, 'text': 'PP Carpetry-M'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0016', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-05-19 00: 20: 02', 'creator_name': 'Christine ', 'record_id': 'r9aruB', 'update_time': '2026-07-17 00: 49: 25', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': 'kaiping', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oo4Zt4', 'style': 12, 'text': 'PP Carpetry-M'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0017', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-07-02 15: 00: 00', 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-05-19 00: 20: 33', 'creator_name': 'Christine ', 'record_id': 'rcH1Gx', 'update_time': '2026-07-22 02: 33: 42', 'updater_name': 'Bonnie at work', 'values': {'Invoice No.': [
+                    {'text': 'Inv #99892 - open', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': 'shanjilan', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oo4Zt4', 'style': 12, 'text': 'PP Carpetry-M'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0018', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-06-01 15: 00: 00', 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-05-19 01: 44: 26', 'creator_name': 'Christine ', 'record_id': 'r6I4Sw', 'update_time': '2026-07-17 00: 49: 25', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': 'matilliga', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0019', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-05-20 01: 45: 18', 'creator_name': 'Christine ', 'record_id': 'rVODHs', 'update_time': '2026-07-20 23: 38: 44', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': 'black', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0022', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oDrNxI', 'style': 7, 'text': 'Amy Teresa'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-05-20 01: 45: 20', 'creator_name': 'Christine ', 'record_id': 'rcIGb1', 'update_time': '2026-07-20 23: 38: 44', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': 'vzv camarilo', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0023', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-05-21 15: 00: 00', 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-05-20 07: 21: 44', 'creator_name': 'Christine ', 'record_id': 'r2B2Al', 'update_time': '2026-09-09 00: 28: 30', 'updater_name': 'Dola', 'values': {'Invoice No.': [
+                    {'text': 'E6936', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': 'gilbert9545 creemore', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0024', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-05-28 15: 00: 00', 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-05-21 04: 29: 05', 'creator_name': 'Tim', 'record_id': 'r1cUp9', 'update_time': '2026-07-23 23: 58: 21', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': 'pier', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0025', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-05-23 00: 34: 06', 'creator_name': 'Christine ', 'record_id': 'r6llPV', 'update_time': '2026-07-17 02: 23: 32', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': 'la canada closet', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0028', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-05-26 04: 52: 56', 'creator_name': '恩', 'record_id': 'rzKkOe', 'update_time': '2026-07-17 00: 49: 25', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': '19808 ahwanee', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oo4Zt4', 'style': 12, 'text': 'PP Carpetry-M'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0031', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'ox9He9', 'style': 13, 'text': 'mario'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-05-28 23: 46: 17', 'creator_name': '恩', 'record_id': 'rJMfIO', 'update_time': '2026-08-21 04: 02: 05', 'updater_name': 'Bonnie at work', 'values': {'Invoice No.': [
+                    {'text': '#99854-Joe', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '2595 GLENDALE', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oo4Zt4', 'style': 12, 'text': 'PP Carpetry-M'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0032', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-06-01 15: 00: 00'
+            }
+        },
+        {'create_time': '2026-06-01 23: 49: 13', 'creator_name': '恩', 'record_id': 'r2FisG', 'update_time': '2026-08-25 00: 29: 01', 'updater_name': 'Bonnie at work', 'values': {'Deposit Date': '2026-06-24 15: 00: 00', 'Finish Panel Sheet': [
+                    {'text': 'Frappe 3* 6 boards (有closet), cashmere sm*2', 'type': 'text'
+                    }
+                ], 'Invoice No.': [
+                    {'text': '#99880&C', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '19950 SANTA RITA', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oo4Zt4', 'style': 12, 'text': 'PP Carpetry-M'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0035', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-08-05 11: 56: 44', 'creator_name': '恩', 'record_id': 'rL2LcU', 'update_time': '2026-08-06 00: 16: 32', 'updater_name': 'Bonnie at work', 'values': {'Note': [
+                    {'text': '19950 SANTA RITA *ADD ON**', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'orshmk', 'style': 23, 'text': 'Final Designed-Y'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0035-2', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-08-05 11: 56: 23', 'creator_name': '恩', 'record_id': 'rCATvF', 'update_time': '2026-08-20 00: 15: 09', 'updater_name': 'Bonnie at work', 'values': {'PP No': [
+                    {'text': 'PP0069', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-06-06 00: 49: 14', 'creator_name': 'Jacob Zeng', 'record_id': 'rtvCso', 'update_time': '2026-07-20 23: 38: 44', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': '1425 Rexford (Azuman brothers)', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0038', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-06-06 06: 21: 12', 'creator_name': 'Jacob Zeng', 'record_id': 'rCEDAp', 'update_time': '2026-07-20 23: 38: 44', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': '13934 Chandler', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0039', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-06-07 08: 36: 45', 'creator_name': '恩', 'record_id': 'rGpcOM', 'update_time': '2026-07-20 23: 38: 44', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': '17147 VINTAGE CLOSET', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0042', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-06-08 02: 55: 50', 'creator_name': 'Christine ', 'record_id': 'rOnU9Y', 'update_time': '2026-07-20 23: 38: 44', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': '20 units; 529-537 E Palm Ave', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0043', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-06-10 23: 45: 39', 'creator_name': 'Jacob Zeng', 'record_id': 'rDg3xT', 'update_time': '2026-07-20 23: 38: 44', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': '20 units; 529-537 E Palm Ave', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0044', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-06-13 06: 59: 16', 'creator_name': 'Jacob Zeng', 'record_id': 'rcpF00', 'update_time': '2026-07-17 00: 49: 25', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': 'studio', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0048', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-07-25 23: 06: 50', 'creator_name': '张小虎murphy13324624818', 'record_id': 'rs5cty', 'update_time': '2026-08-26 06: 14: 40', 'updater_name': 'Dola', 'values': {'Invoice No.': [
+                    {'text': 'no inv open', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '7/27清 7/30 henry 8/25Henry', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0047-1', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-07-17 02: 25: 05', 'creator_name': 'Tim', 'record_id': 'rSIEOH', 'update_time': '2026-08-27 03: 50: 15', 'updater_name': 'Bonnie at work', 'values': {'Finish Panel Sheet': [
+                    {'text': 'Ivory Oak, Woodline 4', 'type': 'text'
+                    }
+                ], 'Invoice No.': [
+                    {'text': 'no inv open-Harout', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '10210 Bothwell Rd, Chatsworth Ca 7/8清', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oOsNDu', 'style': 25, 'text': 'Ready to Cut-B'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0047', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oDrNxI', 'style': 7, 'text': 'Amy Teresa'
+                    }
+                ], '文本': [
+                    {'text': '\\\\192.168.1.239\\g\\Optimized Orders\\pp0047', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-06-15 23: 47: 49', 'creator_name': 'Jacob Zeng', 'record_id': 'rWotDw', 'update_time': '2026-07-17 00: 49: 25', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': '200 Los Altos', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0049', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-06-16 02: 56: 27', 'creator_name': 'Christine ', 'record_id': 'rRN1ld', 'update_time': '2026-07-17 00: 49: 25', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': 'mario install   27671 Camino del lago', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oo4Zt4', 'style': 12, 'text': 'PP Carpetry-M'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0050', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-06-15 15: 00: 00'
+            }
+        },
+        {'create_time': '2026-06-17 09: 23: 47', 'creator_name': '恩', 'record_id': 'rERfbg', 'update_time': '2026-07-20 23: 38: 44', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': '132 S SPALDING.KIT110', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0052', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-06-27 02: 32: 27', 'creator_name': '恩', 'record_id': 'r74glj', 'update_time': '2026-07-17 00: 49: 25', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': '1904 WEDGEMOUNT PL,BAKERFIELD', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0055', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-06-29 06: 33: 09', 'creator_name': '恩', 'record_id': 'rfHMOV', 'update_time': '2026-09-01 06: 20: 41', 'updater_name': 'Bonnie at work', 'values': {'Finish Panel Sheet': [
+                    {'text': 'Muratti 4 * 11 boards, approx 350mm edge', 'type': 'text'
+                    }
+                ], 'Invoice No.': [
+                    {'text': 'Michael Arcadia *Monica - client*', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '3137 S Ninth Ave., Arcadia', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oo4Zt4', 'style': 12, 'text': 'PP Carpetry-M'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0057', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-08-26 15: 00: 00', 
+                   'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ], '文本': [
+                    {'text': '#3 - ROT*2, #17 - ROT*1', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-07-07 07: 00: 24', 'creator_name': 'christine chow', 'record_id': 'r3Kp50', 'update_time': '2026-07-20 23: 38: 44', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': 'LAGUNA BEACH', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0059', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-07-10 23: 47: 32', 'creator_name': 'Jacob Zeng', 'record_id': 'rnVmh7', 'update_time': '2026-07-20 23: 38: 44', 'updater_name': 'Tim', 'values': {'Note': [
+                    {'text': '168 Clark', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0061', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-07-14 23: 38: 09', 'creator_name': 'Jacob Zeng', 'record_id': 'rysxBX', 'update_time': '2026-09-09 00: 06: 03', 'updater_name': 'Dola', 'values': {'Invoice No.': [
+                    {'text': 'ochome#6975', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '23 YELLOWWOOD WAY, IRVINE CA 92612', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0062', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-09-21 15: 00: 00'
+            }
+        },
+        {'create_time': '2026-07-16 23: 31: 08', 'creator_name': '恩', 'record_id': 'rzgWUI', 'update_time': '2026-08-06 00: 13: 00', 'updater_name': 'Bonnie at work', 'values': {'Finish Panel Sheet': [
+                    {'text': 'Khaki', 'type': 'text'
+                    }
+                ], 'Invoice No.': [
+                    {'text': '#PP260721', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '318 n oakhurst 102', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oOsNDu', 'style': 25, 'text': 'Ready to Cut-B'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0063-2', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-09-12 01: 41: 19', 'creator_name': '恩', 'record_id': 'rmu85e', 'update_time': '2026-09-12 01: 41: 56', 'updater_name': '恩', 'values': {'Invoice No.': [
+                    {'text': '3616 MOUNTAIN VIEW', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '3616 MOUNTAIN VIEW', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0064', 'type': 'text'
+                    }
+                ], 'Produced Time': '2026-07-16 23: 59: 45'
+            }
+        },
+        {'create_time': '2026-07-16 23: 31: 48', 'creator_name': '恩', 'record_id': 'ros5QY', 'update_time': '2026-07-29 06: 40: 33', 'updater_name': 'Dola', 'values': {'Invoice No.': [
+                    {'text': '#PP260721', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '318 n oakhurst 101', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0063-1', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-07-24 23: 38: 12', 'creator_name': 'Jacob Zeng', 'record_id': 'rrNJK8', 'update_time': '2026-09-04 04: 52: 42', 'updater_name': 'Christine ', 'values': {'Deposit Date': '2026-08-20 15: 00: 00', 'Invoice No.': [
+                    {'text': '#99909 & C, Vahe', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '3810 San Augustine Dr', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0066', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-09-28 15: 00: 00', 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-07-28 23: 10: 46', 'creator_name': '恩', 'record_id': 'rpEtFH', 'update_time': '2026-09-09 00: 27: 03', 'updater_name': 'Dola', 'values': {'Invoice No.': [
+                    {'text': '#99904 gilbert', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '9545 cree more', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'pp0067', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-07-29 12: 18: 15', 'creator_name': '恩', 'record_id': 'raz6dp', 'update_time': '2026-07-30 06: 45: 10', 'updater_name': 'Bonnie at work', 'values': {'Note': [
+                    {'text': '229 VISTA DEL MAR', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oYeBEs', 'style': 24, 'text': 'Optimized-J'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0068', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-08-20 00: 06: 05', 
+                   'creator_name': 'Bonnie at work', 
+                   'record_id': 'reIzzf', 
+                   'update_time': '2026-09-01 06: 21: 31', 
+                   'updater_name': 'Bonnie at work', 
+                   'values': {
+                    'Deposit Date': '2026-08-19 15: 00: 00', 
+                    'Finish Panel Sheet': [
+                    {'text': 'Kitchen: Rosales 3 * 3 Boards, Vanity * EG Sage Green', 'type': 'text'
+                    }
+                ], 'Invoice No.': [
+                    {'text': '#99913 &Ｃ-Huda', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': ' gold euro handles 10535 wilshire #1502', 'type': 'text'
+                    },
+                    {'text': '', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oo4Zt4', 'style': 12, 'text': 'PP Carpetry-M'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0070', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-08-27 15: 00: 00', 
+                   'Qty of finish panel': 3, 
+                   'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ], '文本': [
+                    {'text': 'Vanity-rta, TD08, full backsplash', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-08-20 00: 14: 45', 'creator_name': 'Bonnie at work', 'record_id': 'r1AwiY', 'update_time': '2026-08-25 07: 42: 37', 'updater_name': 'Christine ', 'values': {'Invoice No.': [
+                    {'text': 'L&U', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'pp0075', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-08-20 00: 14: 46', 'creator_name': 'Bonnie at work', 'record_id': 'rNAHrm', 'update_time': '2026-08-25 11: 47: 17', 'updater_name': 'Jacob Zeng', 'values': {'Invoice No.': [
+                    {'text': '11107 blix st', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0076', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-08-20 00: 14: 50', 'creator_name': 'Bonnie at work', 'record_id': 'rXxpik', 'update_time': '2026-08-27 07: 18: 47', 'updater_name': 'Bonnie at work', 'values': {'Deposit Date': '2026-08-24 15: 00: 00', 'Finish Panel Sheet': [
+                    {'text': 'Rosales 3 * 18 boards', 'type': 'text'
+                    }
+                ], 'Invoice No.': [
+                    {'text': 'Amir own house - closet only - cc0802', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '26704 Hawkhurst Dr, Rancho Palos Verdes, CA 90275', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oo4Zt4', 'style': 12, 'text': 'PP Carpetry-M'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0072', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-08-21 15: 00: 00', 'Qty of 9mm': 3, 'Qty of finish panel': 18, 'Qty of plywood 14.5': 18, 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ], '文本': [
+                    {'text': 'Edge banding door and box = 438m', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-08-20 00: 14: 52', 'creator_name': 'Bonnie at work', 'record_id': 'r4qMmV', 'update_time': '2026-08-20 00: 15: 28', 'updater_name': 'Bonnie at work', 'values': {'PP No': [
+                    {'text': 'PP0071', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-08-22 05: 50: 58', 'creator_name': 'Jacob Zeng', 'record_id': 'rHCJAC', 'update_time': '2026-08-22 05: 51: 22', 'updater_name': 'Jacob Zeng', 'values': {'Invoice No.': [
+                    {'text': 'portshead', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0073', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-08-22 05: 55: 28', 'creator_name': 'Jacob Zeng', 'record_id': 'rabjiO', 'update_time': '2026-08-22 05: 55: 40', 'updater_name': 'Jacob Zeng', 'values': {'Invoice No.': [
+                    {'text': 'sam kitchen', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0074', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-08-27 23: 23: 09', 'creator_name': 'Bonnie at work', 'record_id': 'riOtky', 'update_time': '2026-09-05 04: 27: 12', 'updater_name': 'Christine ', 'values': {'Deposit Date': '2026-10-15 15: 00: 00', 'Note': [
+                    {'text': '黑社会', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0078', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-08-27 23: 23: 10', 'creator_name': 'Bonnie at work', 'record_id': 'rpwXGJ', 'update_time': '2026-09-04 04: 53: 44', 'updater_name': 'Christine ', 'values': {'Invoice No.': [
+                    {'text': '12057 marine - yacine', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '12057 Marine', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0079', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-09-21 15: 00: 00', 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-08-27 23: 23: 11', 'creator_name': 'Bonnie at work', 'record_id': 'rIbDo9', 'update_time': '2026-09-05 00: 27: 49', 'updater_name': 'Jacob Zeng', 'values': {'Finish Panel Sheet': [
+                    {'text': '3*Frappe 1 + 142 mm edge band', 'type': 'text'
+                    }
+                ], 'Invoice No.': [
+                    {'text': '#6997 - Atlantis', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '701 S Central', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oYeBEs', 'style': 24, 'text': 'Optimized-J'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0080', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-09-08 15: 00: 00', 'Qty of finish panel': 3, 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-08-27 23: 23: 12', 'creator_name': 'Bonnie at work', 'record_id': 'rQIvvq', 'update_time': '2026-09-09 01: 43: 51', 'updater_name': 'Bonnie at work', 'values': {'Invoice No.': [
+                    {'text': '#7001 - lifetime', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '17210 sunburst st, northridge, ca VANITY 5CABINETS WHITE OAK, ', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oYeBEs', 'style': 24, 'text': 'Optimized-J'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0081', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-09-08 15: 00: 00', 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ], '文本': [
+                    {'text': '有石, m100', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-08-27 23: 23: 20', 'creator_name': 'Bonnie at work', 'record_id': 'rPcdik', 'update_time': '2026-08-28 01: 19: 18', 'updater_name': 'Bonnie at work', 'values': {'Deposit Date': '2026-08-26 15: 00: 00', 'Finish Panel Sheet': [
+                    {'text': 'Cashmere SM*7 boards, edge: 228mm', 'type': 'text'
+                    }
+                ], 'Invoice No.': [
+                    {'text': '#99911 & C - Eddie', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '116 w oakmont', 'type': 'text'
+                    }
+                ], 'Order Status': [
+                    {'id': 'oYeBEs', 'style': 24, 'text': 'Optimized-J'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0077', 'type': 'text'
+                    }
+                ], 'Qty of finish panel': 7, 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-09-03 12: 48: 32', 'creator_name': '恩', 'record_id': 'rRsxr4', 'update_time': '2026-09-03 13: 51: 23', 'updater_name': '恩', 'values': {'Note': [
+                    {'text': '2710 PINE AVE', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0082', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-09-03 12: 48: 33', 'creator_name': '恩', 'record_id': 'rBIEDQ', 'update_time': '2026-09-04 23: 23: 37', 'updater_name': '恩', 'values': {'Note': [
+                    {'text': '949 N KINGS', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0083', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-09-03 12: 48: 34', 'creator_name': '恩', 'record_id': 'rFvOyI', 'update_time': '2026-09-09 03: 11: 27', 'updater_name': 'Jacob Zeng', 'values': {'Note': [
+                    {'text': '724 price dr. burbank', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0085', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-09-03 12: 48: 35', 'creator_name': '恩', 'record_id': 'rzOlct', 'update_time': '2026-09-09 04: 44: 59', 'updater_name': 'Bonnie at work', 'values': {'Invoice No.': [
+                    {'text': '#6986 - david', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': '10501 WILSHIRE', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0086', 'type': 'text'
+                    }
+                ], 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-09-03 12: 48: 36', 'creator_name': '恩', 'record_id': 'rx9zFn', 'update_time': '2026-09-11 05: 56: 28', 'updater_name': '恩', 'values': {'Invoice No.': [
+                    {'text': 'IVY MASTER BED(PP0018)', 'type': 'text'
+                    }
+                ], 'Note': [
+                    {'text': 'IVY(PP0018)', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0087', 'type': 'text'
+                    }
+                ]
+            }
+        },
+        {'create_time': '2026-09-05 00: 28: 07', 'creator_name': 'Jacob Zeng', 'record_id': 'rbkVzB', 'update_time': '2026-09-08 08: 31: 28', 'updater_name': '恩', 'values': {'Invoice No.': [
+                    {'text': 'pasadena', 'type': 'text'
+                    }
+                ], 'PP No': [
+                    {'text': 'PP0084', 'type': 'text'
+                    }
+                ], 'Pick Up Date': '2026-10-21 15: 00: 00', 'SalesName': [
+                    {'id': 'oRPAEw', 'style': 11, 'text': 'CC'
+                    }
+                ]
+            }
+        }
+    ], 'total': 59
+}

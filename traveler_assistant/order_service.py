@@ -50,13 +50,17 @@ def serve() -> int:
     install_shared_workflow_connection(database, connection)
     logger = configure_operation_log(config)
     order_model: dict | None = None
-    order_model_stamp: int | None = None
+    order_model_stamp: tuple[int, int] | None = None
 
-    def database_stamp() -> int:
-        try:
-            return database.stat().st_mtime_ns
-        except OSError:
-            return 0
+    def database_stamp() -> tuple[int, int]:
+        """Track the main database and WAL so cached reads see local writes."""
+        stamps = []
+        for path in (database, Path(f"{database}-wal")):
+            try:
+                stamps.append(path.stat().st_mtime_ns)
+            except OSError:
+                stamps.append(0)
+        return tuple(stamps)
 
     try:
         for raw_line in sys.stdin:
@@ -81,6 +85,14 @@ def serve() -> int:
                     stdin_text = base64.b64decode(str(encoded_input)).decode("utf-8")
                 os.environ[OPERATION_ID_ENV] = request_id
                 command = arguments[0] if arguments else ""
+                # Only a complete list-index response may populate the resident
+                # model. Any other command can change the database or return a
+                # different payload shape, so it must invalidate the model
+                # before the next list request even when the database mtime is
+                # unchanged (for example while SQLite is using WAL).
+                if command != "list-index":
+                    order_model = None
+                    order_model_stamp = None
                 current_stamp = database_stamp()
                 if command == "list-index" and order_model is not None and current_stamp == order_model_stamp:
                     logger.event(
@@ -110,7 +122,7 @@ def serve() -> int:
                             "message": f"订单后台未返回有效结果（退出码 {exit_code}）",
                         }
                     }
-                if isinstance(payload, dict) and isinstance(payload.get("orders"), list):
+                if command == "list-index" and isinstance(payload, dict) and isinstance(payload.get("orders"), list):
                     order_model = payload
                     order_model_stamp = database_stamp()
             except Exception as exc:  # protocol errors must not kill the App service

@@ -1,5 +1,7 @@
 # PP FlowHub：完整技术架构与业务流程
 
+> **学习快照（2026-09）**：本文用于按调用链学习，部分段落记录形成过程中的旧流程；当前行为以 [系统架构](../architecture/system-architecture.md)、[业务规则](../business-rules.md) 和 [发布流程](../release-testing.md) 及源码为准，不把本文当作当前待办或授权。
+
 本文面向第一次接触项目的开发者，说明从 macOS 页面操作到 Python 业务结果的完整调用链。每次修改业务流程时，应同步更新本文件对应章节。
 
 ## 1. 分层结构
@@ -71,10 +73,10 @@ HSplitView 右侧订单详情区不使用固定最小宽度，而是使用 minWi
 1. `sync-aimes` 获取 AIMES 最近数据；失败时保留最近一次成功的本地缓存，并由 Swift 显示醒目的失败提示。
 2. `factory_orders` 保留历史 AIMES 工厂单记录；当前 AIMES 新增工厂单会立即把所属订单重新纳入 Server 扫描候选。
 3. 初始日期以前的订单按用户确认直接记录为“已出货”；AIMES 身份指纹没有变化时永久跳过。初始日期以后的订单在全部 AIMES 工厂单明确“已出库”后观察 7 天，期间继续检查 Server 元数据，超过 7 天且 AIMES 没有变化后永久跳过；AIMES 新增、删除或拆单变化会重新打开扫描。
-4. 非 `PP####`、`PP####-#`、`CS###` 的目录按临时任务处理：建立时间在扫描基准时间（当前为 `CS003 PP0047` 的建立时间 `2026-07-25T11:00:25-07:00`）之后的一段时间内，或从未写入 `source_files`，才自动进入扫描；业务报表递归查找 `Fittingslist`、`板材清单` 和 `material` 文件。
+4. 非 `PP####`、`PP####-#`、`CS###` 的目录按临时任务处理：建立时间在扫描基准时间（当前为 `CS003 PP0047` 的建立时间 `2026-07-25T11:00:25-07:00`）之后的一段时间内，或从未写入 `source_files`，才自动进入扫描；扫描阶段只登记报表元数据，用户显式处理后才按业务报表规则读取 `Fittingslist`、`板材清单` 和 `material` 文件。
 5. 被筛选跳过的标准订单不会触发历史问题自动关闭；`active_issues` 只有在对应文件夹确实被本次扫描后，才会按本次结果更新。
 
-`scan-server` 先比较文件夹和业务 Excel 的元数据，并读取发生变化或仍有校验问题的 material 内容；它不会把普通 material/Report 当作已经确认的正式业务事实，也不会推进这些文件的已处理基线。用户选择文件夹后，`preview-server-changes` 在内存数据库中解析并演算；只有显式确认流程才把材料和五金事实写入中央 `workflow.sqlite3`。扫描阶段可持久化来源中带有精确工厂单身份的 AICNC 优化证据。
+`scan-server` 当前先比较文件夹、报表元数据和标准订单 XML 标记，不解析 Excel，也不会把普通 material/Report 当作已经确认的正式业务事实或推进文件处理基线。用户选择文件夹后，`preview-server-changes` 才在内存数据库中解析并演算；只有显式确认流程才把材料和五金事实写入中央 `workflow.sqlite3`。扫描阶段可持久化来源中带有精确工厂单身份的 AICNC 优化证据。
 
 ### 4.2 预览订单
 
@@ -82,14 +84,14 @@ HSplitView 右侧订单详情区不使用固定最小宽度，而是使用 minWi
 2. `preview_order(config, folder)` 校验目录名称，并在根目录选择唯一的 `*material*.xlsx`。
 3. `parse_order_materials()` 读取 `Total Qty:`、`Color Table`、Plywood 列和颜色行，返回 `materials` 与 `edge_banding`。板材、封边数量只来自此文件。
 4. PP 订单调用 `_choose_fittings()`，递归查找 `Fittingslist*.xlsx`；`parse_fittings_groups()` 按 `Order No.` 区块读取工厂单号和五金行。
-5. `_factory_names()` 先读取 `pp-板材清单*.xlsx` 的“订单号/订单名称”，再读取 `Config.factory_names_file` 本地缓存；仍缺失时调用 `lookup_aimes_names()`。
-6. AIMES 成功结果原子写入 `data/factory-names.json`，下次优先使用缓存。
+5. `_factory_names()` 先读取 `pp-板材清单*.xlsx` 的“订单号/订单名称”，再读取现有工厂名称缓存；仍缺失时调用 `lookup_aimes_names()`。
+6. AIMES 成功结果按当前缓存机制保存，下次优先使用缓存；缓存实现和迁移以 `database.py`、`core.py` 当前源码为准。
 7. `_normalize_fittings()` 按五金 code 聚合、处理左右导轨，并应用忽略映射。
 8. `preview_payload()` 返回材料、封边、工厂单号、工厂名称、五金和 warnings；Swift 显示预览。
 
 订单隔离规则：`PP####` 与 `PP####-数字` 是两个完整、独立的订单键。工厂单名称可以用连字符或空格连接完整订单号；例如 `PP0035-OFFICE` 属于 `PP0035`，而 `PP0035-2-MASTER`、`PP0035-2 OPENSHELF` 只属于 `PP0035-2`。`assistant_cli._factory_name_belongs_to_order()` 负责 Agent 命令入口校验，`order_workflow._factory_name_belongs_to_order()` 负责生成 Traveler 前校验。基础订单后紧跟数字的名称会被拒绝，避免材料、五金和 Traveler 数据跨订单混用。
 
-材料文件归属：`preview_order()` 发现一个订单文件夹内有多个 material Excel 时，先按完整订单号匹配文件名；唯一匹配会写入 `data/material-assignments.json`。仍无法判断时返回 `material_assignment_required` 和 `assignment_key`，人工通过 `assign-material` 命令确认后持久化，下一次不再重复询问。五金不依赖材料分配，而是从 Fittingslist 的工厂单号读取并做订单名称一致性校验。
+材料文件归属：`preview_order()` 发现一个订单文件夹内有多个 material Excel 时，先按完整订单号匹配文件名；唯一匹配会写入现有材料分配缓存。仍无法判断时返回 `material_assignment_required` 和 `assignment_key`，人工通过 `assign-material` 命令确认后持久化，下一次不再重复询问。五金不依赖材料分配，而是从 Fittingslist 的工厂单号读取并做订单名称一致性校验。
 
 共享文件夹筛选：`_factory_names()` 和 `preview_order()` 会按完整订单号保留当前订单的工厂单；同一文件夹中属于兄弟订单的板材清单、Fittingslist 内容会被忽略并记录提醒，不再导致当前订单无法预览。
 
@@ -97,7 +99,7 @@ HSplitView 右侧订单详情区不使用固定最小宽度，而是使用 minWi
 
 共享订单处理：`related_order_ids()` 从文件夹名、板材清单、XML 和报表文件名提取完整订单号；`preview_related_orders()` 为每个订单独立调用预览，`update_related_orders()` 分别生成/更新 Traveler。material 的 `Room/section` 行由 `parse_material_room_rows()` 解析，并通过工厂单名称匹配房间后写入对应订单；`_aggregate_material_sources()` 合并多个 material 文件并标记完全重复的房间数据。
 
-AIMES 缓存更新：设置页按钮调用 `order refresh-aimes`，后端通过 `refresh_aimes_recent_names()` 读取 AIMES 当前页 50 条工厂单名称，写入工厂名称缓存。订单预览缺少工厂名称时仍调用 `lookup_aimes_names()` 补齐。
+AIMES 缓存更新：设置页按钮调用 `order refresh-aimes`，后端通过 `refresh_aimes_recent_names()` 读取 AIMES 当前页 50 条工厂单名称，写入现有工厂名称缓存。订单预览缺少工厂名称时仍调用 `lookup_aimes_names()` 补齐。
 
 材料整数校验：`parse_material_room_rows()` 允许单个房间的 plywood/panel 数量为小数；`_select_room_materials()` 按订单、规格和颜色汇总后才检查是否为整数，避免把合法的跨房间分摊误判为错误。
 
@@ -140,7 +142,7 @@ AIMES 只补工厂单名称，不参与板材/封边数量计算。
 - 待办由 Swift `TodoItem` 管理，保存到 `data/todo-items.json`，使用原子写入。
 - 设置由 `AppModel.loadSettings/saveSettings` 管理，正式数据源只保留服务器、Traveler 和备份路径。
 - AIMES 用户名由 `AppModel.saveSettings()` 保存到 settings.json；`saveAimesPassword()` 将密码写入 `com.pacificpride.ppflowhub.aimes` 钥匙串，`saveAllSettings()` 会同时处理库存系统和 AIMES 两套密码。
-- AIMES 工厂名称缓存由 Python 管理，文件是 `data/factory-names.json`，写入采用临时文件替换。
+- AIMES 工厂名称缓存由 Python 管理，当前运行机制以中央缓存表和源码为准；旧 JSON 路径仅用于迁移或历史说明。
 
 ## 9. 调试顺序
 

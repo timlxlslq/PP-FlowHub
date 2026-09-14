@@ -1,5 +1,6 @@
 import { chromium } from "playwright";
 import fs from "node:fs";
+import { readAimesTable } from "./aimes_table.mjs";
 
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
@@ -84,6 +85,11 @@ try {
     const metadataRows = [];
     const seenFactories = new Set();
     let pageNumber = 0;
+    const tableReadStartedAt = performance.now();
+    log("读取 AIMES 工厂订单表格", { stage: "table_read", stage_label: "读取 AIMES 工厂订单表格" });
+    let firstTableSnapshot = await readAimesTable(page, {
+      requireMetadata: Boolean(request.includeOrderMetadata),
+    });
 
     // Keep the original AIMES behavior: read only the current page of 50
     // factory orders. Select 50 explicitly in case the browser remembers a
@@ -108,29 +114,21 @@ try {
       if (await option.count() > 0) await option.click();
       else if (await fiftyOption.count() > 0) await fiftyOption.click();
       await page.waitForTimeout(500);
+      firstTableSnapshot = null;
     }
-    const tableReadStartedAt = performance.now();
-    log("读取 AIMES 工厂订单表格", { stage: "table_read", stage_label: "读取 AIMES 工厂订单表格" });
     while (metadataRows.length < requestedLimit && pageNumber < 100) {
-      const headerRows = page.locator("thead tr");
-      let headers = [];
-      for (let index = 0; index < await headerRows.count(); index += 1) {
-        const candidate = (await headerRows.nth(index).locator("th").allTextContents()).map(value => value.trim());
-        if (candidate.length > headers.length) headers = candidate;
-      }
+      const table = firstTableSnapshot || await readAimesTable(page, {
+        requireMetadata: Boolean(request.includeOrderMetadata),
+      });
+      firstTableSnapshot = null;
+      const { headers, rows } = table;
       const findColumn = aliases => headers.findIndex(header => aliases.some(alias => header === alias || header.includes(alias)));
       const factoryColumn = findColumn(["工厂单号"]);
       const factoryNameColumn = findColumn(["工厂单名称"]);
       const salesOrderColumn = findColumn(["销售单名称"]);
       const splitTimeColumn = findColumn(["拆单时间"]);
-      if (request.includeOrderMetadata && [factoryColumn, factoryNameColumn, salesOrderColumn, splitTimeColumn].some(index => index < 0)) {
-        throw new Error(`AIMES 工厂订单表缺少必要列；当前表头：${headers.join(" | ")}`);
-      }
-
-      const rows = page.locator("tbody tr");
-      const rowCount = await rows.count();
-      for (let index = 0; index < rowCount && metadataRows.length < requestedLimit; index += 1) {
-        const values = (await rows.nth(index).locator("td").allTextContents()).map(value => value.trim());
+      for (let index = 0; index < rows.length && metadataRows.length < requestedLimit; index += 1) {
+        const values = rows[index];
         const fallbackFactoryColumn = values.findIndex(value => /^F\d+$/i.test(value));
         const resolvedFactoryColumn = factoryColumn >= 0 ? factoryColumn : fallbackFactoryColumn;
         const factoryOrder = values[resolvedFactoryColumn]?.toUpperCase() || "";
@@ -184,15 +182,15 @@ try {
     }
   }
   if (request.verifyFactoryOrders) {
+    const verificationStartedAt = performance.now();
+    let initialTableSnapshot;
+    if (!request.recentLimit) {
+      log("读取 AIMES 工厂订单表格", { stage: "table_read", stage_label: "读取 AIMES 工厂订单表格" });
+      initialTableSnapshot = await readAimesTable(page, { requireMetadata: false });
+    }
     const rows = [];
     const missing = [];
-    const verificationStartedAt = performance.now();
-    const verificationHeaderRows = page.locator("thead tr");
-    let verificationHeaders = [];
-    for (let index = 0; index < await verificationHeaderRows.count(); index += 1) {
-      const candidate = (await verificationHeaderRows.nth(index).locator("th").allTextContents()).map(value => value.trim());
-      if (candidate.length > verificationHeaders.length) verificationHeaders = candidate;
-    }
+    const verificationHeaders = initialTableSnapshot?.headers || (await readAimesTable(page, { requireMetadata: false })).headers;
     const verificationSplitTimeColumn = verificationHeaders.findIndex(
       header => header === "拆单时间" || header.includes("拆单时间"),
     );

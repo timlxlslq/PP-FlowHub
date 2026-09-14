@@ -1,5 +1,7 @@
 # 学习：为什么是 App + Agent + Skills
 
+> **学习快照（2026-09）**：本文保留架构学习过程和历史示例；当前运行边界以 [系统架构](../architecture/system-architecture.md)、[业务规则](../business-rules.md) 和 [发布流程](../release-testing.md) 为准，不把本文内容当作当前待办或授权。
+
 Skill 是某个业务领域的标准作业说明，Agent 是根据用户目标选择下一步的协调者，App 是提供状态、预览、语音和审批的产品。
 
 本项目不把其中任何一个当成“全能层”：

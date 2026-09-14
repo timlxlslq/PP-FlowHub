@@ -454,20 +454,34 @@ struct ServerWriteHardwareChange: Identifiable {
     }
 }
 
+// Preserve source fields so the selection preview can align names, codes and quantities.
+struct HardwareSourceItem {
+    let name: String
+    let code: String
+    let spec: String
+    let quantity: Double
+    let unit: String
+
+    init(_ value: [String: Any]) {
+        name = value["name"] as? String ?? ""
+        code = value["code"] as? String ?? ""
+        spec = value["spec"] as? String ?? ""
+        quantity = (value["quantity"] as? NSNumber)?.doubleValue ?? 0
+        unit = value["unit"] as? String ?? ""
+    }
+}
+
 struct HardwareSourceCandidate: Identifiable {
     let id: String
     let path: String
     let label: String
-    let items: [String]
+    let items: [HardwareSourceItem]
     init?(_ value: [String: Any]) {
         guard let id = value["id"] as? String, let path = value["path"] as? String else { return nil }
         self.id = id
         self.path = path
         self.label = value["label"] as? String ?? "选择此报表"
-        self.items = (value["items"] as? [[String: Any]] ?? []).map {
-            let quantity = ($0["quantity"] as? NSNumber)?.stringValue ?? ""
-            return "\($0["name"] as? String ?? "") · \($0["code"] as? String ?? "") · \($0["spec"] as? String ?? "")：\(quantity) \($0["unit"] as? String ?? "")"
-        }
+        self.items = (value["items"] as? [[String: Any]] ?? []).map(HardwareSourceItem.init)
     }
 }
 
@@ -854,6 +868,64 @@ func aimesReviewItemsFromWarnings(_ warnings: [[String: Any]]) -> [AimesReviewIt
     }
 }
 
+struct DashboardAimesStatusUpdate: Equatable {
+    let status: String
+    let failureAlert: String
+}
+
+func dashboardAimesStatusUpdate(
+    attempted: Bool,
+    succeeded: Bool,
+    skippedToday: Bool,
+    changed: Bool,
+    count: Int,
+    issueCount: Int,
+    warningCount: Int,
+    error: String
+) -> DashboardAimesStatusUpdate {
+    let message = businessFriendlyMessage(error, operation: "获取 AIMES 数据")
+    if attempted && !succeeded {
+        return DashboardAimesStatusUpdate(
+            status: "⚠️ 尝试获取 AIMES 数据失败：\(message)",
+            failureAlert: message
+        )
+    }
+    if skippedToday {
+        return DashboardAimesStatusUpdate(
+            status: "✅ 今天已成功获取过 AIMES，本次略过",
+            failureAlert: ""
+        )
+    }
+    guard succeeded else {
+        return DashboardAimesStatusUpdate(
+            status: "⚠️ 尝试获取 AIMES 数据失败：\(message)",
+            failureAlert: ""
+        )
+    }
+    if warningCount > 0 {
+        return DashboardAimesStatusUpdate(
+            status: "⚠️ 获取 AIMES 数据成功，发现 \(warningCount) 条销售单格式异常，已跳过且未写入数据库",
+            failureAlert: ""
+        )
+    }
+    if issueCount > 0 {
+        return DashboardAimesStatusUpdate(
+            status: "⚠️ 获取 AIMES 数据成功，有 \(issueCount) 条工厂单需要人工确认",
+            failureAlert: ""
+        )
+    }
+    if changed {
+        return DashboardAimesStatusUpdate(
+            status: "✅ 获取 AIMES 数据成功，已更新最近 50 条（\(count) 条）",
+            failureAlert: ""
+        )
+    }
+    return DashboardAimesStatusUpdate(
+        status: "✅ 获取 AIMES 数据成功，最近 50 条无变化（\(count) 条）",
+        failureAlert: ""
+    )
+}
+
 func dashboardActivitySteps(
     _ object: [String: Any],
     includeChanges: Bool = true,
@@ -874,6 +946,12 @@ func dashboardActivitySteps(
         let orderID = row["order_id"] as? String ?? ""
         let factoryOrder = row["factory_order"] as? String ?? ""
         let path = row["path"] as? String ?? ""
+        let sourceKey: String = {
+            if let id = row["id"] as? NSNumber { return "backend:\(id.stringValue)" }
+            if let id = row["id"] as? String, !id.isEmpty { return "backend:\(id)" }
+            let values = [observed, kind, orderID, factoryOrder, path, rawMessage, severity]
+            return "fallback:" + values.map { "\($0.count):\($0)" }.joined(separator: "|")
+        }()
         let title: String
         switch kind {
         case "order_validation": title = "订单校验"
@@ -902,7 +980,8 @@ func dashboardActivitySteps(
             detail: detail,
             state: severity == "error" ? "failure" : (severity == "warning" ? "warning" : "success"),
             paths: path.isEmpty ? [] : [path],
-            operationDetails: operationDetails
+            operationDetails: operationDetails,
+            sourceKey: sourceKey
         )
     }
 }
@@ -1231,6 +1310,7 @@ struct InventoryStep: Identifiable {
     let contextDetails: [String]
     let startedAt: Date?
     let duration: TimeInterval?
+    let sourceKey: String?
 
     init(
         id: UUID = UUID(),
@@ -1242,7 +1322,8 @@ struct InventoryStep: Identifiable {
         operationDetails: [String] = [],
         contextDetails: [String] = [],
         startedAt: Date? = nil,
-        duration: TimeInterval? = nil
+        duration: TimeInterval? = nil,
+        sourceKey: String? = nil
     ) {
         self.id = id
         self.time = time
@@ -1254,6 +1335,7 @@ struct InventoryStep: Identifiable {
         self.contextDetails = contextDetails
         self.startedAt = startedAt
         self.duration = duration
+        self.sourceKey = sourceKey
     }
 }
 
@@ -1640,23 +1722,45 @@ final class AppModel: ObservableObject {
     @Published var dashboardOrders: [OrderDashboardItem] = []
     @Published var requestedOrderCenterOrderID = ""
     @Published var dashboardChanges: [String] = []
-    @Published var dashboardActivity: [InventoryStep] = []
+    @Published var dashboardActivity: [InventoryStep] = [] {
+        didSet { appendNewDashboardActivityToSession(oldValue: oldValue) }
+    }
+    @Published private(set) var dashboardSessionMessages: [DashboardMessage] = []
     @Published var dashboardOperationDetails: [String: [String]] = [:]
     @Published private(set) var dashboardOperationDurations: [String: TimeInterval] = [:]
     @Published private(set) var dashboardOperationStageDurations: [String: [DashboardOperationDuration]] = [:]
+    @Published private(set) var dashboardOperationProgress: [String: [String]] = [:]
     private var dashboardOperationStartedAt: [String: DashboardOperationStart] = [:]
+    private var dashboardOperationEpoch: [String: Int] = [:]
+    private var dashboardLastRecordedStatus: [String: String] = [:]
+    private var dashboardLastRecordedStatusEpoch: [String: Int] = [:]
+    private var dashboardRecordedStageCompletions: [String: Set<String>] = [:]
+    private var dashboardSessionActivityIDs: Set<UUID> = []
+    private var dashboardSessionActivityKeys: Set<String> = []
     @Published var dashboardInventoryOperationStatus = "库存操作尚未执行" {
-        didSet { dashboardInventoryOperationStatusTime = dashboardClockTime() }
+        didSet {
+            dashboardInventoryOperationStatusTime = dashboardClockTime()
+            recordDashboardStatus("inventory", status: dashboardInventoryOperationStatus, time: dashboardInventoryOperationStatusTime)
+        }
     }
     @Published var dashboardSyncStatus = "订单数据尚未同步" {
-        didSet { dashboardSyncStatusTime = dashboardClockTime() }
+        didSet {
+            dashboardSyncStatusTime = dashboardClockTime()
+            recordDashboardStatus("sync", status: dashboardSyncStatus, time: dashboardSyncStatusTime)
+        }
     }
     @Published var dashboardAimesStatus = "AIMES 尚未检查" {
-        didSet { dashboardAimesStatusTime = dashboardClockTime() }
+        didSet {
+            dashboardAimesStatusTime = dashboardClockTime()
+            recordDashboardStatus("aimes", status: dashboardAimesStatus, time: dashboardAimesStatusTime)
+        }
     }
     @Published var aimesFailureAlert = ""
     @Published var dashboardServerStatus = "Server 尚未扫描" {
-        didSet { dashboardServerStatusTime = dashboardClockTime() }
+        didSet {
+            dashboardServerStatusTime = dashboardClockTime()
+            recordDashboardStatus("server", status: dashboardServerStatus, time: dashboardServerStatusTime)
+        }
     }
     @Published private(set) var dashboardSyncStatusTime = dashboardClockTime()
     @Published private(set) var dashboardInventoryOperationStatusTime = dashboardClockTime()
@@ -1735,6 +1839,157 @@ final class AppModel: ObservableObject {
     // a replay of historical sync_changes rows from the central database.
     private let dashboardSessionStartedAt = Date()
     private var residentOrderService: ResidentOrderServiceClient?
+
+    private func appendNewDashboardActivityToSession(oldValue: [InventoryStep]) {
+        let oldIDs = Set(oldValue.map(\.id))
+        // dashboardActivity is newest-first; append the batch oldest-first to
+        // preserve the order in which the user saw backend changes arrive.
+        for step in dashboardActivity.reversed() where !oldIDs.contains(step.id) {
+            guard dashboardSessionActivityIDs.insert(step.id).inserted else { continue }
+            let key = step.sourceKey ?? "uuid:\(step.id.uuidString)"
+            guard dashboardSessionActivityKeys.insert(key).inserted else { continue }
+            dashboardSessionMessages.append(
+                DashboardMessage(
+                    id: "activity:\(step.id.uuidString)",
+                    source: "activity",
+                    time: step.time,
+                    title: step.title,
+                    detail: step.detail,
+                    state: step.state,
+                    manualPaths: step.paths,
+                    operationDetails: step.operationDetails,
+                    contextDetails: step.contextDetails,
+                    duration: step.duration
+                )
+            )
+        }
+    }
+
+    var dashboardMessageOperationDetails: [String: [String]] {
+        var merged = dashboardOperationDetails
+        for (source, progress) in dashboardOperationProgress {
+            var details = merged[source] ?? []
+            for message in progress where !details.contains(message) {
+                details.append(message)
+            }
+            merged[source] = details
+        }
+        return merged
+    }
+
+    private func dashboardSessionManualPaths(for source: String) -> [String] {
+        switch source {
+        case "aimes":
+            return (pendingAimesReviews + ignoredAimesFactories + assignedAimesFactories).map(\.sourcePath)
+        case "server":
+            return pendingServerChanges.map(\.path)
+        case "sync":
+            return dashboardActivity.first { $0.state == "failure" || $0.state == "warning" }?.paths ?? []
+        default:
+            return []
+        }
+    }
+
+    private func dashboardSessionContextDetails(for source: String, status: String? = nil) -> [String] {
+        switch source {
+        case "aimes":
+            return dashboardAimesActionDetails(
+                pending: pendingAimesReviews,
+                ignored: ignoredAimesFactories,
+                assigned: assignedAimesFactories
+            ) + dashboardAimesWarningDetails(aimesWarnings)
+        case "server":
+            if pendingServerChanges.isEmpty {
+                guard status?.hasPrefix("✅") == true else { return [] }
+                return ["Server 已完成扫描，当前没有新增、修改或删除的订单文件。"]
+            }
+            let groups = serverFolderChangeGroups(pendingServerChanges)
+            return ["待处理 Server 变化 \(groups.count) 个文件夹："] + groups.map {
+                let handling = $0.manualOnly ? "（临时文件夹）" : ""
+                let names = $0.changes.map { URL(fileURLWithPath: $0.path).lastPathComponent }.joined(separator: "、")
+                return "\($0.folderName)\(handling)：\(names)"
+            }
+        default:
+            return []
+        }
+    }
+
+    private func recordDashboardStatus(_ source: String, status: String, time: String) {
+        guard ["✅", "⚠️", "❌"].contains(where: { status.hasPrefix($0) }) else {
+            // A later terminal result after an in-progress message is a new
+            // event even when the text repeats an earlier result. The epoch
+            // only changes for beginDashboardOperation, so clear the marker
+            // here for refresh/sync paths that do not begin a new operation.
+            dashboardLastRecordedStatus.removeValue(forKey: source)
+            dashboardLastRecordedStatusEpoch.removeValue(forKey: source)
+            return
+        }
+        if source == "sync",
+           status == dashboardAimesStatus || status == dashboardServerStatus || status == dashboardInventoryOperationStatus {
+            return
+        }
+        let epoch = dashboardOperationEpoch[source, default: 0]
+        if dashboardLastRecordedStatus[source] == status,
+           dashboardLastRecordedStatusEpoch[source] == epoch {
+            return
+        }
+        dashboardLastRecordedStatus[source] = status
+        dashboardLastRecordedStatusEpoch[source] = epoch
+        let details = dashboardMessageOperationDetails[source] ?? []
+        let contextDetails = dashboardSessionContextDetails(for: source, status: status)
+        dashboardSessionMessages.append(
+            DashboardMessage(
+                id: "status:\(source):\(UUID().uuidString)",
+                source: source,
+                time: time,
+                title: source == "aimes" ? "AIMES" : (source == "server" ? "Server" : (source == "inventory" ? "库存操作" : "订单数据")),
+                detail: dashboardMessageDetail(status),
+                state: dashboardMessageState(status),
+                manualPaths: dashboardSessionManualPaths(for: source),
+                operationDetails: details,
+                contextDetails: contextDetails,
+                duration: dashboardOperationDurations[source],
+                operationDurations: dashboardOperationStageDurations[source] ?? []
+            )
+        )
+    }
+
+    private func recordDashboardStageCompletion(
+        _ source: String,
+        stage: String,
+        label: String,
+        duration: TimeInterval,
+        time: String
+    ) {
+        let stageKey = stage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !stageKey.isEmpty else { return }
+        guard stageKey != "attempt", stageKey != "total", !label.contains("总计用时") else { return }
+        let epoch = dashboardOperationEpoch[source, default: 0]
+        var completed = dashboardRecordedStageCompletions[source, default: []]
+        guard completed.insert(stageKey).inserted else { return }
+        dashboardRecordedStageCompletions[source] = completed
+        var completedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        if completedLabel.hasPrefix("正在") {
+            completedLabel = String(completedLabel.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if completedLabel.isEmpty { completedLabel = stageKey }
+        let detail = completedLabel.hasSuffix("完成") ? completedLabel : completedLabel + "已完成"
+        dashboardSessionMessages.append(
+            DashboardMessage(
+                id: "stage:" + source + ":" + String(epoch) + ":" + stageKey,
+                source: source,
+                time: time,
+                title: source == "aimes" ? "AIMES" : (source == "server" ? "Server" : "订单数据"),
+                detail: detail,
+                state: "success",
+                manualPaths: [],
+                operationDetails: dashboardMessageOperationDetails[source] ?? [],
+                contextDetails: [],
+                duration: duration,
+                operationDurations: [DashboardOperationDuration(label: completedLabel, duration: duration)]
+            )
+        )
+    }
 
     var pendingCenterItems: [PendingCenterItem] {
         buildPendingCenterItems(
@@ -2247,10 +2502,16 @@ final class AppModel: ObservableObject {
             guard let message = $0["message"] as? String else { return nil }
             return businessFriendlyMessage(message, operation: "处理 Server 变化")
         }
-        dashboardActivity = dashboardActivitySteps(
+        let newActivity = dashboardActivitySteps(
             object,
             sessionStartedAt: dashboardSessionStartedAt
         )
+        var existingKeys = Set(dashboardActivity.map { $0.sourceKey ?? "uuid:\($0.id.uuidString)" })
+        for step in newActivity.reversed() {
+            let key = step.sourceKey ?? "uuid:\(step.id.uuidString)"
+            guard existingKeys.insert(key).inserted else { continue }
+            dashboardActivity.insert(step, at: 0)
+        }
     }
 
     private func presentServerWritePreview(_ object: [String: Any]) {
@@ -2383,6 +2644,9 @@ final class AppModel: ObservableObject {
             dashboardOperationStageDurations[source] = []
             dashboardOperationDurations[source] = 0
             dashboardOperationDetails[source] = []
+            dashboardOperationProgress[source] = []
+            dashboardOperationEpoch[source, default: 0] += 1
+            dashboardRecordedStageCompletions[source] = []
         }
         dashboardOperationStartedAt[source] = DashboardOperationStart(
             label: label,
@@ -2483,7 +2747,7 @@ final class AppModel: ObservableObject {
             // startup refresh has completed; otherwise the sheet opens while
             // orderRunning is still true and presents stale data as locked UI.
             self.applyAimesReviewObject(object, presentIfNeeded: false)
-            self.dashboardSyncStatus = "✅ 已显示本地缓存；正在后台检查数据"
+            self.dashboardSyncStatus = "✅ 本地订单缓存已显示"
             self.runDailyBackupAfterLocalCache {
                 self.syncDashboardAimes(force: false, scanServerAfter: true)
             }
@@ -2518,25 +2782,39 @@ final class AppModel: ObservableObject {
     }
 
     private func runDailyBackupAfterLocalCache(completion: @escaping () -> Void) {
+        beginDashboardOperation("sync", label: "检查本机数据库备份")
+        dashboardSyncStatus = "正在检查本机数据库备份…"
         runOrder(["backup-status"], failureStatus: "数据库备份状态检查失败", onFailure: {
             let message = businessFriendlyMessage(self.orderError, operation: "检查数据库备份")
             self.backupReminderStatus = message
             self.showBackupReminder = true
+            self.finishDashboardOperation("sync")
+            self.dashboardSyncStatus = "⚠️ \(message)"
             completion()
         }) { object in
             guard object["requires_user_attention"] as? Bool == true else {
+                self.finishDashboardOperation("sync")
+                self.dashboardSyncStatus = "✅ 本机数据库备份状态已检查"
                 completion()
                 return
             }
             self.backupReminderStatus = "今日尚无成功的本机数据库备份，正在自动备份…"
+            self.finishDashboardOperation("sync")
+            self.dashboardSyncStatus = "✅ 今日尚无成功的本机数据库备份，准备自动备份"
+            self.beginDashboardOperation("sync", label: "自动数据库备份")
+            self.dashboardSyncStatus = "正在自动备份…"
             self.runOrder(["backup-now"], failureStatus: "数据库备份失败", onFailure: {
                 let message = businessFriendlyMessage(self.orderError, operation: "自动数据库备份")
                 self.backupReminderStatus = message
                 self.showBackupReminder = true
+                self.finishDashboardOperation("sync")
+                self.dashboardSyncStatus = "⚠️ \(message)"
                 completion()
             }) { object in
                 let path = object["path"] as? String ?? self.databaseBackupRoot
                 self.backupReminderStatus = "✅ 今日数据库备份已完成：\(path)"
+                self.finishDashboardOperation("sync")
+                self.dashboardSyncStatus = "✅ 今日数据库备份已完成"
                 completion()
             }
         }
@@ -2576,6 +2854,7 @@ final class AppModel: ObservableObject {
     }
 
     func syncDashboardAimes(force: Bool, scanServerAfter: Bool = false) {
+        guard !orderRunning else { return }
         logUserAction(force ? "点击再次获取 AIMES" : "触发 AIMES 后台获取", details: ["force": force])
         beginDashboardOperation("aimes", label: "获取 AIMES")
         dashboardAimesStatus = force ? "正在获取 AIMES…" : "正在检查今日 AIMES 获取记录…"
@@ -2611,26 +2890,24 @@ final class AppModel: ObservableObject {
             let warningCount = (aimes["warning_count"] as? NSNumber)?.intValue
                 ?? ((object["aimes_warnings"] as? [[String: Any]])?.count ?? 0)
             let error = aimes["error"] as? String ?? ""
+            self.applyDashboardOperationTrace(object)
             if succeeded && changed {
                 self.applyDashboardObject(object)
             }
-            if warningCount > 0 {
-                self.dashboardAimesStatus = "⚠️ 获取 AIMES 数据成功，发现 \(warningCount) 条销售单格式异常，已跳过且未写入数据库"
-            } else if issueCount > 0 {
-                self.dashboardAimesStatus = "⚠️ 获取 AIMES 数据成功，有 \(issueCount) 条工厂单需要人工确认"
-            } else if succeeded && changed {
-                self.dashboardAimesStatus = "✅ 获取 AIMES 数据成功，已更新最近 50 条（\(count) 条）"
-            } else if skipped {
-                self.dashboardAimesStatus = "✅ 今天已成功获取过 AIMES，本次略过"
-            } else if succeeded && attempted {
-                self.dashboardAimesStatus = "✅ 获取 AIMES 数据成功，最近 50 条无变化（\(count) 条）"
-            } else {
-                let message = businessFriendlyMessage(error, operation: "获取 AIMES 数据")
-                if attempted && !succeeded {
-                    self.aimesFailureAlert = message
-                }
-                self.dashboardAimesStatus = "⚠️ 尝试获取 AIMES 数据失败：\(message)"
+            let statusUpdate = dashboardAimesStatusUpdate(
+                attempted: attempted,
+                succeeded: succeeded,
+                skippedToday: skipped,
+                changed: changed,
+                count: count,
+                issueCount: issueCount,
+                warningCount: warningCount,
+                error: error
+            )
+            if !statusUpdate.failureAlert.isEmpty {
+                self.aimesFailureAlert = statusUpdate.failureAlert
             }
+            self.dashboardAimesStatus = statusUpdate.status
             self.dashboardSyncStatus = self.dashboardAimesStatus
             if scanServerAfter { self.scanDashboardServer(background: true) }
         }
@@ -4596,7 +4873,11 @@ final class AppModel: ObservableObject {
         )
     }
 
-    private func consumeOrderLogChunk(_ chunk: String) {
+    private func appendDashboardProgress(_ source: String, message: String) {
+        dashboardOperationProgress[source, default: []].append(message)
+    }
+
+    func consumeOrderLogChunk(_ chunk: String) {
         orderStderrBuffer += chunk
         let parts = orderStderrBuffer.components(separatedBy: "\n")
         orderStderrBuffer = parts.last ?? ""
@@ -4608,9 +4889,40 @@ final class AppModel: ObservableObject {
                 orderRawErrors += line + "\n"
                 continue
             }
-            if orderRunning && dashboardOperationStartedAt["server"] != nil {
-                dashboardServerStatus = "正在处理：\(message)"
-                dashboardSyncStatus = dashboardServerStatus
+            let source: String? = {
+                guard orderRunning else { return nil }
+                if dashboardOperationStartedAt["aimes"] != nil { return "aimes" }
+                if dashboardOperationStartedAt["server"] != nil { return "server" }
+                return nil
+            }()
+            if let source {
+                appendDashboardProgress(source, message: message)
+                if let stage = event["stage"] as? String,
+                   let duration = (event["duration_seconds"] as? NSNumber)?.doubleValue {
+                    recordDashboardStageCompletion(
+                        source,
+                        stage: stage,
+                        label: event["stage_label"] as? String ?? stage,
+                        duration: duration,
+                        time: dashboardClockTime()
+                    )
+                    // The stage has completed, so do not leave its previous
+                    // progress text as the current operation until the next
+                    // progress event arrives.
+                    if source == "aimes" {
+                        dashboardAimesStatus = "正在处理 AIMES…"
+                        dashboardSyncStatus = dashboardAimesStatus
+                    } else {
+                        dashboardServerStatus = "正在处理 Server…"
+                        dashboardSyncStatus = dashboardServerStatus
+                    }
+                } else if source == "aimes" {
+                    dashboardAimesStatus = dashboardInventoryProgressText(message)
+                    dashboardSyncStatus = dashboardAimesStatus
+                } else {
+                    dashboardServerStatus = "正在处理：" + message
+                    dashboardSyncStatus = dashboardServerStatus
+                }
             }
             if let updated = updatingLatestRunningStep(orderSteps, detail: message) {
                 orderSteps = updated

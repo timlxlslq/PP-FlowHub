@@ -1,5 +1,7 @@
 # 订单看板界面与操作原型规格
 
+> **历史原型（2026-09）**：本文是待审核的交互设计参考，不是当前实现、当前待办或用户授权。当前入口和业务边界以 [系统架构](architecture/system-architecture.md)、[业务规则](business-rules.md) 和 [发布流程](release-testing.md) 为准。
+
 状态：待用户审核，尚未进入实现。
 
 本文件只规定界面、信息层级和操作流程，不包含 Swift、Python、WeCom 或 CNC 实现方案。

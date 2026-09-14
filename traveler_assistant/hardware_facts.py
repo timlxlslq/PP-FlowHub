@@ -7,6 +7,31 @@ import math
 from pathlib import Path
 
 
+# These Server report SKUs count individual runners; inventory counts pairs.
+SERVER_PIECE_RAIL_SKUS = frozenset({"M1094", "M1095", "M1096", "M1097"})
+
+
+def server_hardware_quantity(product_code, quantity, unit, *, factory_order='', name=''):
+    """Convert raw Server counts once, before creating canonical hardware facts.
+
+    Never call on database rows: existing H/L-Rail pair folding and manual
+    hardware already use their own quantity basis and must remain untouched.
+    """
+    quantity = float(quantity or 0)
+    if str(product_code).strip().upper() not in SERVER_PIECE_RAIL_SKUS:
+        return {"quantity": quantity, "unit": unit}
+    if not math.isfinite(quantity) or quantity < 0 or quantity % 2 != 0:
+        from .core import RuleError
+        raise RuleError(
+            'server_rail_pair_quantity_invalid',
+            f"工厂单 {factory_order} 的 {name}（SKU {product_code}）报表数量为 {quantity:g} 个，"
+            "必须为非负偶数才能按一对换算；请核对报表后重新预览，暂未写入。",
+            factory_order=factory_order, product_code=product_code,
+            name=name, source_quantity=quantity,
+        )
+    return {"quantity": quantity / 2, "unit": "对"}
+
+
 def assert_source_isolation(database, sources, *, test_mode=False):
     """测试来源只能写入独立数据库，不能污染正式业务库。"""
     production = Path.home() / 'Documents/pp-flowhub/data/workflow.sqlite3'

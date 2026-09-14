@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 
 OPERATION_LOG_ENV = "WORKFLOW_OPERATION_LOG"
@@ -33,6 +34,7 @@ _SENSITIVE_KEY_PARTS = (
     "input_value",
 )
 _SENSITIVE_TEXT_RE = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|cookie)\s*[:=]\s*[^\s,;]+")
+_URL_RE = re.compile(r"(?i)https?://[^\s\"'<>]+")
 _SQL_WRITE_RE = re.compile(r"^\s*(insert(?:\s+or\s+\w+)?\s+into|update|delete\s+from|replace\s+into)\s+([\"`\[]?\w+[\"`\]]?)", re.IGNORECASE)
 
 
@@ -41,8 +43,46 @@ def _is_sensitive_key(key: str) -> bool:
     return any(part in lowered for part in _SENSITIVE_KEY_PARTS)
 
 
-def _redact_text(value: str) -> str:
+def _redact_url(match: re.Match[str]) -> str:
+    raw = match.group(0)
+    trailing = ""
+    while raw and raw[-1] in ".,;:!?)]}":
+        trailing = raw[-1] + trailing
+        raw = raw[:-1]
+    try:
+        parsed = urlsplit(raw)
+        safe = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    except ValueError:
+        return "[URL_REDACTED]"
+    return (safe or "[URL_REDACTED]") + trailing
+
+
+def _secret_variants(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    text = str(value)
+    if not text:
+        return set()
+    variants = {text}
+    for ensure_ascii in (False, True):
+        encoded = json.dumps(text, ensure_ascii=ensure_ascii)
+        if len(encoded) >= 2:
+            variants.add(encoded[1:-1])
+    return {item for item in variants if item}
+
+
+def _redact_text(value: str, sensitive_values: tuple[str, ...] = ()) -> str:
+    # Replace known credentials before removing URL query/fragment values.  The
+    # JSON-escaped variants cover errors copied from a serialized Playwright
+    # request or exception object.
+    for secret in sorted(
+        {variant for value in sensitive_values for variant in _secret_variants(value)},
+        key=len,
+        reverse=True,
+    ):
+        value = value.replace(secret, "[REDACTED]")
     value = _SENSITIVE_TEXT_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", value)
+    value = _URL_RE.sub(_redact_url, value)
     # Home paths are useful for diagnosing which file was touched, but the
     # account name is not needed in a persistent audit record.
     home = str(Path.home())
@@ -51,19 +91,22 @@ def _redact_text(value: str) -> str:
     return value
 
 
-def redact(value: Any, key: str | None = None) -> Any:
+def redact(value: Any, key: str | None = None, *, sensitive_values: tuple[str, ...] = ()) -> Any:
     """Keep audit context useful while preventing secrets and raw inputs."""
     if key is not None and _is_sensitive_key(key):
         return "[REDACTED]"
     if isinstance(value, dict):
-        return {str(name): redact(item, str(name)) for name, item in value.items()}
+        return {
+            str(name): redact(item, str(name), sensitive_values=sensitive_values)
+            for name, item in value.items()
+        }
     if isinstance(value, (list, tuple)):
-        return [redact(item) for item in value]
+        return [redact(item, sensitive_values=sensitive_values) for item in value]
     if isinstance(value, str):
-        return _redact_text(value)
+        return _redact_text(value, sensitive_values)
     if value is None or isinstance(value, (bool, int, float)):
         return value
-    return _redact_text(str(value))
+    return _redact_text(str(value), sensitive_values)
 
 
 def operation_log_enabled_from_environment() -> bool:
@@ -81,6 +124,7 @@ def write_operation_log(
     enabled: bool = True,
     session_id: str | None = None,
     operation_id: str | None = None,
+    sensitive_values: tuple[str, ...] = (),
 ) -> None:
     """Append one JSON object to the shared, process-safe audit log.
 
@@ -94,10 +138,10 @@ def write_operation_log(
         "event": event,
         "actor": actor,
         "component": component,
-        "message": redact(message),
+        "message": redact(message, sensitive_values=sensitive_values),
         "session_id": session_id or os.environ.get(OPERATION_SESSION_ENV, ""),
         "operation_id": operation_id or os.environ.get(OPERATION_ID_ENV, ""),
-        "details": redact(details or {}),
+        "details": redact(details or {}, sensitive_values=sensitive_values),
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -154,7 +198,7 @@ def configure_operation_log(config: Any) -> OperationLogger:
     return logger
 
 
-def log_progress_payload(payload: dict[str, Any]) -> None:
+def log_progress_payload(payload: dict[str, Any], *, sensitive_values: tuple[str, ...] = ()) -> None:
     """Persist a Playwright progress payload without echoing it a second time."""
     message = payload.get("message")
     if not isinstance(message, str) or not message:
@@ -170,6 +214,30 @@ def log_progress_payload(payload: dict[str, Any]) -> None:
         component="playwright",
         details=details,
         enabled=operation_log_enabled_from_environment(),
+        sensitive_values=sensitive_values,
+    )
+
+
+def log_aimes_failure(
+    *,
+    error: str,
+    code: str,
+    stage: str = "",
+    enabled: bool = True,
+    sensitive_values: tuple[str, ...] = (),
+) -> None:
+    """Record a bounded, redacted AIMES lookup failure when logging is enabled."""
+    path_text = os.environ.get(OPERATION_LOG_ENV, "").strip()
+    if not path_text:
+        return
+    write_operation_log(
+        Path(path_text),
+        "backend.aimes.failed",
+        "AIMES 数据获取失败",
+        component="aimes",
+        details={"code": code, "error": error, "stage": stage},
+        enabled=enabled and operation_log_enabled_from_environment(),
+        sensitive_values=sensitive_values,
     )
 
 

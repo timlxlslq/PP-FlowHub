@@ -32,6 +32,9 @@ from traveler_assistant.order_index import (
     _merge_database_factory_candidates,
     _orders_requiring_server_scan,
     _optimization_artifacts,
+    _memory_factory_selection,
+    install_shared_workflow_connection,
+    clear_shared_workflow_connection,
     _partition_aimes_rows,
     _record_generated_material_baseline,
     _reconcile_temporary_order_projections,
@@ -3123,6 +3126,20 @@ class OrderIndexTests(unittest.TestCase):
         self.assertIn("FittingslistPC123.xlsx", report)
         self.assertIn("重新扫描 Server", report)
 
+    def test_business_aimes_message_uses_explicit_error_type_before_message_words(self):
+        table_error = RuleError(
+            "aimes_table_schema",
+            "AIMES 工厂订单表缺少必要列；上一阶段登录 AIMES 完成",
+        )
+        credentials_error = RuleError("aimes_credentials", "账号或密码错误")
+
+        self.assertIn("缺少必要列", _business_aimes_message(table_error))
+        self.assertNotIn("用户名和密码", _business_aimes_message(table_error))
+        self.assertIn("用户名和密码", _business_aimes_message(credentials_error))
+
+        not_ready_error = RuleError("aimes_table_not_ready", "AIMES_TABLE_NOT_READY：表头")
+        self.assertIn("尚未加载完成", _business_aimes_message(not_ready_error))
+
     def test_old_status_is_migrated_and_validation_reason_is_persisted(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "order-index.sqlite3"
@@ -4193,6 +4210,198 @@ class OrderIndexTests(unittest.TestCase):
                 self.assertEqual(store.connection.execute("select count(*) from hardware_items").fetchone()[0], 0)
             finally:
                 store.close()
+
+    def test_preview_scopes_optimization_artifacts_to_selected_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state")
+            config.prepare_storage()
+            folder = root / "server" / "PP0062"
+            other_folder = root / "server" / "OTHER"
+            folder.mkdir(parents=True)
+            other_folder.mkdir(parents=True)
+            preview_path = root / "preview.sqlite3"
+            preview = OrderIndexStore(preview_path)
+            preview.upsert_order("PP0062", source_folder=str(folder), validation_status="正常")
+            preview.upsert_factory("F2609060245", order_id="PP0062", source_folder=str(folder))
+            preview.upsert_order("OTHER", source_folder=str(other_folder), validation_status="正常")
+            preview.upsert_factory("FOTHER", order_id="OTHER", source_folder=str(other_folder))
+            artifact_columns = "source_path, order_id, factory_order, file_modified_at, file_created_at, completed_at, copied_at, first_seen_at, last_seen_at, size"
+            preview.connection.execute(
+                f"insert into optimization_artifacts({artifact_columns}) values(?,?,?,?,?,?,?,?,?,?)",
+                (str(folder / "nesting_result.xml"), "PP0062", "F2609060245", 10.0, 9.0,
+                 "2026-09-06T10:00:00", "", "2026-09-06T11:00:00", "2026-09-06T11:00:00", 100),
+            )
+            preview.connection.execute(
+                f"insert into optimization_artifacts({artifact_columns}) values(?,?,?,?,?,?,?,?,?,?)",
+                (str(other_folder / "nesting_result.xml"), "OTHER", "FOTHER", 10.0, 9.0,
+                 "2026-09-06T10:00:00", "", "2026-09-06T11:00:00", "2026-09-06T11:00:00", 100),
+            )
+            preview.commit()
+            preview.close()
+
+            payload = _server_preview_payload(
+                config, preview_path, "", [folder], include_hardware=False
+            )
+            self.assertEqual(
+                [(row["order_id"], row["factory_order"])
+                 for row in payload["write_records"]["optimization_artifacts"]],
+                [("PP0062", "F2609060245")],
+            )
+
+    def test_business_confirmation_persists_optimization_evidence_for_list_index(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state")
+            config.prepare_storage()
+            folder = root / "server" / "PP0062"
+            folder.mkdir(parents=True)
+            preview_path = root / "preview.sqlite3"
+            preview = OrderIndexStore(preview_path)
+            preview.upsert_order("PP0062", source_folder=str(folder), validation_status="正常")
+            preview.upsert_factory(
+                "F2609060245", order_id="PP0062", source_folder=str(folder),
+                ownership_status="已确认", optimized=True,
+            )
+            preview.connection.execute(
+                """insert into optimization_artifacts(
+                    source_path, order_id, factory_order, file_modified_at,
+                    file_created_at, completed_at, copied_at, first_seen_at,
+                    last_seen_at, size
+                ) values(?,?,?,?,?,?,?,?,?,?)""",
+                (str(folder / "nesting_result.xml"), "PP0062", "F2609060245", 10.0, 9.0,
+                 "2026-09-06T10:00:00", "", "2026-09-06T11:00:00", "2026-09-06T11:00:00", 100),
+            )
+            preview.commit()
+            preview.close()
+
+            payload = _server_preview_payload(
+                config, preview_path, "", [folder], include_hardware=False
+            )
+            self.assertTrue(payload["has_business_changes"])
+            confirmed = confirm_server_material_preview_memory(
+                config, payload, confirm_write=True
+            )
+            self.assertEqual(confirmed["optimization_artifact_count"], 1)
+            summary = list_order_index(config)["orders"]
+            self.assertEqual(summary[0]["stage"], "已优化")
+            store = OrderIndexStore(config.workflow_database)
+            try:
+                self.assertEqual(
+                    store.connection.execute(
+                        "select order_id, factory_order, completed_at from optimization_artifacts"
+                    ).fetchall(),
+                    [("PP0062", "F2609060245", "2026-09-06T10:00:00")],
+                )
+            finally:
+                store.close()
+
+    def test_memory_confirmation_upserts_selected_optimization_evidence_idempotently(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state")
+            config.prepare_storage()
+            folder = root / "server" / "PP0062"
+            folder.mkdir(parents=True)
+            source_path = str(folder / "nesting_result.xml")
+            artifact_columns = "source_path, order_id, factory_order, file_modified_at, file_created_at, completed_at, copied_at, first_seen_at, last_seen_at, size"
+
+            current = OrderIndexStore(config.workflow_database)
+            current.upsert_order("PP0062", source_folder=str(folder), validation_status="正常")
+            current.upsert_factory(
+                "F2609060245", order_id="PP0062", source_folder=str(folder),
+                ownership_status="已确认", optimized=True,
+            )
+            current.upsert_order("OTHER", validation_status="正常")
+            current.upsert_factory("FOTHER", order_id="OTHER", ownership_status="已确认", optimized=True)
+            current.connection.execute(
+                f"insert into optimization_artifacts(id,{artifact_columns}) values(?,?,?,?,?,?,?,?,?,?,?)",
+                (11, source_path, "PP0062", "F2609060245", 10.0, 9.0,
+                 "2026-09-06T10:00:00", "", "2026-09-06T11:00:00", "2026-09-06T11:00:00", 100),
+            )
+            current.connection.execute(
+                f"insert into optimization_artifacts(id,{artifact_columns}) values(?,?,?,?,?,?,?,?,?,?,?)",
+                (12, "/other/nesting_result.xml", "OTHER", "FOTHER", 10.0, 9.0,
+                 "2026-09-06T10:00:00", "", "2026-09-06T11:00:00", "2026-09-06T11:00:00", 100),
+            )
+            current.commit()
+            current.close()
+
+            payload = {
+                "source_folders": [str(folder)],
+                "orders": [{
+                    "order_id": "PP0062",
+                    "validation_status": "正常",
+                    "validation_message": "",
+                    "material_changes": [],
+                    "factories": [],
+                    "hardware_changes": [],
+                }],
+                "has_business_changes": False,
+                "write_records": {
+                    "optimization_artifacts": [
+                        {"id": 12, "source_path": source_path, "order_id": "PP0062", "factory_order": "F2609060245",
+                         "file_modified_at": 10.0, "file_created_at": 9.0, "completed_at": "2099-01-01T00:00:00",
+                         "copied_at": "", "first_seen_at": "2099-01-01T00:00:00", "last_seen_at": "2026-09-06T10:00:00", "size": 100},
+                        {"id": 13, "source_path": "/other/nesting_result.xml", "order_id": "OTHER", "factory_order": "FOTHER",
+                         "file_modified_at": 10.0, "file_created_at": 9.0, "completed_at": "2099-01-01T00:00:00",
+                         "copied_at": "", "first_seen_at": "2099-01-01T00:00:00", "last_seen_at": "2099-01-01T00:00:00", "size": 100},
+                    ],
+                },
+            }
+            self.assertEqual(_memory_factory_selection(payload), [])
+            first = confirm_server_material_preview_memory(config, payload, confirm_write=True)
+            second = confirm_server_material_preview_memory(config, payload, confirm_write=True)
+            self.assertTrue(first["server_write_skipped"])
+            self.assertEqual(first["optimization_artifact_count"], 1)
+            self.assertEqual(second["optimization_artifact_count"], 1)
+
+            store = OrderIndexStore(config.workflow_database)
+            try:
+                rows = store.connection.execute(
+                    "select id, order_id, factory_order, completed_at, first_seen_at, last_seen_at from optimization_artifacts order by id"
+                ).fetchall()
+                self.assertEqual(len(rows), 2)
+                self.assertEqual(rows[0][0], 11)
+                self.assertEqual(rows[0][1:5], (
+                    "PP0062", "F2609060245", "2026-09-06T10:00:00", "2026-09-06T11:00:00"
+                ))
+                self.assertEqual(rows[0][5], "2026-09-06T11:00:00")
+                self.assertEqual(rows[1][1], "OTHER")
+                self.assertEqual(list_order_index(config)["orders"][0]["stage"], "已优化")
+            finally:
+                store.close()
+
+    def test_memory_evidence_confirmation_rolls_back_on_baseline_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state")
+            config.prepare_storage()
+            folder = root / "server" / "PP0062"
+            folder.mkdir(parents=True)
+            payload = {
+                "source_folders": [str(folder)],
+                "orders": [{"order_id": "PP0062", "validation_status": "正常", "factories": [], "material_changes": [], "hardware_changes": []}],
+                "has_business_changes": False,
+                "write_records": {"optimization_artifacts": [{
+                    "source_path": str(folder / "nesting_result.xml"), "order_id": "PP0062", "factory_order": "F1",
+                    "file_modified_at": 1.0, "file_created_at": 1.0, "completed_at": "2026-01-01T00:00:00",
+                    "copied_at": "", "first_seen_at": "2026-01-01T00:00:00", "last_seen_at": "2026-01-01T00:00:00", "size": 1,
+                }]},
+            }
+            try:
+                shared = sqlite3.connect(config.workflow_database)
+                bootstrap = OrderIndexStore(config.workflow_database, connection=shared)
+                install_shared_workflow_connection(config.workflow_database, shared)
+                with patch.object(OrderIndexStore, "save_server_scan_xml_baseline", side_effect=RuntimeError("baseline failed")):
+                    with self.assertRaises(RuntimeError):
+                        confirm_server_material_preview_memory(config, payload, confirm_write=True)
+                self.assertFalse(shared.in_transaction)
+                self.assertEqual(shared.execute("select count(*) from optimization_artifacts").fetchone()[0], 0)
+            finally:
+                clear_shared_workflow_connection()
+                bootstrap.close()
+                shared.close()
 
     def test_server_scan_baseline_covers_both_server_roots(self):
         with tempfile.TemporaryDirectory() as temp:

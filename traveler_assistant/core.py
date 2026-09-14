@@ -24,7 +24,7 @@ from openpyxl import load_workbook
 
 from .report_read_context import cached_report
 from .streaming_process import run_with_progress
-from .operation_log import log_progress_payload
+from .operation_log import log_aimes_failure, log_progress_payload, redact
 from .database import (
     database_path,
     ensure_schema,
@@ -46,6 +46,51 @@ class RuleError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.context = context
+
+
+def _extract_aimes_failure(stderr: str) -> str:
+    """Extract the final helper error while ignoring JSON progress lines."""
+    plain_lines: list[str] = []
+    final_errors: list[str] = []
+    for raw_line in str(stderr or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            event = None
+        if isinstance(event, dict) and event.get("event") == "progress":
+            continue
+        match = re.search(r"AIMES 自动查询失败\s*[:：]\s*(.*)", line)
+        if match:
+            final_errors.append(match.group(1).strip())
+        else:
+            plain_lines.append(line)
+    if final_errors:
+        error = final_errors[-1]
+        # The helper appends the current page only as diagnostic context. The
+        # URL sanitizer also runs later, but dropping it here keeps the
+        # business error and its classification independent of page details.
+        error = re.split(r"[;；]\s*当前页面\s*[:：]", error, maxsplit=1)[0]
+        return error.strip()
+    return plain_lines[-1] if plain_lines else ""
+
+
+def _aimes_failure_code(error: str) -> str:
+    """Map a final AIMES error to a stable business-facing RuleError code."""
+    message = str(error or "").strip().casefold()
+    if any(marker in message for marker in ("账号或密码错误", "用户名或密码", "登录失败", "凭证无效")):
+        return "aimes_credentials"
+    if "aimes_table_not_ready" in message or "表格尚未加载完成" in message:
+        return "aimes_table_not_ready"
+    if "缺少必要列" in message or "表头" in message:
+        return "aimes_table_schema"
+    if "找不到工厂单名称" in message:
+        return "aimes_factory_name_missing"
+    if any(marker in message for marker in ("超时", "timeout", "timed out")):
+        return "aimes_timeout"
+    return "aimes_unavailable"
 
 
 def factory_name_order_prefix(factory_name: str) -> str:
@@ -291,8 +336,11 @@ def _run_aimes_lookup(
     env["NODE_PATH"] = str(config.playwright_node_modules)
     last_error = ""
     operation_timings: list[dict[str, object]] = []
+    last_progress_stage = ""
+    sensitive_values = tuple(value for value in (config.aimes_username, password) if value)
 
     def consume_progress(stderr: str, attempt_timings: list[dict[str, object]]) -> None:
+        nonlocal last_progress_stage
         for line in stderr.splitlines():
             try:
                 event = json.loads(line)
@@ -300,9 +348,12 @@ def _run_aimes_lookup(
                 continue
             if not isinstance(event, dict) or event.get("event") != "progress":
                 continue
-            log_progress_payload(event)
-            print(json.dumps(event, ensure_ascii=False), file=sys.stderr, flush=True)
+            safe_event = redact(event, sensitive_values=sensitive_values)
+            log_progress_payload(safe_event, sensitive_values=sensitive_values)
+            print(json.dumps(safe_event, ensure_ascii=False), file=sys.stderr, flush=True)
             stage = str(event.get("stage", "")).strip()
+            if stage:
+                last_progress_stage = stage
             duration = event.get("duration_seconds")
             if stage and isinstance(duration, (int, float)):
                 attempt_timings.append({
@@ -344,16 +395,30 @@ def _run_aimes_lookup(
             result["_aimes_retry_count"] = attempt
             return result
         except subprocess.CalledProcessError as exc:
-            last_error = (exc.stderr or "AIMES 查询失败").strip()[-1000:]
+            last_error = _extract_aimes_failure(exc.stderr or "")
+            if not last_error:
+                last_error = f"AIMES 查询进程退出（状态码 {exc.returncode}）"
             operation_timings.extend(attempt_timings)
             progress(
                 f"AIMES 第 {attempt + 1}/2 次尝试失败，准备重试",
                 retry_attempt=attempt + 1,
             )
-            if "账号或密码错误" in last_error:
-                raise RuleError("aimes_credentials", "AIMES 账号或密码错误", factory_orders=missing) from exc
-        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
-            last_error = str(exc)
+        except subprocess.TimeoutExpired:
+            last_error = "AIMES 查询进程超时"
+            operation_timings.extend(attempt_timings)
+            progress(
+                f"AIMES 第 {attempt + 1}/2 次尝试失败，准备重试",
+                retry_attempt=attempt + 1,
+            )
+        except OSError as exc:
+            last_error = f"AIMES 查询进程无法启动：{exc}"
+            operation_timings.extend(attempt_timings)
+            progress(
+                f"AIMES 第 {attempt + 1}/2 次尝试失败，准备重试",
+                retry_attempt=attempt + 1,
+            )
+        except json.JSONDecodeError:
+            last_error = "AIMES 返回结果不是有效 JSON"
             operation_timings.extend(attempt_timings)
             progress(
                 f"AIMES 第 {attempt + 1}/2 次尝试失败，准备重试",
@@ -361,7 +426,11 @@ def _run_aimes_lookup(
             )
         # Authenticated page/query failures are retried inside the same browser.
         # Relaunch only for a failed process/session, never for known data errors.
-        if any(marker in last_error for marker in ("AIMES_STEP_FAILED", "找不到工厂单名称", "缺少必要列")):
+        if _aimes_failure_code(last_error) in {
+            "aimes_credentials",
+            "aimes_table_schema",
+            "aimes_factory_name_missing",
+        } or "AIMES_STEP_FAILED" in last_error:
             break
         if time.monotonic() >= deadline:
             break
@@ -374,12 +443,24 @@ def _run_aimes_lookup(
                 "label": f"重试等待（第 {attempt + 1} 次后）",
                 "duration_seconds": round(time.perf_counter() - retry_started, 2),
             })
+    failure_code = _aimes_failure_code(last_error)
+    safe_error = str(redact(last_error, sensitive_values=sensitive_values)).strip()[-1000:]
+    if not safe_error:
+        safe_error = "AIMES 查询失败"
+    log_aimes_failure(
+        error=safe_error,
+        code=failure_code,
+        stage=last_progress_stage,
+        enabled=bool(config.operation_log_enabled),
+        sensitive_values=sensitive_values,
+    )
     raise RuleError(
-        "aimes_unavailable",
-        f"AIMES 查询失败：{last_error}",
+        failure_code,
+        f"AIMES 查询失败：{safe_error}",
         factory_orders=missing,
         aimes_timings=operation_timings,
         aimes_retry_count=attempt,
+        aimes_failure_stage=last_progress_stage,
     )
 
 

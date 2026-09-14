@@ -1,5 +1,12 @@
 # 项目交接记录
 
+## 2026-09-13 文档规则与当前源码边界整理
+
+- 本次范围：重构 `AGENTS.md` 导航，并同步整理 README、系统架构、静态上下文、ADR-001、业务/库存规则、发布验收、学习索引、历史原型/计划/迁移说明和 WeCom 学习状态。
+- 已确认的现行边界：订单中心与助手入口分开；有限 Agent 只做结构化路由；SQLite 保存业务事实；Traveler 按需导出；库存默认板材和封边、不比较跨系统单位；Server 轻量扫描只比较元数据/XML 证据，不解析 Excel；WeCom SmartSheet 仍是未接入 App 的读取实验。
+- 文档规则：新功能暂不新增缓存，保留现有缓存机制；ADR-001 不增加无价值兼容分支，但不得删除真实数据或现有迁移。旧教程、原型、计划和迁移步骤保留为历史参考，不构成当前待办、授权或已交付能力。
+- 本次仅修改 Markdown，未修改 Python、Swift、脚本、工具、配置或真实业务数据；未执行测试、构建、安装或外部系统操作。最终验证见本文末尾同日文档验证记录。
+
 ## 2026-09-09 Server 文件夹预览假等待与重复工作
 
 - 原因：08:18:41 发起的预览在 1.84 秒后返回 server_folder_invalid，但文件夹专用失败回调保留了“正在预览”状态；运行图标又依赖状态文字。
@@ -1645,3 +1652,10 @@ PYTHONPATH=".:vendor" .venv/bin/python3 -m unittest discover -s tests -v
 - 最终交付：291项 Python 测试通过（跳过1项）、macOS UI 回归、PP0067 工作簿端到端及 diff 检查通过；完成一次串行构建，授权安装脚本完成 Apple Development 签名、TeamIdentifier、helper、安装哈希验证。电脑控制工具禁止操作 Terminal，因此使用授权命令执行安装脚本，未绕过签名检查。
 - 安装版实机：已出货筛选下 PP0072 显示5/5，PP0057 显示2/2；安装包修改的 Python 文件与源码一致，独立签名验证通过。App及订单服务已退出。最终数据库完整性为ok，原库存单和关联表哈希仍与恢复前一致。
 - 验证边界：现场 Server 不可访问，未重跑真实 SMB 同步或新的库存操作；重复同步、路径切换、映射失败、空预览、事务失败和重开数据读取由隔离测试覆盖。
+
+## AGENTS 与学习文档导航重构的文档验证（2026-09-13）
+
+- 已完成：建立本次编辑前基线快照 `/tmp/pp-flowhub-agents-refactor-20260913-latest-before-edit/`；完整读取指定学习文档，核对当前入口、历史计划、业务边界和 `scripts/` 实际命令。
+- 已验证：`./scripts/pp-flowhub order --help` 与 `./scripts/pp-flowhub inventory --help` 均正常退出；使用项目 `.venv/bin/python` 对隔离的 `traveler_assistant/wecom_service.py` 执行 `compile(source, path, "exec")` 通过，未导入模块、未写入 pyc。
+- 已验证：AGENTS、README 和 `docs/**/*.md` 共 32 个 Markdown 文件的代码围栏外链接与锚点检查通过；生成索引、历史计划和历史证据按各自范围分类，未把历史内容当作当前授权或运行事实。
+- 已验证：文档 `git diff --check` 通过；本轮未运行测试、构建、安装、App、Server、AIMES 或库存业务。代码/脚本/测试/资源等 116 个基线文件中，唯一哈希变化项为基线中已存在的未跟踪文件 `traveler_assistant/wecom_service.py`，该同期变化不属于本任务，已保留；其余 115 项未变。
