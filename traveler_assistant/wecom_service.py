@@ -5,6 +5,7 @@ import json
 import subprocess
 import sqlite3
 import database
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -83,9 +84,10 @@ class WeComRepository:
     """企微模块专用的数据仓库，独立管理数据库连接与事务"""
 
     def __init__(self, state_dir: Path):
-        self.state_dir = state_dir
-        self.db_path = database.database_path(state_dir)
-        
+        # database_path() 用 Path 的 / 拼接文件名；字符串没有这个运算。
+        self.state_dir = Path(state_dir)
+        self.db_path = database.database_path(self.state_dir)
+
         # 初始化时确保数据库及所有表结构已创建
         database.ensure_schema(self.db_path)
 
@@ -96,55 +98,25 @@ class WeComRepository:
         conn.execute("PRAGMA foreign_keys = ON;")
         return conn
 
-    def save_outbound_record(self, record_data: dict[str, Any]) -> bool:
-        """保存企微读取到的出库单数据"""
-        doc_number = record_data.get("document_number", "").strip()
-        if not doc_number:
-            return False
-
-        # 使用 Context Manager 自动管理事务（提交/回滚）
-        with self._get_connection() as conn:
-            # 1. 写入出库主单
-            conn.execute(
-                """
-                INSERT INTO outbound_documents(
-                    document_number, document_type, order_id, factory_order, 
-                    status, source, source_path, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(document_number) DO UPDATE SET
-                    status = excluded.status,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    doc_number,
-                    record_data.get("document_type", ""),
-                    record_data.get("order_id", ""),
-                    record_data.get("factory_order", ""),
-                    record_data.get("status", "recorded"),
-                    "wecom",
-                    record_data.get("source_path", ""),
-                    database._now()  # 复用 database.py 的时间生成函数
-                )
-            )
-
-            # 2. 复用 database.py 现成的辅助函数，建立出库单与工厂订单的关联
-            database.ensure_outbound_document_factory_links(
-                connection=conn,
-                document_number=doc_number,
-                order_id=record_data.get("order_id", ""),
-                factory_value=record_data.get("factory_order", ""),
-                updated_at=database._now()
-            )
-
-        return True
-
-    def get_pending_documents(self) -> list[tuple]:
-        """查询企微模块需要的单据"""
-        with self._get_connection() as conn:
+    def get_pending_documents(self, order_id: str) -> list[tuple]:
+        """查询企微模块需要的订单状态"""
+        conn = self._get_connection()
+        try:
             cursor = conn.execute(
-                "SELECT document_number, order_id, status FROM outbound_documents WHERE source = 'wecom'"
+                "SELECT order_id, stage FROM orders WHERE order_id = ?",
+                (order_id,)
             )
             return cursor.fetchall()
+        except Exception as e:
+        # 2. 只有当 try 块报错时，才会进入这里
+          print(f"捕获到异常简报: {e}")
+    
+        # 如果想输出详细的报错堆栈信息（包含报错具体在哪一行）：
+          print("详细报错堆栈如下：")
+          traceback.print_exc()
+
+        finally:
+            conn.close()
 
 if __name__ == "__main__":
     url = "https://doc.weixin.qq.com/smartsheet/s3_AYUASwYkAGICNMtHJEcNaRtajUemi"
@@ -181,3 +153,8 @@ if __name__ == "__main__":
        order_list.append(order)
 
     print(order_list)
+
+    wecomrepository = WeComRepository(Path.home() / "Documents/pp-flowhub/data")
+    wecomrepository._get_connection()
+    orderlist1 = wecomrepository.get_pending_documents("PP0070")
+    print(orderlist1)
