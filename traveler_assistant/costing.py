@@ -12,7 +12,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 from .core import Config, RuleError
-from .database import ensure_schema
+from .database import connect_database, ensure_schema
 from .inventory import (
     HARDWARE_DISPLAY_NAMES,
     InventoryMappings,
@@ -99,13 +99,14 @@ def _line(
 
 def _aggregate_material_rows(rows: list[sqlite3.Row]) -> list[dict]:
     """Aggregate material and edge-banding facts at order scope only."""
-    grouped: dict[tuple[str, str, str, str], dict] = {}
+    grouped: dict[tuple[str, str, str, str, str], dict] = {}
     for row in rows:
         key = (
             str(row["material_type"] or ""),
             str(row["color"] or ""),
             str(row["thickness"] or ""),
             str(row["unit"] or ""),
+            str(row["product_code"] or ""),
         )
         item = grouped.setdefault(
             key,
@@ -114,6 +115,7 @@ def _aggregate_material_rows(rows: list[sqlite3.Row]) -> list[dict]:
                 "color": key[1],
                 "thickness": key[2],
                 "unit": key[3],
+                "product_code": key[4],
                 "quantity": 0.0,
             },
         )
@@ -194,15 +196,17 @@ def calculate_order_cost(config: Config, order_id: str) -> dict:
     if not normalized:
         raise RuleError("cost_order_missing", "计算成本需要订单号")
     ensure_schema(config.workflow_database)
-    connection = sqlite3.connect(config.workflow_database)
+    connection = connect_database(config.workflow_database)
     connection.row_factory = sqlite3.Row
     try:
         material_rows = connection.execute(
             """
-            select material_type, color, thickness, quantity, unit, source_path
-            from material_items
-            where order_id=?
-            order by material_type, color, thickness
+            select m.product_code, p.material_kind as material_type,
+                   p.material_color as color, p.material_thickness as thickness,
+                   m.quantity, p.unit, m.source_path
+            from material_items m join products p on p.code=m.product_code
+            where m.order_id=?
+            order by p.material_kind, p.material_color, p.material_thickness, m.product_code
             """,
             (normalized,),
         ).fetchall()
@@ -235,26 +239,28 @@ def calculate_order_cost(config: Config, order_id: str) -> dict:
     lines: list[dict] = []
     with ProductDatabase(bootstrap_product_database(config)) as catalog:
         for row in material_rows:
-            name = _material_name(row["material_type"], row["thickness"], row["color"])
             try:
-                product, source = _resolve_product(catalog, mappings, name=name, section="板材与封边")
+                product = catalog.require_code(row["product_code"])
+                source = "订单材料 SKU"
                 missing = "预计采购价缺失" if product.cost_price is None else ""
                 product_code = product.code
                 cost_price = product.cost_price
                 display_name = product.name
                 resolved_source = source
             except RuleError as exc:
-                product_code = ""
+                product_code = row["product_code"]
                 cost_price = None
                 missing = str(exc)
-                display_name = name
+                display_name = row["product_code"]
                 resolved_source = "未匹配"
             lines.append(_line(
                 category="封边条" if row["material_type"] == "edge" else "板材",
                 factory_order="材料汇总",
                 room_name="",
                 name=display_name,
-                spec=str(row["thickness"] or "") + ("mm" if row["thickness"] else ""),
+                spec=product.spec if not missing else (
+                    str(row["thickness"] or "") + ("mm" if row["thickness"] else "")
+                ),
                 quantity=_number(row["quantity"]),
                 unit=row["unit"] or ("m" if row["material_type"] == "edge" else "pcs"),
                 product_code=product_code,

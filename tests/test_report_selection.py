@@ -123,12 +123,13 @@ class ReportSelectionTests(unittest.TestCase):
             self.assertEqual(error.exception.code, 'fittings_selection_required')
 
     def test_confirmed_source_is_fixed_until_content_changes_and_keep_survives_restart(self):
-        from tests.test_order_workflow import make_materials
+        from tests.test_order_workflow import make_materials, make_product_catalog
         from traveler_assistant.order_index import confirm_server_material_preview_memory
         from traveler_assistant.hardware_source_decisions import load_source_decisions
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = Config(state_dir=root / 'state', source_root=root / 'source')
+            make_product_catalog(config.state_dir / 'inventory' / 'current-products.xlsx')
             config.prepare_storage()
             folder = config.source_root / 'PP9999'
             folder.mkdir(parents=True)
@@ -140,7 +141,7 @@ class ReportSelectionTests(unittest.TestCase):
             store.upsert_order('PP9999', source_folder=str(folder))
             store.upsert_factory('F100', order_id='PP9999', factory_name='PP9999-KITCHEN', ownership_status='已确认')
             store.commit(); store.close()
-            with patch('traveler_assistant.inventory.resolve_inventory_items', return_value={'missing': [], 'ignored': [], 'outbound': []}), patch('traveler_assistant.core._run_aimes_lookup', side_effect=AssertionError('unexpected network')):
+            with patch('traveler_assistant.core._run_aimes_lookup', side_effect=AssertionError('unexpected network')):
                 conflict = preview_server_changes(config, [folder])['hardware_source_selection']['conflicts'][0]
                 option = next(c for c in conflict['candidates'] if c['path'] == str(a.resolve()))
                 payload = preview_server_changes(config, [folder], hardware_source_choices={'F100': option['id']})['server_write_preview']

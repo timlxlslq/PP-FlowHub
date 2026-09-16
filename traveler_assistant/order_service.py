@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 from .core import Config
-from .database import database_path
+from .database import connect_database, database_path
 from .operation_log import OPERATION_ID_ENV, configure_operation_log
 from .order_index import (
     OrderIndexStore,
@@ -41,7 +41,7 @@ def _config() -> Config:
 def serve() -> int:
     config = _config()
     database = database_path(config.state_dir).resolve()
-    connection = sqlite3.connect(database)
+    connection = connect_database(database)
     # ``ensure_schema`` owns shared business tables, while OrderIndexStore
     # owns the order-index tables and their one-time column upgrades. Run that
     # bootstrap exactly once before exposing the connection to requests.

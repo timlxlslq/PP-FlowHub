@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import os
@@ -40,6 +41,7 @@ from .inventory import (
     InventoryMappings,
     ProductDatabase,
     bootstrap_product_database,
+    confirm_product_material_attributes,
     ignored_hardware_reason,
     parse_traveler,
     resolve_inventory_items,
@@ -51,7 +53,7 @@ from .fittings import is_fittings_report, select_latest_fittings
 from .report_read_context import cached_report, report_paths
 from .hardware_source_decisions import with_source_decisions
 from .operation_log import configure_operation_log
-from .database import ensure_schema
+from .database import connect_database, enable_foreign_keys, ensure_schema
 
 
 ORDER_FOLDER_RE = re.compile(r"^(PP\d{4}(?:-\d+)?|CS\d{3})$", re.IGNORECASE)
@@ -1912,8 +1914,9 @@ def persist_preview(config: Config, preview: OrderPreview) -> None:
     connection = config.workflow_connection
     owns_connection = connection is None
     if connection is None:
-        import sqlite3
-        connection = sqlite3.connect(config.workflow_database)
+        connection = connect_database(config.workflow_database)
+    else:
+        connection = enable_foreign_keys(connection)
     if not connection.in_transaction:
         connection.execute("begin")
     connection.execute("savepoint persist_order_preview")
@@ -1922,33 +1925,70 @@ def persist_preview(config: Config, preview: OrderPreview) -> None:
             "delete from material_items where order_id=? and source_type in ('aihouse','derived')",
             (preview.order_id.upper(),),
         )
+        material_source_fingerprint = _preview_material_source_fingerprint(
+            preview.materials_path
+        )
+        resolution_index = 0
         for item in preview.materials:
+            if float(item.quantity or 0) <= 0:
+                continue
+            current_resolution_index = resolution_index
+            resolution_index += 1
             name = _material_inventory_name(item.kind, item.thickness, item.color)
             if mappings.ignored_reason(name) is not None:
                 continue
+            product_code = resolved_product_code(resolution, current_resolution_index)
+            if not product_code:
+                raise RuleError("order_inventory_mapping_required", f"材料 {name} 缺少确认的商品 SKU")
+            confirm_product_material_attributes(
+                connection, product_code, item.kind, item.color, item.thickness
+            )
             connection.execute(
-                """insert or replace into material_items(
-                    order_id,material_type,color,thickness,quantity,unit,edge,
-                    source_type,source_path,source_fingerprint,updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
-                (preview.order_id.upper(), item.kind, item.color,
-                 str(item.thickness), float(item.quantity), "pcs", "", "aihouse",
-                 str(preview.materials_path), "", observed),
+                """insert into material_items(
+                    order_id,product_code,quantity,source_type,source_path,
+                    source_fingerprint,updated_at
+                ) values(?,?,?,?,?,?,?)
+                on conflict(order_id,product_code,source_type,source_path)
+                do update set quantity=material_items.quantity+excluded.quantity,
+                    source_fingerprint=excluded.source_fingerprint,
+                    updated_at=excluded.updated_at""",
+                (preview.order_id.upper(), product_code, float(item.quantity), "aihouse",
+                 str(preview.materials_path),
+                 _preview_material_fact_fingerprint(material_source_fingerprint, product_code),
+                 observed),
             )
         for color, quantity in preview.edge_banding.items():
+            if float(quantity or 0) <= 0:
+                continue
+            current_resolution_index = resolution_index
+            resolution_index += 1
             if mappings.ignored_reason(f"Edge banding--{color}") is not None:
                 continue
+            product_code = resolved_product_code(resolution, current_resolution_index)
+            if not product_code:
+                raise RuleError(
+                    "order_inventory_mapping_required",
+                    f"封边条 Edge banding--{color} 缺少确认的商品 SKU",
+                )
+            confirm_product_material_attributes(
+                connection, product_code, "edge", color, ""
+            )
             connection.execute(
-                """insert or replace into material_items(
-                    order_id,material_type,color,thickness,quantity,unit,edge,
-                    source_type,source_path,source_fingerprint,updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
-                (preview.order_id.upper(), "edge", color, "", float(quantity), "m", color,
-                 "aihouse", str(preview.materials_path), "", observed),
+                """insert into material_items(
+                    order_id,product_code,quantity,source_type,source_path,
+                    source_fingerprint,updated_at
+                ) values(?,?,?,?,?,?,?)
+                on conflict(order_id,product_code,source_type,source_path)
+                do update set quantity=material_items.quantity+excluded.quantity,
+                    source_fingerprint=excluded.source_fingerprint,
+                    updated_at=excluded.updated_at""",
+                (preview.order_id.upper(), product_code, float(quantity), "aihouse",
+                 str(preview.materials_path),
+                 _preview_material_fact_fingerprint(material_source_fingerprint, product_code),
+                 observed),
             )
         # A material-only or partial preview must not erase other factories.
         from .hardware_facts import replace_factory_hardware, server_hardware_quantity
-        resolution_index = len(preview.materials) + len(preview.edge_banding)
         for factory in preview.factories if preview.include_hardware else []:
             rows = []
             for item in factory.fittings:
@@ -1987,12 +2027,35 @@ def _material_inventory_name(kind: str, thickness: float, color: str = "") -> st
     return f"{float(thickness):g}mm--{color}"
 
 
+def _preview_material_source_fingerprint(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        digest.update(str(path).encode())
+    return digest.hexdigest()
+
+
+def _preview_material_fact_fingerprint(
+    source_fingerprint: str, product_code: str,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(str(source_fingerprint or "").encode())
+    digest.update(b"\x1f")
+    digest.update(str(product_code or "").strip().upper().encode())
+    return "v2:" + digest.hexdigest()
+
+
 def _preview_inventory_resolution_items(
     preview: OrderPreview,
 ) -> list[tuple[TravelerItem, str]]:
     items: list[tuple[TravelerItem, str]] = []
     row = 1
     for material in preview.materials:
+        if float(material.quantity or 0) <= 0:
+            continue
         items.append((
             TravelerItem(
                 row=row,
@@ -2005,6 +2068,8 @@ def _preview_inventory_resolution_items(
         ))
         row += 1
     for color, quantity in preview.edge_banding.items():
+        if float(quantity or 0) <= 0:
+            continue
         items.append((
             TravelerItem(row, "板材与封边", f"Edge banding--{color}", quantity, preview.order_id),
             "",
@@ -2844,10 +2909,8 @@ def _resolve_manual_hardware_factory(
     factory_name: str,
 ) -> tuple[str, str]:
     """Resolve the display name to the canonical factory-order identifier."""
-    import sqlite3
-
     requested = _text(factory_name)
-    connection = sqlite3.connect(config.workflow_database)
+    connection = connect_database(config.workflow_database)
     try:
         rows = connection.execute(
             """
@@ -2922,11 +2985,9 @@ def add_manual_hardware(
     if not config.storage_prepared:
         raise RuleError("database_not_prepared", "中央数据库尚未准备完成，不能写入人工五金")
 
-    import sqlite3
-
     order = order_id.upper()
     observed = datetime.now().astimezone().isoformat(timespec="seconds")
-    connection = sqlite3.connect(config.workflow_database)
+    connection = connect_database(config.workflow_database)
     try:
         mappings = InventoryMappings(config.workflow_database)
         if ignored_hardware_reason(
@@ -3362,6 +3423,8 @@ def main(
     parser.add_argument("--materials-file")
     parser.add_argument("--confirm-write", action="store_true")
     parser.add_argument("--include-hardware", choices=("true", "false"), default="true")
+    parser.add_argument("--reference-orders-json", default="")
+    parser.add_argument("--outbound-document", default="")
     parser.add_argument("--process-temporary", action="store_true")
     parser.add_argument("--refresh-aimes", action="store_true")
     parser.add_argument("--aimes-if-needed", action="store_true")
@@ -3537,7 +3600,11 @@ def main(
                 raise RuleError("invalid_arguments", "mark-temporary-manual 需要 --folder")
             from .order_index import mark_temporary_folder_manual
             try:
-                result = mark_temporary_folder_manual(config, args.folder)
+                result = mark_temporary_folder_manual(
+                    config, args.folder,
+                    reference_order_ids=json.loads(args.reference_orders_json) if args.reference_orders_json else None,
+                    outbound_document=args.outbound_document,
+                )
             except ValueError as exc:
                 raise RuleError("invalid_arguments", str(exc)) from exc
         elif args.command == "ignore-aimes":

@@ -39,9 +39,19 @@ def get_smartsheet_info(doc_url):
     )
 
 
-def get_records(doc_url, sheet_id, limit=100):
-    return _run_wecom_command(
-        [
+# 接口单次最多 1000 条，且要求 limit × 列数 < 10000。
+# 100 是每一页的条数，不是总上限；get_records 会翻页直到读完。
+_RECORDS_PAGE_LIMIT = 100
+
+
+def get_records(doc_url, sheet_id):
+    """拉取子表全部记录。外部接口必须分页，本函数把各页拼成一份结果。"""
+    all_records = []
+    cursor = None
+    last_page = {}
+
+    while True:
+        args = [
             "smartsheet",
             "records",
             "list",
@@ -52,9 +62,27 @@ def get_records(doc_url, sheet_id, limit=100):
             "--type",
             "records",
             "--limit",
-            str(limit),
+            str(_RECORDS_PAGE_LIMIT),
         ]
-    )
+        if cursor:
+            args.extend(["--cursor", cursor])
+
+        last_page = _run_wecom_command(args)
+        page_records = last_page.get("records") or []
+        all_records.extend(page_records)
+
+        # has_more 为假，或没有下一页游标，说明已经读完。
+        if not last_page.get("has_more"):
+            break
+        cursor = last_page.get("next_cursor")
+        if not cursor or not page_records:
+            break
+
+    result = dict(last_page)
+    result["records"] = all_records
+    result["has_more"] = False
+    result.pop("next_cursor", None)
+    return result
 
 def get_text(values, field_name):
     """安全提取 SmartSheet 文本字段"""
@@ -81,7 +109,7 @@ def get_text(values, field_name):
             return None
 
 class WeComRepository:
-    """企微模块专用的数据仓库，独立管理数据库连接与事务"""
+    """wecom模块专用的数据仓库，独立管理数据库连接与事务"""
 
     def __init__(self, state_dir: Path):
         # database_path() 用 Path 的 / 拼接文件名；字符串没有这个运算。
@@ -98,8 +126,8 @@ class WeComRepository:
         conn.execute("PRAGMA foreign_keys = ON;")
         return conn
 
-    def get_pending_documents(self, order_id: str) -> list[tuple]:
-        """查询企微模块需要的订单状态"""
+    def get_db_order_status(self, order_id: str) -> list[tuple]:
+        """查询数据库中的订单状态"""
         conn = self._get_connection()
         try:
             cursor = conn.execute(
@@ -118,13 +146,16 @@ class WeComRepository:
         finally:
             conn.close()
 
+    def update_wecom_order_status(self, order_id: str) -> list[tuple]:
+        """更新wecom中的订单状态"""
+
+
 if __name__ == "__main__":
     url = "https://doc.weixin.qq.com/smartsheet/s3_AYUASwYkAGICNMtHJEcNaRtajUemi"
 
     data = get_records(
         doc_url=url,
         sheet_id="q979lj",
-        limit=100,
     )
 
     records = data["records"]
@@ -132,6 +163,8 @@ if __name__ == "__main__":
     print("总记录数：", len(records))
 
     order_list = []
+    pp_no_seen_list = set()
+    pp_no_duplicates_list = set()
 
     for record in records:
        values = record.get("values")
@@ -144,17 +177,29 @@ if __name__ == "__main__":
        if not order_value:
           continue
 
+       pp_no = order_value[0]["text"]
+       pp_no = pp_no.upper()
+       if pp_no in pp_no_seen_list:
+          pp_no_duplicates_list.add(pp_no)
+       else:
+          pp_no_seen_list.add(pp_no)
+
        order = {
         "pp_no": order_value[0]["text"],
+        "record_id": record.get("record_id"),
         "order_status": get_text(values, "Order Status"),
         "pick_up_date": get_text(values, "Pick Up Date"),
         "note": get_text(values, "Note")
        }
        order_list.append(order)
 
-    print(order_list)
+    #print(order_list)
+    if pp_no_duplicates_list:
+        print(f"重复订单号：“ {pp_no_duplicates_list}")
 
+    """
     wecomrepository = WeComRepository(Path.home() / "Documents/pp-flowhub/data")
     wecomrepository._get_connection()
-    orderlist1 = wecomrepository.get_pending_documents("PP0070")
+    orderlist1 = wecomrepository.get_db_order_status("PP0070")
     print(orderlist1)
+    """

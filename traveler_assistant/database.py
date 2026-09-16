@@ -8,13 +8,36 @@ normalized facts, provenance and user corrections needed by the dashboard.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import shutil
 import sqlite3
-import database
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+
+def enable_foreign_keys(connection: sqlite3.Connection) -> sqlite3.Connection:
+    """Enable SQLite foreign-key enforcement before the first transaction.
+
+    SQLite silently ignores ``pragma foreign_keys=on`` inside a transaction.
+    Failing loudly here prevents a borrowed/shared connection from appearing
+    protected when its caller opened a transaction too early.
+    """
+    enabled = int(connection.execute("pragma foreign_keys").fetchone()[0])
+    if enabled:
+        return connection
+    if connection.in_transaction:
+        raise RuntimeError("必须在事务开始前启用 SQLite foreign_keys")
+    connection.execute("pragma foreign_keys=on")
+    if int(connection.execute("pragma foreign_keys").fetchone()[0]) != 1:
+        raise RuntimeError("无法启用 SQLite foreign_keys")
+    return connection
+
+
+def connect_database(path: Path, **kwargs: Any) -> sqlite3.Connection:
+    """Open an application SQLite connection with foreign keys enforced."""
+    return enable_foreign_keys(sqlite3.connect(path, **kwargs))
 
 
 def database_path(state_dir: Path) -> Path:
@@ -27,6 +50,176 @@ def _now() -> str:
 
 
 _OUTBOUND_FACTORY_SPLIT_RE = re.compile(r"[,，;；、|]+")
+_PRODUCT_KEY_RE = re.compile(r"[\s_-]+")
+_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+_PLYWOOD_NOMINAL_THICKNESS = {
+    "M0002": "5.4",
+    "M0003": "14.5",
+    "M0004": "18",
+}
+_SCHEMA_READY_MARKER = "ensure_schema_material_sku_v1"
+
+
+def _product_key(value: object) -> str:
+    return _PRODUCT_KEY_RE.sub("", str(value or "")).upper()
+
+
+def catalog_material_attributes(
+    category: object, name: object, spec: object, code: object = "",
+) -> tuple[str, str, str]:
+    """Derive catalog-owned workflow attributes without changing raw fields.
+
+    The plywood aliases are explicit workflow nominal sizes.  They deliberately
+    remain separate from a supplier specification such as 5.2 or 15 mm.
+    """
+    category_text = str(category or "").strip()
+    name_text = str(name or "").strip()
+    spec_text = str(spec or "").strip()
+    category_key = _product_key(category_text)
+    name_key = _product_key(name_text)
+    if "EDGEBAND" in category_key or "封边" in category_key:
+        kind = "edge"
+    elif "PLYWOOD" in category_key or "夹板" in category_key or "PLYWOOD" in name_key:
+        kind = "plywood"
+    elif "PANEL" in category_key or "板材" in category_key:
+        kind = "panel"
+    else:
+        return "", "", ""
+
+    if kind == "plywood":
+        thickness = _PLYWOOD_NOMINAL_THICKNESS.get(str(code or "").strip().upper(), "")
+        if not thickness:
+            numbers = _NUMBER_RE.findall(spec_text)
+            thickness = f"{float(numbers[0]):g}" if numbers else ""
+        return kind, "", thickness
+    if kind == "panel":
+        fractions = re.findall(r"(?<!\d)(\d+)\s*/\s*(\d+)(?!\d)", spec_text)
+        if fractions:
+            # Product specs write thickness first (for example ``3/4 Board``)
+            # and may contain later width/length fractions such as 110-1/4.
+            numerator, denominator = fractions[0]
+            thickness = f"{round(float(numerator) / float(denominator) * 25.4, 1):g}"
+        else:
+            numbers = [float(value) for value in _NUMBER_RE.findall(spec_text)]
+            plausible = [value for value in numbers if 0 < value <= 50]
+            thickness = f"{plausible[-1]:g}" if plausible else ""
+        return kind, name_text, thickness
+
+    color = re.sub(r"^\s*edge\s*banding\s*[-:–—]*\s*", "", name_text, flags=re.I)
+    color = re.sub(
+        r"\s+(?:abs\s+)?(?:edge\s+)?banding(?:\s*\d+(?:\.\d+)?\s*mm)?\s*$",
+        "", color, flags=re.I,
+    ).strip()
+    return kind, color or name_text, ""
+
+
+def _legacy_material_name(material_type: object, color: object, thickness: object) -> str:
+    kind = str(material_type or "").strip().casefold()
+    color_text = str(color or "").strip()
+    thickness_text = str(thickness or "").strip()
+    if kind == "edge":
+        return f"Edge banding--{color_text}"
+    if kind == "plywood":
+        return f"{float(thickness_text):g}mm--Plywood"
+    return f"{float(thickness_text):g}mm--{color_text}"
+
+
+def server_material_identity_key(source_path: object, product_code: object) -> str:
+    """Return the stable v3 identity for one source material SKU."""
+    payload = "\x1f".join((
+        str(source_path or "").strip().casefold(),
+        str(product_code or "").strip().upper(),
+    ))
+    return "v3:" + hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _has_product_foreign_key(connection: sqlite3.Connection, table: str) -> bool:
+    return any(
+        str(row[2]) == "products" and str(row[3]) == "product_code"
+        and str(row[4]) == "code" and str(row[6]).upper() == "RESTRICT"
+        for row in connection.execute(f"pragma foreign_key_list({table})").fetchall()
+    )
+
+
+def _resolve_legacy_material_code(
+    connection: sqlite3.Connection,
+    material_type: object,
+    color: object,
+    thickness: object,
+) -> tuple[str, list[str]]:
+    """Resolve one legacy material identity, returning candidates for diagnostics."""
+    try:
+        display_name = _legacy_material_name(material_type, color, thickness)
+    except (TypeError, ValueError):
+        return "", []
+
+    # Reuse the runtime's authoritative material matcher.  The small adapter
+    # keeps it on this migration transaction instead of opening a second,
+    # potentially locked connection or maintaining a subtly different set of
+    # plywood/panel/edge aliases here.
+    from .core import RuleError
+    from .inventory import InventoryMappings, Product, TravelerItem, match_item
+
+    class _MigrationCatalog:
+        @staticmethod
+        def _product(row: tuple) -> Product:
+            return Product(
+                category=str(row[0] or ""), code=str(row[1] or ""),
+                name=str(row[2] or ""), spec=str(row[3] or ""),
+                status=str(row[4] or ""), brand=str(row[5] or ""),
+                remark=str(row[6] or ""), unit=str(row[7] or ""),
+                cost_price=None if row[8] is None else float(row[8]),
+            )
+
+        def require_code(self, code: str) -> Product:
+            rows = connection.execute(
+                """select category,code,name,spec,status,brand,remark,unit,cost_price
+                   from products where normalized_code=?""",
+                (_product_key(code),),
+            ).fetchall()
+            if len(rows) != 1:
+                raise RuleError("product_conflict", f"商品编号 {code} 匹配到 {len(rows)} 条记录")
+            product = self._product(rows[0])
+            if product.status and product.status != "启用":
+                raise RuleError("product_disabled", f"商品已停用：{code} {product.name}")
+            return product
+
+        def find(self, *, category=None, name=None, contains=None, spec_thickness=None):
+            products = [
+                self._product(row) for row in connection.execute(
+                    """select category,code,name,spec,status,brand,remark,unit,cost_price
+                       from products where catalog_present=1 order by code"""
+                ).fetchall()
+            ]
+            if category:
+                products = [item for item in products if _product_key(item.category) == _product_key(category)]
+            if name:
+                products = [item for item in products if _product_key(item.name) == _product_key(name)]
+            if contains:
+                token = _product_key(contains)
+                products = [item for item in products if token in _product_key(item.name) or token in _product_key(item.remark)]
+            if spec_thickness is not None:
+                aliases = {14.5: 15.0, 5.4: 5.2, 8.0: 9.0}
+                requested = float(spec_thickness)
+                expected = (8.0, 9.0) if requested in {8.0, 9.0} else (aliases.get(requested, requested),)
+                products = [
+                    item for item in products
+                    if (numbers := _NUMBER_RE.findall(item.spec))
+                    and any(abs(float(numbers[0]) - value) < 0.6 for value in expected)
+                ]
+            return products
+
+    try:
+        matched = match_item(
+            _MigrationCatalog(),
+            InventoryMappings(Path("migration.sqlite3"), connection=connection),
+            TravelerItem(0, "板材与封边", display_name, 1),
+        )
+    except RuleError as exc:
+        candidates = [str(item.get("code", "")) for item in exc.context.get("candidates", [])]
+        return "", candidates
+    candidates = sorted({str(item.product_code).strip().upper() for item in matched})
+    return (candidates[0] if len(candidates) == 1 else ""), candidates
 
 
 def _outbound_factory_tokens(value: object) -> list[str]:
@@ -37,26 +230,16 @@ def _outbound_factory_tokens(value: object) -> list[str]:
     ]
 
 
-def ensure_outbound_document_factory_links(
+def _outbound_document_factory_candidates(
     connection: sqlite3.Connection,
     document_number: str,
     order_id: str,
     factory_value: str,
-    *,
-    updated_at: str | None = None,
-) -> int:
-    """Link one outbound document to its exact factory-order identities.
-
-    The header table keeps one row per inventory document.  This relation
-    table allows one document to cover multiple factory orders without
-    encoding a list into the single-valued legacy ``factory_order`` column.
-    An order-only value is linked only when the order has exactly one active
-    factory order; split orders must provide exact factory identities.
-    """
+) -> set[str]:
     document_number = str(document_number or "").strip()
     order_id = str(order_id or "").strip().upper()
     if not document_number or not order_id:
-        return 0
+        return set()
     # Production consumption never proves that a factory order was shipped,
     # including when startup backfills legacy document relationships.
     document = connection.execute(
@@ -64,11 +247,11 @@ def ensure_outbound_document_factory_links(
         (document_number,),
     ).fetchone()
     if document and document[0] == "production_materials":
-        return 0
+        return set()
     if connection.execute(
         "select 1 from sqlite_master where type='table' and name='outbound_document_factories'"
     ).fetchone() is None:
-        return 0
+        return set()
     # InventorySyncStore can also be exercised against the standalone
     # outbound ledger schema, where the order-index tables do not exist.  In
     # that case there is no factory identity to resolve; the header row is
@@ -76,8 +259,7 @@ def ensure_outbound_document_factory_links(
     if connection.execute(
         "select 1 from sqlite_master where type='table' and name='factory_orders'"
     ).fetchone() is None:
-        return 0
-    now = updated_at or _now()
+        return set()
     candidates: set[str] = set()
     for token in _outbound_factory_tokens(factory_value):
         rows = connection.execute(
@@ -114,6 +296,31 @@ def ensure_outbound_document_factory_links(
         )
         if len(active) == 1 and tokens.intersection(order_aliases):
             candidates.add(str(active[0][0]).strip())
+    return candidates
+
+
+def ensure_outbound_document_factory_links(
+    connection: sqlite3.Connection,
+    document_number: str,
+    order_id: str,
+    factory_value: str,
+    *,
+    updated_at: str | None = None,
+) -> int:
+    """Link one outbound document to its exact factory-order identities.
+
+    The header table keeps one row per inventory document.  This relation
+    table allows one document to cover multiple factory orders without
+    encoding a list into the single-valued legacy ``factory_order`` column.
+    An order-only value is linked only when the order has exactly one active
+    factory order; split orders must provide exact factory identities.
+    """
+    document_number = str(document_number or "").strip()
+    order_id = str(order_id or "").strip().upper()
+    candidates = _outbound_document_factory_candidates(
+        connection, document_number, order_id, factory_value
+    )
+    now = updated_at or _now()
     inserted = 0
     for factory_order in sorted(candidates):
         if connection.execute(
@@ -136,11 +343,87 @@ def ensure_outbound_document_factory_links(
     return inserted
 
 
+def _execute_schema_statements(
+    connection: sqlite3.Connection, script: str,
+) -> None:
+    """Execute a schema script without ``executescript``'s implicit commit.
+
+    Python's ``sqlite3.Connection.executescript`` commits an already-open
+    transaction before running the script.  Schema upgrades need their table
+    creation, column additions, data copy, and cleanup to roll back together,
+    so execute each complete statement inside the caller's transaction.
+    """
+    pending: list[str] = []
+    for line in script.splitlines():
+        pending.append(line)
+        statement = "\n".join(pending)
+        if not sqlite3.complete_statement(statement):
+            continue
+        if statement.strip():
+            connection.execute(statement)
+        pending = []
+    if "\n".join(pending).strip():
+        raise sqlite3.OperationalError("incomplete schema statement")
+
+
 def ensure_schema(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path)
+    connection = connect_database(path)
     try:
-        connection.executescript(
+        metadata_exists = connection.execute(
+            "select 1 from sqlite_master where type='table' and name='workflow_metadata'"
+        ).fetchone()
+        if metadata_exists and connection.execute(
+            "select 1 from workflow_metadata where key=? and value='ready'",
+            (_SCHEMA_READY_MARKER,),
+        ).fetchone():
+            # Normal reads must not take a write lock merely to re-check an
+            # already-current schema.  A legacy/grouped outbound document can
+            # still be inserted after initialization, however, so repair only
+            # documents that demonstrably lack their normalized factory links.
+            required_tables = {
+                str(row[0]) for row in connection.execute(
+                    """select name from sqlite_master
+                       where type='table' and name in (
+                           'outbound_documents','outbound_document_factories','factory_orders'
+                       )"""
+                ).fetchall()
+            }
+            pending_documents = []
+            if required_tables == {
+                "outbound_documents", "outbound_document_factories", "factory_orders",
+            }:
+                pending_documents = connection.execute(
+                    """select document_number,order_id,factory_order,updated_at
+                       from outbound_documents d
+                       where trim(factory_order)<>''
+                         and not exists (
+                             select 1 from outbound_document_factories f
+                             where f.document_number=d.document_number
+                         )"""
+                ).fetchall()
+                pending_documents = [
+                    row for row in pending_documents
+                    if _outbound_document_factory_candidates(
+                        connection, row[0], row[1], row[2]
+                    )
+                ]
+            if not pending_documents:
+                return
+            connection.execute("begin immediate")
+            for document_number, order_id, factory_value, updated_at in pending_documents:
+                ensure_outbound_document_factory_links(
+                    connection,
+                    document_number,
+                    order_id,
+                    factory_value,
+                    updated_at=updated_at or _now(),
+                )
+            connection.commit()
+            return
+        connection.execute("begin immediate")
+        _execute_schema_statements(
+            connection,
             """
             create table if not exists hardware_source_decisions(
                 factory_order text primary key,
@@ -187,20 +470,38 @@ def ensure_schema(path: Path) -> None:
                 created_at text not null,
                 updated_at text not null
             );
+            create table if not exists products(
+                category text not null default '',
+                code text primary key,
+                name text not null default '',
+                spec text not null default '',
+                status text not null default '',
+                brand text not null default '',
+                remark text not null default '',
+                unit text not null default '',
+                cost_price real,
+                normalized_code text not null default '',
+                normalized_name text not null default '',
+                normalized_spec text not null default '',
+                normalized_category text not null default '',
+                normalized_remark text not null default '',
+                material_kind text not null default '',
+                material_color text not null default '',
+                material_thickness text not null default '',
+                catalog_present integer not null default 1
+            );
             create table if not exists material_items(
                 id integer primary key,
                 order_id text not null default '',
-                material_type text not null default '',
-                color text not null default '',
-                thickness text not null default '',
+                product_code text not null check(trim(product_code) <> ''),
                 quantity real not null default 0,
-                unit text not null default '',
-                edge text not null default '',
                 source_type text not null default '',
                 source_path text not null default '',
                 source_fingerprint text not null default '',
                 updated_at text not null,
-                unique(order_id, material_type, color, thickness, unit, edge, source_type, source_path)
+                unique(order_id, product_code, source_type, source_path),
+                foreign key(product_code) references products(code)
+                    on update cascade on delete restrict
             );
             create index if not exists idx_material_items_order on material_items(order_id);
             create table if not exists manual_production_batches(
@@ -223,36 +524,29 @@ def ensure_schema(path: Path) -> None:
             create table if not exists manual_production_batch_materials(
                 batch_id integer not null,
                 order_id text not null,
-                material_type text not null default '',
-                color text not null default '',
-                thickness text not null default '',
-                edge text not null default '',
-                unit text not null default '',
+                product_code text not null check(trim(product_code) <> ''),
                 quantity real not null default 0,
-                primary key(batch_id, material_type, color, thickness, edge, unit),
-                foreign key(batch_id) references manual_production_batches(batch_id)
+                primary key(batch_id, product_code),
+                foreign key(batch_id) references manual_production_batches(batch_id),
+                foreign key(product_code) references products(code)
+                    on update cascade on delete restrict
             );
             create index if not exists idx_manual_production_factory
                 on manual_production_batch_factories(order_id, factory_order);
-            create index if not exists idx_manual_production_material
-                on manual_production_batch_materials(order_id, material_type, color, thickness, edge, unit);
             create table if not exists server_material_allocations(
                 id integer primary key,
-                source_material_id integer not null,
                 source_path text not null default '',
                 source_material_key text not null default '',
-                material_type text not null default '',
-                color text not null default '',
-                thickness text not null default '',
-                unit text not null default '',
-                edge text not null default '',
+                product_code text not null check(trim(product_code) <> ''),
                 source_quantity real not null default 0,
                 order_id text not null,
                 allocated_quantity real not null default 0,
                 source_fingerprint text not null default '',
                 created_at text not null,
                 updated_at text not null,
-                unique(source_path, source_material_key, order_id)
+                unique(source_path, source_material_key, order_id),
+                foreign key(product_code) references products(code)
+                    on update cascade on delete restrict
             );
             create index if not exists idx_server_material_allocations_source
                 on server_material_allocations(source_path, source_material_key);
@@ -266,7 +560,7 @@ def ensure_schema(path: Path) -> None:
                 order_id text not null default '',
                 factory_order text not null default '',
                 scope text not null default 'factory_order',
-                product_code text not null default '',
+                product_code text not null check(trim(product_code) <> ''),
                 source_code text not null default '',
                 name text not null default '',
                 spec text not null default '',
@@ -276,7 +570,9 @@ def ensure_schema(path: Path) -> None:
                 source_path text not null default '',
                 active integer not null default 1,
                 remarks text not null default '',
-                updated_at text not null
+                updated_at text not null,
+                foreign key(product_code) references products(code)
+                    on update cascade on delete restrict
             );
             create index if not exists idx_hardware_items_order on hardware_items(order_id, factory_order, active);
             create table if not exists outbound_documents(
@@ -348,7 +644,9 @@ def ensure_schema(path: Path) -> None:
                     (rule_type = 'mapping' and product_code is not null and trim(product_code) <> '')
                     or
                     (rule_type = 'ignore' and product_code is null)
-                )
+                ),
+                foreign key(product_code) references products(code)
+                    on update cascade on delete restrict
             );
             create index if not exists idx_inventory_rules_type
                 on inventory_resolution_rules(rule_type, normalized_name);
@@ -368,9 +666,54 @@ def ensure_schema(path: Path) -> None:
                 on outbound_scope_decisions(order_id, scope_type, factory_order);
             """
         )
+        product_columns = {
+            row[1] for row in connection.execute("pragma table_info(products)").fetchall()
+        }
+        added_product_material_columns = not {
+            "material_kind", "material_color", "material_thickness", "catalog_present"
+        }.issubset(product_columns)
+        for column, definition in (
+            ("category", "text not null default ''"),
+            ("name", "text not null default ''"),
+            ("spec", "text not null default ''"),
+            ("status", "text not null default ''"),
+            ("brand", "text not null default ''"),
+            ("remark", "text not null default ''"),
+            ("unit", "text not null default ''"),
+            ("cost_price", "real"),
+            ("normalized_code", "text not null default ''"),
+            ("normalized_name", "text not null default ''"),
+            ("normalized_spec", "text not null default ''"),
+            ("normalized_category", "text not null default ''"),
+            ("normalized_remark", "text not null default ''"),
+            ("material_kind", "text not null default ''"),
+            ("material_color", "text not null default ''"),
+            ("material_thickness", "text not null default ''"),
+            ("catalog_present", "integer not null default 1"),
+        ):
+            if column not in product_columns:
+                connection.execute(f"alter table products add column {column} {definition}")
         material_columns = {
             row[1] for row in connection.execute("pragma table_info(material_items)").fetchall()
         }
+        if added_product_material_columns or "product_code" not in material_columns:
+            product_rows = connection.execute(
+                "select code, category, name, spec, remark from products"
+            ).fetchall()
+            for code, category, name, spec, remark in product_rows:
+                kind, color, thickness = catalog_material_attributes(category, name, spec, code)
+                connection.execute(
+                    """update products
+                       set normalized_code=?, normalized_name=?, normalized_spec=?,
+                           normalized_category=?, normalized_remark=?,
+                           material_kind=?, material_color=?, material_thickness=?
+                       where code=?""",
+                    (
+                        _product_key(code), _product_key(name), _product_key(spec),
+                        _product_key(category), _product_key(remark),
+                        kind, color, thickness, code,
+                    ),
+                )
         hardware_columns = {
             row[1] for row in connection.execute("pragma table_info(hardware_items)").fetchall()
         }
@@ -387,7 +730,127 @@ def ensure_schema(path: Path) -> None:
             connection.execute(
                 "alter table inventory_resolution_rules add column display_name text not null default ''"
             )
-        if {"factory_order", "scope"}.intersection(material_columns):
+        if "product_code" not in material_columns:
+            legacy_rows = connection.execute(
+                "select * from material_items"
+            ).fetchall()
+            legacy_names = [
+                str(row[1]) for row in connection.execute("pragma table_info(material_items)")
+            ]
+            legacy_materials = [dict(zip(legacy_names, row)) for row in legacy_rows]
+            selected_materials = [
+                row for row in legacy_materials
+                if not str(row.get("factory_order", "") or "").strip()
+                and str(row.get("scope", "") or "").strip() in {"", "order"}
+            ]
+            material_codes: dict[tuple[str, str, str, str, str, str], str] = {}
+            product_business_attributes: dict[str, dict[str, list[str]]] = {}
+            unresolved: list[str] = []
+            for row in selected_materials:
+                code, candidates = _resolve_legacy_material_code(
+                    connection, row.get("material_type"), row.get("color"), row.get("thickness")
+                )
+                if not code:
+                    unresolved.append(
+                        f"id={row.get('id')} order={row.get('order_id')} "
+                        f"material={row.get('material_type')}/{row.get('color')}/{row.get('thickness')} "
+                        f"candidates={','.join(candidates) or '-'}"
+                    )
+                    continue
+                identity = (
+                    str(row.get("order_id", "")).upper(),
+                    str(row.get("material_type", "")), str(row.get("color", "")),
+                    str(row.get("thickness", "")), str(row.get("edge", "")),
+                    str(row.get("unit", "")),
+                )
+                previous = material_codes.get(identity)
+                if previous and previous != code:
+                    unresolved.append(
+                        f"order={identity[0]} material={'/'.join(identity[1:])} "
+                        f"conflicting_skus={previous},{code}"
+                    )
+                material_codes[identity] = code
+                attributes = product_business_attributes.setdefault(
+                    code, {"kind": [], "color": [], "thickness": []}
+                )
+                attributes["kind"].append(str(row.get("material_type", "")).strip().casefold())
+                if str(row.get("color", "") or "").strip():
+                    attributes["color"].append(str(row.get("color", "")).strip())
+                if str(row.get("thickness", "") or "").strip():
+                    attributes["thickness"].append(str(row.get("thickness", "")).strip())
+
+            production_columns = {
+                row[1] for row in connection.execute(
+                    "pragma table_info(manual_production_batch_materials)"
+                ).fetchall()
+            }
+            legacy_production: list[dict[str, Any]] = []
+            if production_columns and "product_code" not in production_columns:
+                production_names = [
+                    str(row[1]) for row in connection.execute(
+                        "pragma table_info(manual_production_batch_materials)"
+                    )
+                ]
+                legacy_production = [
+                    dict(zip(production_names, row))
+                    for row in connection.execute(
+                        "select * from manual_production_batch_materials"
+                    ).fetchall()
+                ]
+                for row in legacy_production:
+                    identity = (
+                        str(row.get("order_id", "")).upper(),
+                        str(row.get("material_type", "")), str(row.get("color", "")),
+                        str(row.get("thickness", "")), str(row.get("edge", "")),
+                        str(row.get("unit", "")),
+                    )
+                    code = material_codes.get(identity, "")
+                    if not code:
+                        code, candidates = _resolve_legacy_material_code(
+                            connection, row.get("material_type"), row.get("color"), row.get("thickness")
+                        )
+                        if not code:
+                            unresolved.append(
+                                f"production batch={row.get('batch_id')} order={row.get('order_id')} "
+                                f"material={row.get('material_type')}/{row.get('color')}/{row.get('thickness')} "
+                                f"candidates={','.join(candidates) or '-'}"
+                            )
+                    row["product_code"] = code
+            if unresolved:
+                raise ValueError(
+                    "旧材料无法唯一迁移到商品 SKU；数据库未修改：\n" + "\n".join(unresolved)
+                )
+
+            for code, values in sorted(product_business_attributes.items()):
+                kinds = {value for value in values["kind"] if value}
+                color_groups: dict[str, list[str]] = {}
+                for value in values["color"]:
+                    color_groups.setdefault(_product_key(value), []).append(value)
+                thicknesses = {
+                    f"{float(value):g}" for value in values["thickness"] if value
+                }
+                if len(kinds) != 1 or len(color_groups) > 1 or len(thicknesses) > 1:
+                    raise ValueError(
+                        f"商品 {code} 的历史材料属性冲突："
+                        f"type={sorted(kinds)} color={sorted(color_groups)} "
+                        f"thickness={sorted(thicknesses)}"
+                    )
+                kind = next(iter(kinds))
+                color = ""
+                if color_groups:
+                    variants = next(iter(color_groups.values()))
+                    counts: dict[str, int] = {}
+                    for value in variants:
+                        counts[value] = counts.get(value, 0) + 1
+                    color = sorted(counts, key=lambda value: (-counts[value], value.casefold()))[0]
+                thickness = next(iter(thicknesses), "")
+                connection.execute(
+                    """update products
+                       set material_kind=?, material_color=?, material_thickness=?
+                       where code=?""",
+                    (kind, color, thickness, code),
+                )
+
             connection.execute("drop index if exists idx_material_items_order")
             connection.execute("alter table material_items rename to material_items_legacy")
             connection.execute(
@@ -395,35 +858,376 @@ def ensure_schema(path: Path) -> None:
                 create table material_items(
                     id integer primary key,
                     order_id text not null default '',
-                    material_type text not null default '',
-                    color text not null default '',
-                    thickness text not null default '',
+                    product_code text not null check(trim(product_code) <> ''),
                     quantity real not null default 0,
-                    unit text not null default '',
-                    edge text not null default '',
                     source_type text not null default '',
                     source_path text not null default '',
                     source_fingerprint text not null default '',
                     updated_at text not null,
-                    unique(order_id, material_type, color, thickness, unit, edge, source_type, source_path)
+                    unique(order_id, product_code, source_type, source_path),
+                    foreign key(product_code) references products(code)
+                        on update cascade on delete restrict
                 )
                 """
             )
-            connection.execute(
-                """
-                insert or replace into material_items(
-                    id, order_id, material_type, color, thickness, quantity, unit, edge,
-                    source_type, source_path, source_fingerprint, updated_at
+            aggregated: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+            for row in selected_materials:
+                identity = (
+                    str(row.get("order_id", "")).upper(),
+                    str(row.get("material_type", "")), str(row.get("color", "")),
+                    str(row.get("thickness", "")), str(row.get("edge", "")),
+                    str(row.get("unit", "")),
                 )
-                select id, order_id, material_type, color, thickness, quantity, unit, edge,
-                       source_type, source_path, source_fingerprint, updated_at
-                from material_items_legacy
-                where trim(coalesce(factory_order, '')) = ''
-                  and trim(coalesce(scope, '')) in ('', 'order')
-                """
-            )
+                code = material_codes[identity]
+                key = (
+                    identity[0], code, str(row.get("source_type", "")),
+                    str(row.get("source_path", "")),
+                )
+                target = aggregated.setdefault(key, {
+                    "id": int(row.get("id", 0) or 0),
+                    "quantity": 0.0,
+                    "source_fingerprint": str(row.get("source_fingerprint", "") or ""),
+                    "updated_at": str(row.get("updated_at", "") or ""),
+                })
+                target["quantity"] += float(row.get("quantity", 0) or 0)
+                if int(row.get("id", 0) or 0) and (
+                    not target["id"] or int(row.get("id", 0)) < target["id"]
+                ):
+                    target["id"] = int(row["id"])
+                if str(row.get("updated_at", "") or "") >= target["updated_at"]:
+                    target["updated_at"] = str(row.get("updated_at", "") or "")
+                    target["source_fingerprint"] = str(row.get("source_fingerprint", "") or "")
+            for key, value in aggregated.items():
+                connection.execute(
+                    """insert into material_items(
+                           id, order_id, product_code, quantity, source_type, source_path,
+                           source_fingerprint, updated_at
+                       ) values(?,?,?,?,?,?,?,?)""",
+                    (value["id"] or None, key[0], key[1], value["quantity"], key[2], key[3],
+                     value["source_fingerprint"], value["updated_at"]),
+                )
             connection.execute("drop table material_items_legacy")
             connection.execute("create index idx_material_items_order on material_items(order_id)")
+            if production_columns and "product_code" not in production_columns:
+                connection.execute(
+                    "alter table manual_production_batch_materials rename to manual_production_batch_materials_legacy"
+                )
+                connection.execute(
+                    """create table manual_production_batch_materials(
+                           batch_id integer not null,
+                           order_id text not null,
+                           product_code text not null check(trim(product_code) <> ''),
+                           quantity real not null default 0,
+                           primary key(batch_id, product_code),
+                           foreign key(batch_id) references manual_production_batches(batch_id),
+                           foreign key(product_code) references products(code)
+                               on update cascade on delete restrict
+                       )"""
+                )
+                grouped_production: dict[tuple[int, str], dict[str, Any]] = {}
+                for row in legacy_production:
+                    key = (int(row["batch_id"]), str(row["product_code"]))
+                    if key in grouped_production:
+                        target = grouped_production[key]
+                        target["quantity"] = float(target.get("quantity", 0) or 0) + float(row.get("quantity", 0) or 0)
+                    else:
+                        grouped_production[key] = dict(row)
+                connection.executemany(
+                    """insert into manual_production_batch_materials(
+                           batch_id, order_id, product_code, quantity
+                       ) values(?,?,?,?)""",
+                    [(
+                        row["batch_id"], row["order_id"], row["product_code"],
+                        row.get("quantity", 0),
+                    ) for row in grouped_production.values()],
+                )
+                connection.execute("drop table manual_production_batch_materials_legacy")
+                connection.execute(
+                    "create index idx_manual_production_material on manual_production_batch_materials(order_id, product_code)"
+                )
+
+        production_material_columns = {
+            row[1] for row in connection.execute(
+                "pragma table_info(manual_production_batch_materials)"
+            ).fetchall()
+        }
+        if production_material_columns and (
+            production_material_columns != {"batch_id", "order_id", "product_code", "quantity"}
+            or not _has_product_foreign_key(connection, "manual_production_batch_materials")
+        ):
+            # A partial development database may already carry product_code
+            # together with the legacy descriptive columns.  Collapse it to
+            # the final SKU-only shape without changing batch quantities.
+            if "product_code" in production_material_columns:
+                rows = connection.execute(
+                    "select batch_id,order_id,product_code,quantity from manual_production_batch_materials"
+                ).fetchall()
+            else:
+                legacy_names = [
+                    str(row[1]) for row in connection.execute(
+                        "pragma table_info(manual_production_batch_materials)"
+                    )
+                ]
+                legacy_rows = [
+                    dict(zip(legacy_names, row))
+                    for row in connection.execute(
+                        "select * from manual_production_batch_materials"
+                    ).fetchall()
+                ]
+                unresolved_production: list[str] = []
+                rows = []
+                for row in legacy_rows:
+                    code, candidates = _resolve_legacy_material_code(
+                        connection,
+                        row.get("material_type"),
+                        row.get("color"),
+                        row.get("thickness"),
+                    )
+                    if not code:
+                        unresolved_production.append(
+                            f"batch={row.get('batch_id')} order={row.get('order_id')} "
+                            f"candidates={','.join(candidates) or '-'}"
+                        )
+                        continue
+                    rows.append((
+                        row.get("batch_id"), row.get("order_id"), code,
+                        row.get("quantity", 0),
+                    ))
+                if unresolved_production:
+                    raise ValueError(
+                        "旧生产材料无法唯一迁移到商品 SKU：\n"
+                        + "\n".join(unresolved_production)
+                    )
+            invalid = [str(row[2] or "") for row in rows if not connection.execute(
+                "select 1 from products where code=?", (str(row[2] or "").strip().upper(),)
+            ).fetchone()]
+            if invalid:
+                raise ValueError("生产材料包含不存在的商品 SKU：" + "、".join(sorted(set(invalid))))
+            connection.execute("drop index if exists idx_manual_production_material")
+            connection.execute(
+                "alter table manual_production_batch_materials rename to manual_production_batch_materials_legacy_shape"
+            )
+            connection.execute(
+                """create table manual_production_batch_materials(
+                       batch_id integer not null,
+                       order_id text not null,
+                       product_code text not null check(trim(product_code) <> ''),
+                       quantity real not null default 0,
+                       primary key(batch_id, product_code),
+                       foreign key(batch_id) references manual_production_batches(batch_id),
+                       foreign key(product_code) references products(code)
+                           on update cascade on delete restrict
+                   )"""
+            )
+            connection.executemany(
+                """insert into manual_production_batch_materials(
+                       batch_id,order_id,product_code,quantity
+                   ) values(?,?,?,?)
+                   on conflict(batch_id,product_code) do update set
+                       quantity=manual_production_batch_materials.quantity+excluded.quantity""",
+                [(row[0], row[1], str(row[2]).strip().upper(), row[3]) for row in rows],
+            )
+            connection.execute("drop table manual_production_batch_materials_legacy_shape")
+            connection.execute(
+                "create index idx_manual_production_material on manual_production_batch_materials(order_id,product_code)"
+            )
+
+        allocation_columns = {
+            row[1] for row in connection.execute(
+                "pragma table_info(server_material_allocations)"
+            ).fetchall()
+        }
+        allocation_target_columns = {
+            "id", "source_path", "source_material_key", "product_code",
+            "source_quantity", "order_id", "allocated_quantity",
+            "source_fingerprint", "created_at", "updated_at",
+        }
+        if allocation_columns and (
+            allocation_columns != allocation_target_columns
+            or not _has_product_foreign_key(connection, "server_material_allocations")
+        ):
+            names = [
+                str(row[1]) for row in connection.execute(
+                    "pragma table_info(server_material_allocations)"
+                )
+            ]
+            old_allocations = [
+                dict(zip(names, row))
+                for row in connection.execute("select * from server_material_allocations").fetchall()
+            ]
+            allocation_errors: list[str] = []
+            for row in old_allocations:
+                code = str(row.get("product_code", "") or "").strip().upper()
+                if not code and {"material_type", "color", "thickness"}.issubset(row):
+                    code, candidates = _resolve_legacy_material_code(
+                        connection, row.get("material_type"), row.get("color"), row.get("thickness")
+                    )
+                else:
+                    candidates = [code] if code else []
+                if not code or connection.execute(
+                    "select 1 from products where code=?", (code,)
+                ).fetchone() is None:
+                    allocation_errors.append(
+                        f"id={row.get('id')} path={row.get('source_path')} "
+                        f"candidates={','.join(candidates) or '-'}"
+                    )
+                row["product_code"] = code
+            if allocation_errors:
+                raise ValueError(
+                    "Server 材料分配无法唯一迁移到商品 SKU：\n" + "\n".join(allocation_errors)
+                )
+            connection.execute("drop index if exists idx_server_material_allocations_source")
+            connection.execute("drop index if exists idx_server_material_allocations_order")
+            connection.execute(
+                "alter table server_material_allocations rename to server_material_allocations_legacy"
+            )
+            connection.execute(
+                """create table server_material_allocations(
+                       id integer primary key,
+                       source_path text not null default '',
+                       source_material_key text not null default '',
+                       product_code text not null check(trim(product_code) <> ''),
+                       source_quantity real not null default 0,
+                       order_id text not null,
+                       allocated_quantity real not null default 0,
+                       source_fingerprint text not null default '',
+                       created_at text not null,
+                       updated_at text not null,
+                       unique(source_path, source_material_key, order_id),
+                       foreign key(product_code) references products(code)
+                           on update cascade on delete restrict
+                   )"""
+            )
+            connection.executemany(
+                """insert into server_material_allocations(
+                       id,source_path,source_material_key,product_code,source_quantity,
+                       order_id,allocated_quantity,source_fingerprint,created_at,updated_at
+                   ) values(?,?,?,?,?,?,?,?,?,?)""",
+                [(
+                    row.get("id"), row.get("source_path", ""),
+                    server_material_identity_key(row.get("source_path"), row["product_code"]),
+                    row["product_code"], row.get("source_quantity", 0),
+                    row.get("order_id", ""), row.get("allocated_quantity", 0),
+                    row.get("source_fingerprint", ""), row.get("created_at", ""),
+                    row.get("updated_at", ""),
+                ) for row in old_allocations],
+            )
+            connection.execute("drop table server_material_allocations_legacy")
+            connection.execute(
+                "create index idx_server_material_allocations_source on server_material_allocations(source_path,source_material_key)"
+            )
+            connection.execute(
+                "create index idx_server_material_allocations_order on server_material_allocations(order_id)"
+            )
+
+        if not _has_product_foreign_key(connection, "hardware_items"):
+            hardware_names = [
+                str(row[1]) for row in connection.execute("pragma table_info(hardware_items)")
+            ]
+            hardware_rows = connection.execute(
+                f"select {','.join(hardware_names)} from hardware_items"
+            ).fetchall()
+            invalid_hardware = sorted({
+                str(row[hardware_names.index("product_code")] or "").strip().upper()
+                for row in hardware_rows
+                if connection.execute(
+                    "select 1 from products where code=?",
+                    (str(row[hardware_names.index("product_code")] or "").strip().upper(),),
+                ).fetchone() is None
+            })
+            if invalid_hardware:
+                raise ValueError("五金事实包含不存在的商品 SKU：" + "、".join(invalid_hardware))
+            connection.execute("drop index if exists idx_hardware_items_order")
+            connection.execute("alter table hardware_items rename to hardware_items_legacy")
+            connection.execute(
+                """create table hardware_items(
+                       id integer primary key,
+                       order_id text not null default '',
+                       factory_order text not null default '',
+                       scope text not null default 'factory_order',
+                       product_code text not null check(trim(product_code) <> ''),
+                       source_code text not null default '',
+                       name text not null default '',
+                       spec text not null default '',
+                       quantity real not null default 0,
+                       unit text not null default '',
+                       source_type text not null default 'aicnc',
+                       source_path text not null default '',
+                       active integer not null default 1,
+                       remarks text not null default '',
+                       updated_at text not null,
+                       foreign key(product_code) references products(code)
+                           on update cascade on delete restrict
+                   )"""
+            )
+            connection.executemany(
+                f"insert into hardware_items({','.join(hardware_names)}) values({','.join('?' for _ in hardware_names)})",
+                hardware_rows,
+            )
+            connection.execute("drop table hardware_items_legacy")
+            connection.execute(
+                "create index idx_hardware_items_order on hardware_items(order_id,factory_order,active)"
+            )
+
+        if not _has_product_foreign_key(connection, "inventory_resolution_rules"):
+            rule_names = [
+                str(row[1]) for row in connection.execute(
+                    "pragma table_info(inventory_resolution_rules)"
+                )
+            ]
+            rule_rows = connection.execute(
+                f"select {','.join(rule_names)} from inventory_resolution_rules"
+            ).fetchall()
+            code_index = rule_names.index("product_code")
+            invalid_rules = sorted({
+                str(row[code_index] or "").strip().upper()
+                for row in rule_rows if row[code_index] and connection.execute(
+                    "select 1 from products where code=?", (str(row[code_index]).strip().upper(),)
+                ).fetchone() is None
+            })
+            if invalid_rules:
+                raise ValueError("库存映射包含不存在的商品 SKU：" + "、".join(invalid_rules))
+            connection.execute("drop index if exists idx_inventory_rules_type")
+            connection.execute(
+                "alter table inventory_resolution_rules rename to inventory_resolution_rules_legacy"
+            )
+            connection.execute(
+                """create table inventory_resolution_rules(
+                       id integer primary key,
+                       rule_type text not null check(rule_type in ('mapping','ignore')),
+                       source_name text not null,
+                       normalized_name text not null unique,
+                       product_code text,
+                       display_name text not null default '',
+                       reason text not null default '',
+                       created_at text not null,
+                       updated_at text not null,
+                       check(
+                           (rule_type='mapping' and product_code is not null and trim(product_code)<>'')
+                           or (rule_type='ignore' and product_code is null)
+                       ),
+                       foreign key(product_code) references products(code)
+                           on update cascade on delete restrict
+                   )"""
+            )
+            connection.executemany(
+                f"insert into inventory_resolution_rules({','.join(rule_names)}) values({','.join('?' for _ in rule_names)})",
+                rule_rows,
+            )
+            connection.execute("drop table inventory_resolution_rules_legacy")
+            connection.execute(
+                "create index idx_inventory_rules_type on inventory_resolution_rules(rule_type,normalized_name)"
+            )
+        connection.execute(
+            "create index if not exists idx_products_name on products(normalized_name)"
+        )
+        connection.execute(
+            "create index if not exists idx_products_category on products(normalized_category)"
+        )
+        connection.execute(
+            "create index if not exists idx_manual_production_material "
+            "on manual_production_batch_materials(order_id,product_code)"
+        )
         connection.execute("drop table if exists material_allocations")
         factory_table = connection.execute(
             "select 1 from sqlite_master where type='table' and name='factory_orders'"
@@ -473,7 +1277,29 @@ def ensure_schema(path: Path) -> None:
                     factory_value,
                     updated_at=updated_at or _now(),
                 )
+        integrity_rows = connection.execute("pragma integrity_check").fetchall()
+        if integrity_rows != [("ok",)]:
+            raise ValueError(
+                "数据库结构迁移完整性检查失败："
+                + "；".join(str(row[0]) for row in integrity_rows)
+            )
+        foreign_key_rows = connection.execute("pragma foreign_key_check").fetchall()
+        if foreign_key_rows:
+            details = "；".join(
+                f"{row[0]} rowid={row[1]} parent={row[2]}"
+                for row in foreign_key_rows[:20]
+            )
+            raise ValueError("数据库结构迁移外键检查失败：" + details)
+        connection.execute(
+            """insert into workflow_metadata(key,value,updated_at) values(?,?,?)
+               on conflict(key) do update set
+                   value=excluded.value, updated_at=excluded.updated_at""",
+            (_SCHEMA_READY_MARKER, "ready", _now()),
+        )
         connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
     finally:
         connection.close()
 
@@ -546,7 +1372,7 @@ def migrate_inventory_mapping_file(state_dir: Path) -> dict[str, Any]:
     central = database_path(state_dir)
     ensure_schema(central)
     source = state_dir / "inventory" / "mappings.json"
-    connection = sqlite3.connect(central)
+    connection = connect_database(central)
     try:
         # App startup can prepare storage from more than one background task.
         # Serialize this one-time migration so two callers cannot both observe
@@ -691,7 +1517,7 @@ def migrate_legacy_databases(state_dir: Path) -> dict[str, Any]:
     if not existing and not outbound_json.is_file() and not any(path.is_file() for path in cache_sources.values()):
         return {"central": str(central), "migrated": [], "status": "no_legacy_files"}
 
-    connection = sqlite3.connect(central)
+    connection = connect_database(central)
     migrated: list[str] = []
     try:
         for legacy in existing:
@@ -818,7 +1644,7 @@ def migrate_legacy_databases(state_dir: Path) -> dict[str, Any]:
 
 def _cache_rows(path: Path, cache_name: str) -> dict[str, Any]:
     ensure_schema(path)
-    connection = sqlite3.connect(path)
+    connection = connect_database(path)
     try:
         return {
             row[0]: json.loads(row[1])
@@ -846,7 +1672,7 @@ def read_cache(path: Path, cache_name: str, legacy: Path | None = None, default:
 
 def write_cache(path: Path, cache_name: str, value: Any) -> None:
     ensure_schema(path)
-    connection = sqlite3.connect(path)
+    connection = connect_database(path)
     try:
         connection.execute(
             "insert into business_cache(cache_name,cache_key,value_json,updated_at) values(?,?,?,?) "

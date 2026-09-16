@@ -56,7 +56,7 @@
 2. `AppModel.loadSettings()` 从 `~/Documents/pp-flowhub/data/settings.json` 读取本机配置。
 3. `runOrder()` / `runInventory()` 通过 `environmentForOperation(operationID)` 传递当前操作编号与运行环境。
 4. Python `Config.load_settings()` 再读取同一设置文件；CLI 显式参数优先覆盖设置。
-5. `Config.prepare_storage()` 建立本机状态目录并连接/迁移中央 `workflow.sqlite3`。
+5. `Config.prepare_storage()` 建立本机状态目录，并由 `ensure_schema()` 创建或事务升级中央 `workflow.sqlite3`；需要外键的应用连接在事务前开启约束。
 
 密码边界：设置 JSON 只保存用户名；AIMES 和库存密码通过 macOS Keychain 读取，不能把明文密码写进日志或文档。
 
@@ -255,14 +255,22 @@ scanDashboardServer()
       → _clear_stale_server_pending_state(...)
       → _server_snapshot(config,store)
       → 比较 source_files 基线与当前目录/文件元数据
-      → _validate_materials_during_server_scan(changed folders)
-      → 刷新可精确识别的 AICNC optimization evidence
+      → 未确认 XML 仅进入本次内存待处理结果
+      → 不保存优化证据、优化时间或 XML 基线
       → 返回 changes / active issues / scan_stats / stage durations
 ```
 
-输入：设置中的 Server 根目录、AIMES 当前工厂单范围、已出库状态和上次处理基线；普通临时文件夹的人工处理通过独立的三天 XML 观察策略登记。
+输入：设置中的 Server 根目录、AIMES 当前工厂单范围、已出库状态和上次处理基线；普通临时及补单文件夹的人工处理通过独立的三天 XML 观察策略登记。
 
-写入边界：扫描不会把普通 material/Report 当作已确认生产事实，也不会推进它们的已处理基线；它可以清理失效待处理状态，并持久化来源中含精确工厂单身份的优化证据。对变化 material 的校验会读取内容，但不等同于用户确认写入。
+写入边界：扫描只做元数据发现，不解析 Excel、不保存优化 XML 信息、不推进状态或已处理基线；可清理失效待处理状态和维护扫描策略。材料与工厂单的确认结果及 XML 基线在后续确认事务中保存。
+
+#### 现场案例：已优化但材料为空（2026-09-15，PP0086）
+
+- 修复前 `order_index.py` 的优化证据扫描会依据 `optimization_artifacts` 更新 `factory_orders.optimized`；看板再汇总该字段。因此，看到“已优化”不能证明 `material_items` 和 `hardware_items` 已确认写入。
+- 本次修复前，PP0086 的两个工厂单都有优化 XML 证据，但材料和五金均为 0 条。现有日志有两次 Server 预览完成记录；预览中的写表日志也不能单独证明正式落库，须核对目标连接和中央数据库。
+- 修复采用备份 → 单文件夹内存预览 → 检查归属、材料校验和五金映射 → `confirm-server-material-preview-memory --confirm-write` → 数据库及安装 App 详情回读。结果为 5 条材料、6 条五金，未新增人工生产批次或出库单。
+- 不应仅把 `optimized` 改为 0 来补材料：保留的 XML 证据可能在下次扫描恢复该标记。材料缺失应走预览和确认写入流程。
+- 后续按用户要求修改业务逻辑：扫描和取消预览不再保存优化文件信息；只有材料确认写入后，才设置对应工厂单的优化状态。XML 作为确认时的来源追溯信息，不能单独推动状态。实际规则见 [业务规则](../business-rules.md)。
 
 ### 7.2 选择文件夹并生成内存预览
 
@@ -287,6 +295,8 @@ processPendingServerChanges()
 
 已确认边界：正式数据库不会被预览污染。预览对象只保存在当前 App 内存；重新启动 App 后应重新预览。
 
+五金变化展示：`_server_preview_payload()` 从正式数据库的 `hardware_items` 查询工厂单是否已有 `active=1` 记录，返回 `has_existing_hardware`。Swift 的 `ServerWriteOrderPreview.existingHardwareChanges` 只展示这些工厂单的变化；首次写入仍展示上方五金明细。原始 `hardware_changes` 和 `write_records` 保持完整，因为“是否显示对比”和“是否需要写入”是不同判断，不能为隐藏界面差异而清空写入依据。
+
 ### 7.3 确认一个工厂单
 
 入口：`confirmServerWrite(orderID,factoryOrder)`。
@@ -301,7 +311,8 @@ confirmServerWrite(...)
   → order_index.confirm_server_preview_memory(...)
   → _confirm_memory_preview(...)
       → 重新校验 payload、订单/工厂单身份和写入授权
-      → 把确认事实写入 workflow.sqlite3
+      → 同一事务写材料、所选工厂单状态、优化元数据和预览版本的 XML 基线
+      → 按实际已确认工厂单重新汇总订单状态；失败全部回滚
   → App 从预览中移除已确认工厂单
   → 全部完成后 refreshDashboardAfterServerWrite()
   → order list-index（仅本地刷新）
@@ -313,24 +324,33 @@ confirmServerWrite(...)
 
 参数：stdin 内存预览、`--confirm-write`，以及零个或多个 `--skip-hardware-order <order_id>`。
 
-下一跳：`confirm_server_material_preview_memory()` → `_confirm_memory_preview()`。写入订单级板材/封边与对应工厂单五金；来料加工订单可在本次确认中显式跳过五金。
+下一跳：`confirm_server_material_preview_memory()` → `_confirm_memory_preview()`。来源材料先解析为唯一、当前可写的商品 SKU，并把已确认的材料类型、颜色和名义厚度绑定到商品层；Server 分配以“来源路径 + SKU”作为来源材料身份，事务中的 `material_items` 再按“订单 + SKU + 来源类型 + 来源路径”聚合，只写 `product_code`、数量和来源身份。对应工厂单五金继续保留规范 SKU 与原始名称/编码/规格/单位。来料加工订单可在本次确认中显式跳过五金。确认之后修改名称映射不会重绑已有订单材料。
 
-### 7.5 登记临时文件夹已人工处理
+### 7.5 登记临时或补单文件夹已人工处理
 
-入口：`markTemporaryFolderManual(folderPath)`。
+入口：待处理中心 → “已人工处理” → `FolderManualHandlingSheet` → 确认已在外部出库。
 
 ```text
-markTemporaryFolderManual(path)
+scan_server_changes
+  → _server_folder_handling_mode：新文件夹 + 所有相关订单工厂单已出库
+  → supplemental：独立补单待处理
+FolderManualHandlingSheet
+  → markTemporaryFolderManual(path, referenceOrderIDs, outboundDocument)
   → order mark-temporary-manual --folder <path>
-  → order_index.mark_temporary_folder_manual(config, Path(path))
-      → temporary_orders 写入“已人工处理/已出库”和三天观察截止时间
-      → 记录当前报表基线与两个 XML 的 mtime 基线
-      → 清除该文件夹的临时处理提醒
-      → commit()
-  → Swift 从待处理快照中移除目标文件夹
+      --reference-orders-json '[]' --outbound-document ''
+  → mark_temporary_folder_manual
+      → 再次验证分类，阻止新的 AIMES 工厂单被绕过
+      → 一个事务保存 temporary_orders、报表/XML 基线、操作记录
+      → Swift 只移除这个文件夹
 ```
 
-该入口只登记用户已经在外部完成的出库事实，不会打开库存系统或创建出库单。
+这里要区分“身份”和“参考”：内部 `temporary_id` 确定是哪一个任务，参考订单只是标签。即使两批补件都写着 PP0008，也不能用 PP0008 作为任务主键；否则会覆盖彼此，更可能覆盖正式订单。没有参考订单仍能登记，体现的是“可选输入”，不是错误或缺失数据。
+
+补单判定用的是最近同步的有效 AIMES/出库事实。正式混单的材料归属仍按订单处理；只有满足补单条件或普通临时任务才走独立人工登记。填写的参考订单不参与这个判定，也不能借修改参考标签把未出库正式混单改为补单。
+
+相同报表/XML 内容再次点击，称为“幂等”：不会多扣一次库存，也不会把完成时间和观察期不断向后推。观察期发现 XML 变化后标记 `manual_pending`，待用户再次完成；正式订单的扫描期限不控制这条记录。
+
+该入口只登记用户已经在外部完成的出库事实，不会打开库存系统或创建出库单。隔离验证见 `tests/test_folder_manual_handling.py`。
 
 ## 8. 待处理中心与人工归属
 
@@ -363,11 +383,12 @@ loadOrderDetailFromDatabase(item)
   → order_workflow.main()
   → order_details.order_detail(config,order_id)
       → 查询 workflow.sqlite3 的订单、工厂单、material_items、hardware_items 等事实
+      → material_items 按 product_code JOIN products，投影材料类型、颜色、名义厚度和单位
       → _panel_products_by_name()/产品图片映射
   → Swift applyOrderPreview(...) 组装详情页模型
 ```
 
-这里读取的是中央事实，不重新解析 Server 文件，也不把 Traveler 当事实源。
+这里读取的是中央事实，不重新解析 Server 文件，也不把 Traveler 当事实源。材料表中的 SKU 是已确认身份；商品 JOIN 是属性投影，不是再次按名称做映射。
 
 ### 9.2 保存备注和安装日期
 
@@ -386,8 +407,8 @@ export=false → order cost --order-id
 export=true  → order cost-export --order-id
   → order_workflow.main()
   → costing.calculate_order_cost(config,order_id)
-      → 读取中央材料/五金事实
-      → ProductDatabase / cost_price
+      → 读取中央材料/五金事实；材料按 product_code JOIN products
+      → ProductDatabase / cost_price（SKU 是成本身份）
       → _aggregate_material_rows()
       → _display_cost_lines()（仅展示排序/聚合投影）
   → export 时继续 export_order_cost()
@@ -405,7 +426,7 @@ export=true  → order cost-export --order-id
 
 CLI 参数：`order production-preview --order-id <id> --factory-orders-json '[...]'`。
 
-下一跳：`production.production_preview(config,order_id,factory_orders)` → `_selected_factory_rows()`、`_order_material_rows()`、`cumulative_production_materials()` → 返回每个材料的总量、已消耗量和剩余量。
+下一跳：`production.production_preview(config,order_id,factory_orders)` → `_selected_factory_rows()`、`_order_material_rows()`、`cumulative_production_materials()` → 返回每个 SKU 的总量、已消耗量和剩余量，再从 `products` 投影显示属性。`manual_production_batch_materials` 按 `product_code` 保存和累计历史消耗，因此商品单位、显示名或颜色文字后来变化都不会把已完成数量漏掉。
 
 ### 10.2 准备生产批次
 
@@ -507,9 +528,11 @@ inventory.update_catalog_online(config)
   → _catalog_change_summary(old,new)
   → import_catalog(config,download)
       → 校验临时 Excel
-      → _replace_product_database(...)
+      → _replace_product_database(...)（名称保留，实际按 SKU upsert）
       → os.replace() 安装当前目录
 ```
+
+数据库更新先把旧行标记为不在本次目录，再把当前 SKU 更新/插入并设为 `catalog_present=1`。未出现在新导出中的历史 SKU 不物理删除，因此外键引用和历史详情仍可读取；但商品查找、映射、材料确认和新的库存操作会阻断 `catalog_present=0` 的商品。`current-products.xlsx` 的原始文件替换与 SQLite 商品事务是两个需要分别验证的结果。
 
 ### 12.5 打开库存专用 Chrome
 
@@ -529,7 +552,9 @@ inventory.update_catalog_online(config)
 | 修改忽略 | `update-ignore --old-name --name --ignored true` | `update_ignored_mapping()` | 同上 |
 | 恢复忽略 | `unignore-item --item-name` | `set_ignored_mapping(...,False)` | 删除忽略规则 |
 
-映射是业务事实，不应靠模糊名称自动写入。所有保存操作都在成功后重新预览当前对象。
+映射是业务事实，不应靠模糊名称自动写入。所有保存操作都在成功后重新预览当前对象。对尚未确认 SKU 的来源项目，当前名称映射和全局忽略仍决定它能否进入预览；一旦材料已经以 `product_code` 写入中央事实，数据库预览和库存需求就使用该显式 SKU，不会因后来修改同名 mapping 或 ignore 而重绑或移除。这里不绕过显式的 `outbound_scope_decisions`：客户提供、余料生产或不需要出库等范围决定仍按订单规则生效。
+
+`TravelerItem.product_code` 保存运行时 canonical 身份，`source_snapshot()` 则固定只序列化历史的 `row/section/name/quantity/document_remark` 五个来源字段。这样数据库路径可以按 SKU 匹配和比较实际出库内容，同时旧 raw fingerprint 与待恢复 `inventory_operations` journal 的 payload 形状不漂移；SKU 和数量的真实变化仍由映射后指纹识别。
 
 ## 13. 生产文件与 Traveler
 
@@ -570,6 +595,7 @@ preview_related_orders(config,folder)
 ```text
 generate_database_order_traveler(config,order_id)
   → 从 workflow.sqlite3 读取材料、五金、工厂单
+  → 材料按 product_code JOIN products，得到类型、颜色、名义厚度和单位
   → 组装 OrderPreview/FactoryPreview
   → generate_order_traveler(config,preview)
       → 复制模板到临时工作簿
@@ -579,6 +605,8 @@ generate_database_order_traveler(config,order_id)
       → 保存临时文件并重新打开校验
       → 原子替换目标
 ```
+
+Traveler 使用已确认 SKU 对应的商品业务属性，不重新依据当前名称映射选择 SKU。Plywood 的工作流名义厚度（例如 5.4、14.5）与商品原始规格（例如 5.2、15）分别保留，避免改变 Usage List 分类。
 
 ### 13.5 更新旧 Traveler
 

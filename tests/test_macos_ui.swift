@@ -933,7 +933,8 @@ private struct MacOSUIRegressionTests {
         require(groupedServerRows.contains { $0.requiresManualReview }, "缺少报表的混单文件夹没有标记为人工检查")
         require(
             dashboardSource.contains("已人工处理") &&
-                dashboardSource.contains("model.markTemporaryFolderManual(group.folderPath)"),
+                dashboardSource.contains("FolderManualHandlingSheet(model: model, group: group)") &&
+                dashboardSource.contains("确认已在外部出库"),
             "普通临时 Server 文件夹没有已人工处理入口"
         )
         require(
@@ -942,6 +943,18 @@ private struct MacOSUIRegressionTests {
                 !assistantSource.contains("ignoreServerFolder"),
             "已人工处理动作不应保留旧的 Server 文件夹忽略入口"
         )
+        let supplementRows = serverChangePreviews([[
+            "id": "supplement", "change_type": "added", "kind": "folder",
+            "path": "/Volumes/server/PP0008 AND PP0035", "source_folder": "/Volumes/server/PP0008 AND PP0035",
+            "order_id": "PP0008、PP0035", "manual_only": true, "handling_mode": "supplemental",
+            "reference_order_ids": ["PP0008", "PP0035"],
+        ]])
+        let supplementGroup = serverFolderChangeGroups(supplementRows)[0]
+        require(supplementGroup.independentManual && supplementGroup.manualOnly, "补单没有进入独立人工处理")
+        require(supplementGroup.referenceOrderIDs == ["PP0008", "PP0035"], "补单参考订单丢失")
+        let supplementItems = buildPendingCenterItems(serverChanges: supplementRows, currentIssues: [], aimesReviews: [])
+        require(supplementItems[0].title == "PP0008 AND PP0035", "独立补单应以文件夹为主记录")
+        require(dashboardSource.contains("item.serverGroup?.independentManual != true"), "补单不能继续显示正式订单预览按钮")
         let handledFolder = "/Volumes/server/Optimized Orders/temporary"
         let retainedServerChanges = serverChangesExcludingFolder(
             [
@@ -1353,7 +1366,7 @@ private struct MacOSUIRegressionTests {
                     "changes": [[String: Any]](),
                     "server": [
                         "changes": [[String: Any]](),
-                        "scan_stats": ["optimization_artifact_refresh_count": 0],
+                        "scan_stats": [:] as [String: Any],
                     ],
                 ])
             default:
@@ -1371,6 +1384,7 @@ private struct MacOSUIRegressionTests {
         require(observedStatuses.contains(where: { $0.contains("backup-now:正在自动备份") }), "自动备份阶段没有显示实际进行状态")
         require(observedStatuses.contains(where: { $0.contains("aimes-progress:正在读取 AIMES 表格") }), "AIMES progress 没有成为当前阶段")
         require(observedStatuses.contains(where: { $0.contains("server-progress:正在处理：读取 Server 目录") }), "Server progress 没有成为当前阶段")
+        require(model.dashboardSyncStatus == "✅ Server 扫描完成；订单状态未更改", "扫描完成不能声称更新了优化证据或订单状态")
 
         let stageMessages = model.dashboardSessionMessages.filter { $0.id.hasPrefix("stage:") }
         require(stageMessages.map(\.detail).contains("启动 AIMES 浏览器已完成"), "AIMES stage 完成消息没有进入会话历史")
@@ -2540,6 +2554,30 @@ private struct MacOSUIRegressionTests {
     }
 
     private static func testServerWriteHardwareChangeLayout() {
+        let changes: [[String: Any]] = [
+            ["factory_order": "F-NEW", "product_code": "M1001", "name": "Hinge", "old_quantity": 0, "new_quantity": 54],
+            ["factory_order": "F-OLD", "product_code": "M1001", "name": "Hinge", "old_quantity": 8, "new_quantity": 10],
+            ["factory_order": "F-OLD", "product_code": "M1002", "name": "H-Rail", "old_quantity": 0, "new_quantity": 2],
+            ["factory_order": "F-OLD", "product_code": "M1003", "name": "L-Rail", "old_quantity": 2, "new_quantity": 0],
+        ]
+        let order = ServerWriteOrderPreview(row: [
+            "order_id": "PP0086",
+            "factories": [
+                ["factory_order": "F-NEW", "has_existing_hardware": false,
+                 "hardware": [["name": "Hinge", "quantity": 54]]],
+                ["factory_order": "F-OLD", "has_existing_hardware": true],
+            ],
+            "hardware_changes": changes,
+        ])!
+        require(order.existingHardwareChanges.count == 3, "仅已有五金的工厂单显示新增、删除及数量变化")
+        require(order.existingHardwareChanges.allSatisfy { $0.factoryOrder == "F-OLD" }, "首次写入不应显示变化对比")
+        require(order.hardwareChanges.count == 4 && order.factories[0].hardware.count == 1, "隐藏对比不能清除首次写入的差异和五金明细")
+        let firstWrite = ServerWriteOrderPreview(row: [
+            "order_id": "PP0086",
+            "factories": [["factory_order": "F-NEW", "has_existing_hardware": false]],
+            "hardware_changes": [changes[0]],
+        ])!
+        require(firstWrite.existingHardwareChanges.isEmpty, "全部首次写入时隐藏整个变化区块")
         require(serverHardwareUnitText("Piece") == "Piece", "五金单位已有值时不应被替换")
         require(serverHardwareUnitText("  ") == "—", "五金单位缺失时应显示占位符")
         require(serverHardwareUnitText("") == "—", "五金单位为空时应显示占位符")

@@ -1,4 +1,3 @@
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,7 +6,7 @@ from openpyxl import load_workbook
 
 from traveler_assistant.core import Config
 from traveler_assistant.costing import _display_cost_lines, calculate_order_cost, export_order_cost
-from traveler_assistant.database import ensure_schema
+from traveler_assistant.database import connect_database
 from traveler_assistant.inventory import Product, _replace_product_database
 
 
@@ -22,6 +21,7 @@ class CostingTests(unittest.TestCase):
         _replace_product_database(config.workflow_database, [
             Product("Panel", "M0004", "Plywood", "18mm", "启用", unit="pcs", cost_price=10.0),
             Product("Panel", "M1010", "Ivory Oak", "19.1mm", "启用", unit="pcs", cost_price=25.0),
+            Product("Panel", "M1011", "Unknown", "19.1mm", "启用", unit="pcs", cost_price=None),
             Product("Edge band", "M2010", "Ivory Oak Edge Banding", "", "启用", unit="m", cost_price=2.0),
         ])
         return config
@@ -29,20 +29,20 @@ class CostingTests(unittest.TestCase):
     def test_order_total_uses_order_material_summary_and_raw_quantities(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = self._config(Path(temporary))
-            connection = sqlite3.connect(config.workflow_database)
+            connection = connect_database(config.workflow_database)
             connection.execute(
                 """insert into material_items(
-                    order_id,material_type,color,thickness,quantity,unit,
-                    source_type,source_path,source_fingerprint,updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?)""",
-                ("PP9999", "plywood", "", "18", 2.5, "pcs", "aihouse", "", "", "now"),
+                    order_id,product_code,quantity,source_type,source_path,
+                    source_fingerprint,updated_at
+                ) values(?,?,?,?,?,?,?)""",
+                ("PP9999", "M0004", 2.5, "aihouse", "", "", "now"),
             )
             connection.execute(
                 """insert into material_items(
-                    order_id,material_type,color,thickness,quantity,unit,
-                    source_type,source_path,source_fingerprint,updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?)""",
-                ("PP9999", "panel", "Ivory Oak", "19.1", 1, "pcs", "aihouse", "", "", "now"),
+                    order_id,product_code,quantity,source_type,source_path,
+                    source_fingerprint,updated_at
+                ) values(?,?,?,?,?,?,?)""",
+                ("PP9999", "M1010", 1, "aihouse", "", "", "now"),
             )
             connection.commit()
             connection.close()
@@ -66,13 +66,13 @@ class CostingTests(unittest.TestCase):
     def test_missing_cost_price_is_not_treated_as_zero(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = self._config(Path(temporary))
-            connection = sqlite3.connect(config.workflow_database)
+            connection = connect_database(config.workflow_database)
             connection.execute(
                 """insert into material_items(
-                    order_id,material_type,color,thickness,quantity,unit,
-                    source_type,source_path,source_fingerprint,updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?)""",
-                ("PP9998", "panel", "Unknown", "19.1", 1, "pcs", "aihouse", "", "", "now"),
+                    order_id,product_code,quantity,source_type,source_path,
+                    source_fingerprint,updated_at
+                ) values(?,?,?,?,?,?,?)""",
+                ("PP9998", "M1011", 1, "aihouse", "", "", "now"),
             )
             connection.commit()
             connection.close()

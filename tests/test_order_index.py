@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 from openpyxl import load_workbook
 
-from traveler_assistant.core import Config, RuleError
-from traveler_assistant.database import ensure_schema
+from traveler_assistant.core import Config, RuleError, _normalize_name
+from traveler_assistant.database import ensure_schema, server_material_identity_key
 from traveler_assistant.order_index import (
     OrderIndexStore,
     _aimes_order_fingerprint,
@@ -79,6 +79,68 @@ from traveler_assistant.inventory import InventoryMappings
 
 class OrderIndexTests(unittest.TestCase):
     @staticmethod
+    def _seed_sku_products(connection):
+        rows = [
+            ("Plywood", "M0002", "1/4 Finished,UV1S", "5.2*1220*2440mm", "启用", "SHT", "plywood", "", "5.4"),
+            ("Plywood", "M0003", "5/8 Finished,UV2S", "15*1220*2440mm", "启用", "SHT", "plywood", "", "14.5"),
+            ("Plywood", "M0004", "3/4 Finished,UV2S", "18*1220*2440mm", "启用", "SHT", "plywood", "", "18"),
+            ("Panel", "M0065", "Basalto SM", "19.1*1220*2745mm", "启用", "SHT", "panel", "Basalto SM", "19.1"),
+            ("Panel", "M0066", "Basalto SM", "8*1220*2745mm", "启用", "SHT", "panel", "Basalto SM", "8"),
+            ("Edge band", "M0066E", "Basalto SM Edge Banding", "22mm*1mm*225m", "启用", "M", "edge", "Basalto SM", ""),
+            ("Panel", "M-WOOD-PANEL", "Woodline 4", "19.1mm", "启用", "SHT", "panel", "Woodline 4", "19.1"),
+            ("Edge band", "M-WOOD-EDGE", "Woodline 4 Edge Banding", "22mm", "启用", "M", "edge", "Woodline 4", ""),
+            ("Panel", "M-FRAPPE", "Frappe 3", "19.1mm", "启用", "SHT", "panel", "Frappe 3", "19.1"),
+            ("Panel", "M-IVORY", "Ivory Oak", "19.1mm", "启用", "SHT", "panel", "Ivory Oak", "19.1"),
+            ("Panel", "M-ROSALES", "Rosales 3", "19.1mm", "启用", "SHT", "panel", "Rosales 3", "19.1"),
+            ("Edge band", "M-ROSALES-EDGE", "Rosales 3 Edge Banding", "22mm", "启用", "M", "edge", "Rosales 3", ""),
+            ("Panel", "M-WALNUT", "Walnut", "19.1mm", "启用", "SHT", "panel", "Walnut", "19.1"),
+            ("Hardware", "M1001", "Hinge", "", "启用", "EA", "", "", ""),
+            ("Hardware", "H1", "Fixture Hinge", "", "启用", "EA", "", "", ""),
+            ("Hardware", "H2", "Fixture Drawer Slide", "", "启用", "EA", "", "", ""),
+        ]
+        connection.executemany(
+            """insert or ignore into products(
+                   category, code, name, spec, status, unit,
+                   normalized_code, normalized_name, normalized_spec,
+                   normalized_category, normalized_remark,
+                   material_kind, material_color, material_thickness,
+                   catalog_present
+               ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
+            [
+                (
+                    category, code, name, spec, status, unit,
+                    _normalize_name(code), _normalize_name(name),
+                    _normalize_name(spec), _normalize_name(category), "",
+                    material_kind, color, thickness,
+                )
+                for (
+                    category, code, name, spec, status, unit,
+                    material_kind, color, thickness,
+                ) in rows
+            ],
+        )
+
+    def _seed_config_products(self, config):
+        store = OrderIndexStore(config.workflow_database)
+        try:
+            self._seed_sku_products(store.connection)
+            store.commit()
+        finally:
+            store.close()
+
+    @staticmethod
+    def _resolved_hinge_inventory(_config, pairs):
+        return {
+            "missing": [],
+            "ignored": [],
+            "outbound": [],
+            "accepted": [
+                {"product_codes": ["M1001"]}
+                for _item, _source_code in pairs
+            ],
+        }
+
+    @staticmethod
     def _set_permanent_server_policy(store, order_id, folder):
         store.upsert_order(order_id, source_folder=str(folder))
         store.save_server_scan_policy(
@@ -120,6 +182,7 @@ class OrderIndexTests(unittest.TestCase):
             folder.mkdir(parents=True)
             source_path = str(folder / "cs004 material.xlsx")
             current = OrderIndexStore(config.workflow_database)
+            self._seed_sku_products(current.connection)
             current.upsert_order("CS004", validation_status="正常")
             current.upsert_factory(
                 "F-KITCHEN", order_id="CS004", factory_name="CS004-KITCHEN",
@@ -128,19 +191,19 @@ class OrderIndexTests(unittest.TestCase):
             )
             current.connection.execute(
                 """insert into material_items(
-                    order_id, material_type, color, thickness, quantity, unit, edge,
-                    source_type, source_path, source_fingerprint, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
-                ("CS004", "panel", "Woodline 4", "19.1", 4, "pcs", "",
-                 "aihouse", source_path, "old", "2026-08-20T10:00:00"),
+                    order_id, product_code, quantity, source_type, source_path,
+                    source_fingerprint, updated_at
+                ) values(?,?,?,?,?,?,?)""",
+                ("CS004", "M-WOOD-PANEL", 4, "aihouse", source_path,
+                 "old", "2026-08-20T10:00:00"),
             )
             current.connection.execute(
                 """insert into material_items(
-                    order_id, material_type, color, thickness, quantity, unit, edge,
-                    source_type, source_path, source_fingerprint, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
-                ("CS004", "edge", "Woodline 4", "", 100, "m", "",
-                 "aihouse", source_path, "old", "2026-08-20T10:00:00"),
+                    order_id, product_code, quantity, source_type, source_path,
+                    source_fingerprint, updated_at
+                ) values(?,?,?,?,?,?,?)""",
+                ("CS004", "M-WOOD-EDGE", 100, "aihouse", source_path,
+                 "old", "2026-08-20T10:00:00"),
             )
             current.connection.execute(
                 """insert into hardware_items(
@@ -155,6 +218,7 @@ class OrderIndexTests(unittest.TestCase):
 
             preview_path = root / "preview.sqlite3"
             preview = OrderIndexStore(preview_path)
+            self._seed_sku_products(preview.connection)
             preview.upsert_order("CS004", validation_status="正常", source_folder=str(folder))
             preview.upsert_factory(
                 "F-KITCHEN", order_id="CS004", factory_name="CS004-KITCHEN",
@@ -168,14 +232,14 @@ class OrderIndexTests(unittest.TestCase):
             )
             preview.connection.executemany(
                 """insert into material_items(
-                    order_id, material_type, color, thickness, quantity, unit, edge,
-                    source_type, source_path, source_fingerprint, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
+                    order_id, product_code, quantity, source_type, source_path,
+                    source_fingerprint, updated_at
+                ) values(?,?,?,?,?,?,?)""",
                 [
-                    ("CS004", "panel", "Woodline 4", "19.1", 5, "pcs", "",
-                     "aihouse", source_path, "new", "2026-08-20T10:30:00"),
-                    ("CS004", "edge", "Woodline 4", "", 120, "m", "",
-                     "aihouse", source_path, "new", "2026-08-20T10:30:00"),
+                    ("CS004", "M-WOOD-PANEL", 5, "aihouse", source_path,
+                     "new", "2026-08-20T10:30:00"),
+                    ("CS004", "M-WOOD-EDGE", 120, "aihouse", source_path,
+                     "new", "2026-08-20T10:30:00"),
                 ],
             )
             preview.connection.execute(
@@ -214,6 +278,29 @@ class OrderIndexTests(unittest.TestCase):
                  for item in order["hardware_changes"]],
                 [("F-VANITY", "Drawer slide", 4.0)],
             )
+            self.assertFalse(order["factories"][0]["has_existing_hardware"])
+            # An existing factory identity or an inactive row is not a current
+            # hardware baseline. An active zero-quantity row is still a baseline.
+            current = OrderIndexStore(config.workflow_database)
+            current.upsert_factory("F-VANITY", order_id="CS004")
+            current.connection.execute(
+                """insert into hardware_items(order_id, factory_order, product_code,
+                    name, quantity, active, updated_at)
+                    values('CS004', 'F-VANITY', 'H2', 'Drawer slide', 0, 0, '2026-09-14T13:00:00')"""
+            )
+            current.commit()
+            for active in (0, 1):
+                current.connection.execute(
+                    "update hardware_items set active=? where factory_order='F-VANITY'", (active,)
+                )
+                current.commit()
+                refreshed = _server_preview_payload(
+                    config, preview_path, "token", [folder], include_hardware=True
+                )["orders"][0]
+                self.assertEqual(refreshed["factories"][0]["has_existing_hardware"], bool(active))
+                self.assertEqual(len(refreshed["hardware_changes"]), 1)
+                self.assertEqual(len(refreshed["factories"][0]["hardware"]), 1)
+            current.close()
 
     def test_invalid_preview_folder_reports_path_without_copying_database(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -241,6 +328,7 @@ class OrderIndexTests(unittest.TestCase):
                 order_root=root / "orders",
             )
             config.prepare_storage()
+            self._seed_config_products(config)
             folder = config.source_root / "PP9999"
             report = folder / "Report"
             report.mkdir(parents=True)
@@ -276,7 +364,7 @@ class OrderIndexTests(unittest.TestCase):
                 wraps=sync_order_index,
             ) as sync, patch(
                 "traveler_assistant.inventory.resolve_inventory_items",
-                return_value={"missing": []},
+                side_effect=self._resolved_hinge_inventory,
             ):
                 preview = preview_server_changes(config, [folder])
             parse.assert_called_once_with((report / "Fittingslist.xlsx").resolve())
@@ -316,6 +404,7 @@ class OrderIndexTests(unittest.TestCase):
                 order_root=root / "orders",
             )
             config.prepare_storage()
+            self._seed_config_products(config)
             selected_folder = config.source_root / "PP9999"
             report = selected_folder / "Report"
             report.mkdir(parents=True)
@@ -348,7 +437,7 @@ class OrderIndexTests(unittest.TestCase):
 
             with patch(
                 "traveler_assistant.inventory.resolve_inventory_items",
-                return_value={"missing": []},
+                side_effect=self._resolved_hinge_inventory,
             ):
                 preview_server_changes(config, [selected_folder])
 
@@ -402,6 +491,7 @@ class OrderIndexTests(unittest.TestCase):
             make_fittings(recut_report / "Fittingslist.xlsx", [("F100", 7)])
 
             current = OrderIndexStore(config.workflow_database)
+            self._seed_sku_products(current.connection)
             current.upsert_order(
                 "PP9999",
                 validation_status="数据异常",
@@ -418,21 +508,21 @@ class OrderIndexTests(unittest.TestCase):
             )
             current.connection.execute(
                 """insert into material_items(
-                    order_id, material_type, color, thickness, quantity, unit, edge,
-                    source_type, source_path, source_fingerprint, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
+                    order_id, product_code, quantity, source_type, source_path,
+                    source_fingerprint, updated_at
+                ) values(?,?,?,?,?,?,?)""",
                 (
-                    "PP9999", "plywood", "", "18.0", 2, "pcs", "",
-                    "aihouse", str((folder / "PP9999 materials.xlsx").resolve()), "old", "old",
+                    "PP9999", "M0004", 2, "aihouse",
+                    str((folder / "PP9999 materials.xlsx").resolve()), "old", "old",
                 ),
             )
             current.connection.execute(
                 """insert into hardware_items(
-                    order_id, factory_order, product_code, name, spec, quantity,
+                    order_id, factory_order, product_code, source_code, name, spec, quantity,
                     unit, source_type, source_path, active, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
+                ) values(?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    "PP9999", "F100", "71T950A", "Hinge", "", 2,
+                    "PP9999", "F100", "M1001", "71T950A", "Hinge", "", 2,
                     "pcs", "aicnc", str(folder.resolve()), 1, "old",
                 ),
             )
@@ -447,7 +537,7 @@ class OrderIndexTests(unittest.TestCase):
 
             with patch(
                 "traveler_assistant.inventory.resolve_inventory_items",
-                return_value={"missing": [], "ignored": [], "outbound": []},
+                side_effect=self._resolved_hinge_inventory,
             ):
                 selection = preview_server_changes(config, [folder])["hardware_source_selection"]
                 candidates = selection["conflicts"][0]["candidates"]
@@ -458,7 +548,7 @@ class OrderIndexTests(unittest.TestCase):
             plywood_changes = [
                 item for item in order["material_changes"]
                 if item["material_type"] == "plywood"
-                and item["thickness"] == "18.0"
+                and float(item["thickness"]) == 18.0
             ]
             self.assertTrue(
                 any(
@@ -474,7 +564,7 @@ class OrderIndexTests(unittest.TestCase):
                         "PP9999-recut/Report/pp-板材清单.xlsx"
                     )
                     and item["material_type"] == "plywood"
-                    and item["thickness"] == "18.0"
+                    and float(item["thickness"]) == 18.0
                     and item["quantity"] == 1.0
                     for item in payload["materials"]
                 )
@@ -496,6 +586,7 @@ class OrderIndexTests(unittest.TestCase):
                 order_root=root / "orders",
             )
             config.prepare_storage()
+            self._seed_config_products(config)
             folder = config.source_root / "PP9999"
             report = folder / "Report"
             report.mkdir(parents=True)
@@ -530,7 +621,15 @@ class OrderIndexTests(unittest.TestCase):
                 if not any(item.name == "Unmapped Hinge" for item, _ in pairs):
                     return {"missing": [], "ignored": [], "outbound": []}
                 if mappings.manual_code("Unmapped Hinge"):
-                    return {"missing": [], "ignored": [], "outbound": []}
+                    return {
+                        "missing": [],
+                        "ignored": [],
+                        "outbound": [],
+                        "accepted": [
+                            {"product_codes": ["M1001"]}
+                            for _item, _source_code in pairs
+                        ],
+                    }
                 return {
                     "missing": [{
                         "name": "Unmapped Hinge",
@@ -609,7 +708,7 @@ class OrderIndexTests(unittest.TestCase):
                 hardware = store.connection.execute(
                     "select order_id, factory_order, product_code, name, quantity from hardware_items"
                 ).fetchall()
-                self.assertEqual(hardware, [("PP9999", "F100", "WJ-UNMAPPED", "Unmapped Hinge", 2.0)])
+                self.assertEqual(hardware, [("PP9999", "F100", "M1001", "Unmapped Hinge", 2.0)])
                 self.assertNotIn("factory_order", {
                     row[1] for row in store.connection.execute("pragma table_info(material_items)").fetchall()
                 })
@@ -635,7 +734,8 @@ class OrderIndexTests(unittest.TestCase):
                 [("F100", "PP9999")],
             )
             material_rows = store.connection.execute(
-                "select order_id, material_type, quantity from material_items"
+                """select m.order_id, p.material_kind, m.quantity
+                   from material_items m join products p on p.code=m.product_code"""
             ).fetchall()
             self.assertEqual(
                 sorted(material_rows),
@@ -659,6 +759,7 @@ class OrderIndexTests(unittest.TestCase):
                 order_root=root / "orders",
             )
             config.prepare_storage()
+            self._seed_config_products(config)
             folder = config.source_root / "CS999"
             current = OrderIndexStore(config.workflow_database)
             current.upsert_order(
@@ -753,6 +854,7 @@ class OrderIndexTests(unittest.TestCase):
                 order_root=root / "orders",
             )
             config.prepare_storage()
+            self._seed_config_products(config)
             folder = config.source_root / "PP9999"
             folder.mkdir(parents=True)
             material_path = folder / "PP9999 materials.xlsx"
@@ -767,7 +869,7 @@ class OrderIndexTests(unittest.TestCase):
             )
             self.assertEqual(
                 [stage["stage"] for stage in scan_timing["stages"]],
-                ["server_metadata", "optimization_evidence", "scan_finalize"],
+                ["server_metadata", "scan_finalize"],
             )
             self.assertFalse(any(
                 issue["kind"] == "material_validation"
@@ -841,10 +943,12 @@ class OrderIndexTests(unittest.TestCase):
             root = Path(temp)
             config = Config(state_dir=root / "state", source_root=root / "source")
             config.prepare_storage()
+            self._seed_config_products(config)
             token = "a" * 32
             preview_path = config.state_dir / "server-previews" / token / "workflow.sqlite3"
             ensure_schema(preview_path)
             preview = OrderIndexStore(preview_path)
+            self._seed_sku_products(preview.connection)
             preview.upsert_order("PP9999", source_folder="/server/mixed")
             preview.upsert_order("PP8888", source_folder="/server/mixed")
             preview.upsert_factory(
@@ -858,13 +962,13 @@ class OrderIndexTests(unittest.TestCase):
             preview.connection.execute(
                 """
                 insert into material_items(
-                    order_id, material_type, color, thickness, quantity, unit,
-                    edge, source_type, source_path, source_fingerprint, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?)
+                    order_id, product_code, quantity, source_type, source_path,
+                    source_fingerprint, updated_at
+                ) values(?,?,?,?,?,?,?)
                 """,
                 (
-                    "PP9999", "panel", "Frappe 3", "19.1", 13, "pcs", "",
-                    "aihouse", "/server/mixed/material.xlsx", "fingerprint", "now",
+                    "PP9999", "M-FRAPPE", 13, "aihouse",
+                    "/server/mixed/material.xlsx", "fingerprint", "now",
                 ),
             )
             preview.connection.execute(
@@ -911,48 +1015,49 @@ class OrderIndexTests(unittest.TestCase):
             root = Path(temp)
             config = Config(state_dir=root / "state", source_root=root / "source")
             config.prepare_storage()
+            self._seed_config_products(config)
             token = "b" * 32
             preview_path = config.state_dir / "server-previews" / token / "workflow.sqlite3"
             ensure_schema(preview_path)
             preview = OrderIndexStore(preview_path)
+            self._seed_sku_products(preview.connection)
             preview.upsert_order("PP9999", source_folder="/server/one")
             source_path = "/server/one/material.xlsx"
             preview.connection.execute(
                 """
                 insert into material_items(
-                    order_id, material_type, color, thickness, quantity, unit,
-                    edge, source_type, source_path, source_fingerprint, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?)
+                    order_id, product_code, quantity, source_type, source_path,
+                    source_fingerprint, updated_at
+                ) values(?,?,?,?,?,?,?)
                 """,
-                ("PP9999", "panel", "Ivory Oak", "19.1", 3, "pcs", "",
-                 "aihouse", source_path, "fingerprint", "now"),
+                ("PP9999", "M-IVORY", 3, "aihouse", source_path,
+                 "fingerprint", "now"),
             )
             ivory_id = preview.connection.execute(
-                "select id from material_items where color='Ivory Oak'"
+                "select id from material_items where product_code='M-IVORY'"
             ).fetchone()[0]
             preview.connection.execute(
                 """
                 insert into material_items(
-                    order_id, material_type, color, thickness, quantity, unit,
-                    edge, source_type, source_path, source_fingerprint, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?)
+                    order_id, product_code, quantity, source_type, source_path,
+                    source_fingerprint, updated_at
+                ) values(?,?,?,?,?,?,?)
                 """,
-                ("PP9999", "plywood", "", "5.4", 6, "pcs", "",
-                 "aihouse", source_path, "fingerprint", "now"),
+                ("PP9999", "M0002", 6, "aihouse", source_path,
+                 "fingerprint", "now"),
             )
             # This row has the old panel id but the fields of the plywood
             # fact.  The former implementation counted it against Ivory Oak.
             preview.connection.execute(
                 """
                 insert into server_material_allocations(
-                    source_material_id, source_path, source_material_key,
-                    material_type, color, thickness, unit, edge,
+                    source_path, source_material_key, product_code,
                     source_quantity, order_id, allocated_quantity,
                     source_fingerprint, created_at, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) values(?,?,?,?,?,?,?,?,?)
                 """,
-                (ivory_id, source_path, str(ivory_id), "plywood", "", "5.4", "pcs", "",
-                 6, "PP9999", 6, "fingerprint", "now", "now"),
+                (source_path, server_material_identity_key(source_path, "M0002"),
+                 "M0002", 6, "PP9999", 6, "fingerprint", "now", "now"),
             )
             preview.connection.execute(
                 "insert into server_material_preview_scopes(source_folder) values(?)",
@@ -968,10 +1073,10 @@ class OrderIndexTests(unittest.TestCase):
             store = OrderIndexStore(config.workflow_database)
             rows = store.connection.execute(
                 """
-                select material_type, color, quantity
-                from material_items
-                where order_id='PP9999'
-                order by material_type, color
+                select p.material_kind, p.material_color, m.quantity
+                from material_items m join products p on p.code=m.product_code
+                where m.order_id='PP9999'
+                order by p.material_kind, p.material_color
                 """
             ).fetchall()
             store.close()
@@ -1295,17 +1400,18 @@ class OrderIndexTests(unittest.TestCase):
             config = Config(state_dir=root / "state")
             config.prepare_storage()
             store = OrderIndexStore(config.workflow_database)
+            self._seed_sku_products(store.connection)
+            store.commit()
             old_path = root / "Downloads" / "PP0065 materials.xlsx"
             current_path = root / "server" / "PP0065 materials.xlsx"
             current_path.parent.mkdir(parents=True)
             current_path.write_bytes(b"same workbook content")
             store.connection.execute(
                 """insert into material_items(
-                    order_id, material_type, color, thickness, quantity, unit,
-                    source_type, source_path, updated_at
-                ) values(?,?,?,?,?,?,?,?,?)""",
-                ("PP0065", "panel", "Rosales 3", "19.1", 17, "pcs",
-                 "aihouse", str(old_path), "before"),
+                    order_id, product_code, quantity, source_type, source_path,
+                    updated_at
+                ) values(?,?,?,?,?,?)""",
+                ("PP0065", "M-ROSALES", 17, "aihouse", str(old_path), "before"),
             )
             _replace_server_material_facts(
                 store,
@@ -1321,10 +1427,9 @@ class OrderIndexTests(unittest.TestCase):
             ).fetchall()
             store.close()
 
-            self.assertEqual(len(rows), 1)
             self.assertEqual({row[0] for row in rows}, {str(current_path)})
-            self.assertEqual(rows[0][2], 2)
-            self.assertTrue(rows[0][1])
+            self.assertEqual(sum(row[2] for row in rows), 2)
+            self.assertTrue(all(row[1] for row in rows))
 
     def test_server_material_scope_retires_rows_from_previous_server_root(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1332,6 +1437,7 @@ class OrderIndexTests(unittest.TestCase):
             config = Config(state_dir=root / "state")
             config.prepare_storage()
             store = OrderIndexStore(config.workflow_database)
+            self._seed_sku_products(store.connection)
             current_folder = root / "server" / "Optimized Orders" / "PP0072"
             old_folder = root / "fixtures" / "Optimized Orders" / "PP0072"
             current_path = current_folder / "PP0072 materials.xlsx"
@@ -1341,10 +1447,10 @@ class OrderIndexTests(unittest.TestCase):
             for path in (current_path, old_path):
                 store.connection.execute(
                     """insert into material_items(
-                        order_id, material_type, color, thickness, quantity, unit,
-                        source_type, source_path, updated_at
-                    ) values(?,?,?,?,?,?,?,?,?)""",
-                    ("PP0072", "plywood", "", "18.0", 22, "pcs", "aihouse", str(path), "now"),
+                        order_id, product_code, quantity, source_type,
+                        source_path, updated_at
+                    ) values(?,?,?,?,?,?)""",
+                    ("PP0072", "M0004", 22, "aihouse", str(path), "now"),
                 )
                 store.connection.execute(
                     """insert into source_files(
@@ -1485,7 +1591,7 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(result["orders"][0]["optimized_count"], 0)
             self.assertEqual(result["orders"][0]["stage"], "已拆单待优化")
 
-    def test_cut_to_size_optimization_artifact_marks_status_when_material_is_absent(self):
+    def test_cut_to_size_xml_cannot_mark_optimized_when_material_is_absent(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = Config(state_dir=root / "state", source_root=root / "server" / "Optimized Orders")
@@ -1508,14 +1614,14 @@ class OrderIndexTests(unittest.TestCase):
                 result = sync_order_index(config)
 
             order = result["orders"][0]
-            self.assertEqual(order["stage"], "已优化")
-            self.assertEqual(order["optimized_count"], 1)
+            self.assertEqual(order["stage"], "已拆单待优化")
+            self.assertEqual(order["optimized_count"], 0)
             self.assertEqual(order["validation_status"], "待校验")
             self.assertEqual(order["material_status"], "待校验")
-            self.assertTrue(order["optimization_completed_at"])
-            self.assertEqual(order["factories"][0]["optimization_source_path"], str(artifact))
+            self.assertFalse(order["optimization_completed_at"])
+            self.assertEqual(order["factories"][0]["optimization_source_path"], "")
 
-    def test_order_is_optimized_only_after_every_active_factory_has_aicnc_evidence(self):
+    def test_xml_only_sync_never_optimizes_even_with_all_active_factory_artifacts(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = Config(state_dir=root / "state", source_root=root / "server" / "Optimized Orders")
@@ -1531,8 +1637,8 @@ class OrderIndexTests(unittest.TestCase):
             with patch("traveler_assistant.order_index.load_aimes_order_cache", return_value=rows), \
                  patch("traveler_assistant.order_workflow.preview_order", return_value=preview):
                 partial = sync_order_index(config)
-            self.assertEqual(partial["orders"][0]["stage"], "部分优化")
-            self.assertEqual(partial["orders"][0]["optimized_count"], 1)
+            self.assertEqual(partial["orders"][0]["stage"], "已拆单待优化")
+            self.assertEqual(partial["orders"][0]["optimized_count"], 0)
 
             second = folder / "Vanity" / "Optimize file" / "layout file" / "nesting_result.xml"
             second.parent.mkdir(parents=True)
@@ -1540,9 +1646,9 @@ class OrderIndexTests(unittest.TestCase):
             with patch("traveler_assistant.order_index.load_aimes_order_cache", return_value=rows), \
                  patch("traveler_assistant.order_workflow.preview_order", return_value=preview):
                 complete = sync_order_index(config)
-            self.assertEqual(complete["orders"][0]["stage"], "已优化")
-            self.assertEqual(complete["orders"][0]["optimized_count"], 2)
-            self.assertTrue(complete["orders"][0]["optimization_completed_at"])
+            self.assertEqual(complete["orders"][0]["stage"], "已拆单待优化")
+            self.assertEqual(complete["orders"][0]["optimized_count"], 0)
+            self.assertFalse(complete["orders"][0]["optimization_completed_at"])
 
             original_mtime = first.stat().st_mtime
             first.write_text(
@@ -1554,7 +1660,7 @@ class OrderIndexTests(unittest.TestCase):
                  patch("traveler_assistant.order_workflow.preview_order", return_value=preview):
                 refreshed = sync_order_index(config)
             f100 = next(item for item in refreshed["orders"][0]["factories"] if item["factory_order"] == "F100")
-            self.assertNotEqual(
+            self.assertEqual(
                 f100["optimization_first_completed_at"],
                 f100["optimization_latest_completed_at"],
             )
@@ -1563,14 +1669,14 @@ class OrderIndexTests(unittest.TestCase):
                 "select count(*) from optimization_artifacts where factory_order='F100'"
             ).fetchone()[0]
             evidence_connection.close()
-            self.assertEqual(evidence, 2)
+            self.assertEqual(evidence, 0)
 
             rows.append({"factory_order": "F300", "factory_name": "PP0099-OFFICE", "sales_order_name": "PP0099", "split_time": "2026-08-12T08:30:00"})
             with patch("traveler_assistant.order_index.load_aimes_order_cache", return_value=rows), \
                  patch("traveler_assistant.order_workflow.preview_order", return_value=preview):
                 expanded = sync_order_index(config)
-            self.assertEqual(expanded["orders"][0]["stage"], "部分优化")
-            self.assertEqual(expanded["orders"][0]["optimized_count"], 2)
+            self.assertEqual(expanded["orders"][0]["stage"], "已拆单待优化")
+            self.assertEqual(expanded["orders"][0]["optimized_count"], 0)
 
     def test_optimization_marker_scan_uses_known_paths_without_recursive_file_walk(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1613,7 +1719,7 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(timing["duration_seconds"], file_total)
             self.assertGreaterEqual(timing["wall_duration_seconds"], timing["duration_seconds"])
 
-    def test_visible_server_scan_refreshes_aicnc_evidence_and_returns_updated_orders(self):
+    def test_visible_server_scan_keeps_optimization_state_unchanged(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = Config(state_dir=root / "state", source_root=root / "server" / "Optimized Orders")
@@ -1639,12 +1745,12 @@ class OrderIndexTests(unittest.TestCase):
             result = scan_server_changes(config)
 
             order = next(item for item in result["orders"] if item["order_id"] == "PP0099")
-            self.assertEqual(order["stage"], "已优化")
-            self.assertEqual(order["optimized_count"], 1)
-            self.assertEqual(result["server"]["scan_stats"]["optimization_artifact_refresh_count"], 1)
+            self.assertEqual(order["stage"], "已拆单待优化")
+            self.assertEqual(order["optimized_count"], 0)
+            self.assertNotIn("optimization_artifact_refresh_count", result["server"]["scan_stats"])
             self.assertEqual(
                 [stage["stage"] for stage in result["operation_timing"]["stages"]],
-                ["server_metadata", "optimization_evidence", "scan_finalize"],
+                ["server_metadata", "scan_finalize"],
             )
 
     def test_exact_standard_order_folder_wins_over_mixed_factory_report_folder(self):
@@ -1775,6 +1881,7 @@ class OrderIndexTests(unittest.TestCase):
 
             make_fittings(fittings, [("F100", 2)])
             store = OrderIndexStore(config.workflow_database)
+            self._seed_sku_products(store.connection)
             store.upsert_order("PP9999", validation_status="正常", source_folder=str(folder))
             store.upsert_factory(
                 "F100",
@@ -3649,6 +3756,7 @@ class OrderIndexTests(unittest.TestCase):
             material_path.write_bytes(b"source retained; preview owns validation")
 
             store = OrderIndexStore(config.workflow_database)
+            self._seed_sku_products(store.connection)
             store.upsert_order("PP0063-2", source_folder=str(folder))
             store.upsert_aimes_factory(
                 "F2606170170",
@@ -3661,13 +3769,13 @@ class OrderIndexTests(unittest.TestCase):
             store.connection.execute(
                 """
                 insert into material_items(
-                    order_id, material_type, color, thickness, quantity, unit,
-                    edge, source_type, source_path, source_fingerprint, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?)
+                    order_id, product_code, quantity, source_type, source_path,
+                    source_fingerprint, updated_at
+                ) values(?,?,?,?,?,?,?)
                 """,
                 (
-                    "PP0063-2", "panel", "Walnut", "19.1", 2, "张", "",
-                    "server", str(material_path), "fingerprint", "2026-08-19T09:38:40",
+                    "PP0063-2", "M-WALNUT", 2, "server", str(material_path),
+                    "fingerprint", "2026-08-19T09:38:40",
                 ),
             )
             store.connection.execute(
@@ -4067,6 +4175,9 @@ class OrderIndexTests(unittest.TestCase):
                 '<Nesting><BoardControl OrderID="F100" /></Nesting>',
                 encoding="utf-8",
             )
+            from tests.test_order_workflow import make_product_catalog
+            make_product_catalog(config.state_dir / "inventory" / "current-products.xlsx")
+            config.prepare_storage()
             store = OrderIndexStore(config.workflow_database)
             store.upsert_aimes_factory(
                 "F100",
@@ -4100,7 +4211,12 @@ class OrderIndexTests(unittest.TestCase):
             )
             self.assertIn("扫描范围：订单文件夹 1 个，相关 XML 文件 1 个", trace[1])
 
-            sync_order_index(config)
+            from tests.test_order_workflow import make_materials, make_board
+            make_materials(folder / "PP0035-2 materials.xlsx", "PP0035-2")
+            report_folder = folder / "Report"
+            report_folder.mkdir()
+            make_board(report_folder / "pp-板材清单.xlsx", "F100", "PP0035-2 KITCHEN")
+            sync_order_index(config, include_hardware=False)
             self.assertFalse(scan_server_changes(config)["server"]["changed"])
 
             xml_stat = nesting.stat()
@@ -4165,7 +4281,7 @@ class OrderIndexTests(unittest.TestCase):
             sync_order_index(config)
             self.assertFalse(scan_server_changes(config)["server"]["changed"])
 
-    def test_confirm_without_business_changes_only_updates_xml_scan_baseline(self):
+    def test_confirm_without_materials_does_not_establish_xml_scan_baseline(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = Config(state_dir=root / "state", source_root=root / "source")
@@ -4203,7 +4319,7 @@ class OrderIndexTests(unittest.TestCase):
                     store.connection.execute(
                         "select path, kind, modified_at from server_scan_xml_state"
                     ).fetchall(),
-                    [(str(xml), "optimization_result", int(xml.stat().st_mtime_ns // 1_000_000))],
+                    [],
                 )
                 self.assertEqual(store.connection.execute("select count(*) from orders").fetchone()[0], 0)
                 self.assertEqual(store.connection.execute("select count(*) from material_items").fetchone()[0], 0)
@@ -4254,10 +4370,12 @@ class OrderIndexTests(unittest.TestCase):
             root = Path(temp)
             config = Config(state_dir=root / "state")
             config.prepare_storage()
+            self._seed_config_products(config)
             folder = root / "server" / "PP0062"
             folder.mkdir(parents=True)
             preview_path = root / "preview.sqlite3"
             preview = OrderIndexStore(preview_path)
+            self._seed_sku_products(preview.connection)
             preview.upsert_order("PP0062", source_folder=str(folder), validation_status="正常")
             preview.upsert_factory(
                 "F2609060245", order_id="PP0062", source_folder=str(folder),
@@ -4272,6 +4390,13 @@ class OrderIndexTests(unittest.TestCase):
                 (str(folder / "nesting_result.xml"), "PP0062", "F2609060245", 10.0, 9.0,
                  "2026-09-06T10:00:00", "", "2026-09-06T11:00:00", "2026-09-06T11:00:00", 100),
             )
+            preview.connection.execute(
+                "insert into material_items(order_id,product_code,quantity,source_type,source_path,updated_at) values(?,?,?,?,?,?)",
+                ("PP0062", "M0004", 1, "aihouse", str(folder / "material.xlsx"), "2026-09-06T10:00:00"),
+            )
+            (folder / "material.xlsx").write_bytes(b"fixture")
+            preview.upsert_source_file(folder / "material.xlsx", source_folder=folder,
+                                       kind="material", order_id="PP0062", changed_at="2026-09-06T10:00:00")
             preview.commit()
             preview.close()
 
@@ -4307,6 +4432,7 @@ class OrderIndexTests(unittest.TestCase):
             artifact_columns = "source_path, order_id, factory_order, file_modified_at, file_created_at, completed_at, copied_at, first_seen_at, last_seen_at, size"
 
             current = OrderIndexStore(config.workflow_database)
+            self._seed_sku_products(current.connection)
             current.upsert_order("PP0062", source_folder=str(folder), validation_status="正常")
             current.upsert_factory(
                 "F2609060245", order_id="PP0062", source_folder=str(folder),
@@ -4323,6 +4449,10 @@ class OrderIndexTests(unittest.TestCase):
                 f"insert into optimization_artifacts(id,{artifact_columns}) values(?,?,?,?,?,?,?,?,?,?,?)",
                 (12, "/other/nesting_result.xml", "OTHER", "FOTHER", 10.0, 9.0,
                  "2026-09-06T10:00:00", "", "2026-09-06T11:00:00", "2026-09-06T11:00:00", 100),
+            )
+            current.connection.execute(
+                "insert into material_items(order_id,product_code,quantity,source_type,source_path,updated_at) values(?,?,?,?,?,?)",
+                ("PP0062", "M0004", 1, "aihouse", str(folder / "material.xlsx"), "2026-09-06T10:00:00"),
             )
             current.commit()
             current.close()
@@ -4418,6 +4548,9 @@ class OrderIndexTests(unittest.TestCase):
                 '<Nesting><BoardControl OrderID="F100" /></Nesting>',
                 encoding="utf-8",
             )
+            from tests.test_order_workflow import make_product_catalog
+            make_product_catalog(config.state_dir / "inventory" / "current-products.xlsx")
+            config.prepare_storage()
             store = OrderIndexStore(config.workflow_database)
             store.upsert_aimes_factory(
                 "F100",
@@ -4437,6 +4570,8 @@ class OrderIndexTests(unittest.TestCase):
                 first = scan_server_changes(config)["server"]
                 self.assertTrue(any(item["path"] == str(nesting) for item in first["changes"]))
 
+                from tests.test_order_workflow import make_materials
+                make_materials(folder / "CS003 materials.xlsx", "CS003")
                 sync_order_index(config)
                 repeated = scan_server_changes(config)["server"]
 

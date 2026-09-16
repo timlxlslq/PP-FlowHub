@@ -3306,6 +3306,55 @@ struct OutboundScopeSheet: View {
     }
 }
 
+struct FolderManualHandlingSheet: View {
+    @ObservedObject var model: AppModel
+    let group: ServerFolderChangeGroup
+    @Environment(\.dismiss) private var dismiss
+    @State private var referenceText = ""
+    @State private var outboundDocument = ""
+
+    private var references: [String] {
+        referenceText.components(separatedBy: CharacterSet(charactersIn: "、,，;； \n"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
+            .filter { !$0.isEmpty }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("登记已人工处理").font(.title2.weight(.semibold))
+            Text(group.folderName).font(.headline).textSelection(.enabled)
+            Text(group.folderPath).font(.caption).foregroundColor(.secondary).textSelection(.enabled)
+            Text("确认这个文件夹对应的本次补单或临时任务已在库存系统完成出库。App 只保存登记结果，不会再次扣减库存，也不会修改原订单。")
+                .font(.callout)
+            TextField("参考订单（可留空；多个用逗号分隔）", text: $referenceText)
+                .textFieldStyle(.roundedBorder)
+            Text("参考订单仅用于追溯，不参与材料、生产或出货汇总。")
+                .font(.caption).foregroundColor(.secondary)
+            TextField("外部出库单号（可留空）", text: $outboundDocument)
+                .textFieldStyle(.roundedBorder)
+            Text("登记后移出待处理；三天内 XML 变化会重新提醒。")
+                .font(.caption).foregroundColor(.secondary)
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("确认已在外部出库") {
+                    model.markTemporaryFolderManual(
+                        group.folderPath, referenceOrderIDs: references,
+                        outboundDocument: outboundDocument.trimmingCharacters(in: .whitespacesAndNewlines)
+                    )
+                    dismiss()
+                }
+                .buttonStyle(.glassProminent)
+                .disabled(model.orderRunning || model.inventoryRunning)
+            }
+        }
+        .padding(24)
+        .frame(width: 560)
+        .background(LiquidGlassPreviewBackdrop())
+        .onAppear { referenceText = group.referenceOrderIDs.joined(separator: "、") }
+    }
+}
+
 struct PendingCenterSheet: View {
     @ObservedObject var model: AppModel
     @State private var selectedID: String?
@@ -3315,6 +3364,7 @@ struct PendingCenterSheet: View {
     @State private var confirmationTitle = ""
     @State private var pendingAction: (() -> Void)?
     @State private var showActionConfirmation = false
+    @State private var manualHandlingGroup: ServerFolderChangeGroup?
 
     private func confirm(_ title: String, action: @escaping () -> Void) {
         confirmationTitle = title
@@ -3428,7 +3478,7 @@ struct PendingCenterSheet: View {
                                     .disabled(model.orderRunning || reviews.isEmpty)
                                 }
                                 if item.status == "待处理" || item.status == "处理失败" {
-                                    if !item.folderPath.isEmpty {
+                                    if !item.folderPath.isEmpty && item.serverGroup?.independentManual != true {
                                         Button(item.status == "处理失败" ? "重新读取并预览" : "选择并预览") { preview(item) }
                                             .buttonStyle(.glassProminent)
                                             .disabled(model.orderRunning || model.inventoryRunning)
@@ -3457,6 +3507,9 @@ struct PendingCenterSheet: View {
         .padding(20)
         .background(LiquidGlassPreviewBackdrop())
         .frame(width: 980, height: 620)
+        .sheet(item: $manualHandlingGroup) { group in
+            FolderManualHandlingSheet(model: model, group: group)
+        }
         .onAppear { reconcileSelection() }
         .onChange(of: visibleItems.map(\.id)) { _, _ in reconcileSelection() }
         .alert(confirmationTitle, isPresented: $showActionConfirmation) {
@@ -3488,6 +3541,9 @@ struct PendingCenterSheet: View {
     }
 
     private func detailExplanation(_ item: PendingCenterItem) -> String {
+        if item.serverGroup?.independentManual == true {
+            return "这是独立人工处理文件夹。补单依据最近同步的 AIMES 工厂单和已出库事实识别；请在外部完成出库后登记。"
+        }
         switch item.status {
         case "处理失败": return "请根据下方原因检查文件或连接，再重新读取。预览准备好后才能确认写入。"
         case "待人工确认": return "请核对原始信息和建议值，再确认具体操作；缺少的资料需要先补齐。"
@@ -3546,12 +3602,12 @@ struct PendingCenterSheet: View {
                     }
                     if group.manualOnly {
                         HStack(spacing: 8) {
-                            Text("这是临时文件夹；确认已在外部手工完成出库后，系统会记录当前基线，未来三天只观察两个 XML 文件。")
+                            Text("按此文件夹独立登记。请先在库存系统完成出库；参考订单可留空，登记不会改变原订单。完成后三天独立观察 XML。")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                             Spacer()
                             Button("已人工处理") {
-                                confirm("确认已在外部完成人工处理？") { model.markTemporaryFolderManual(group.folderPath) }
+                                manualHandlingGroup = group
                             }
                             .buttonStyle(.glassProminent)
                             .disabled(model.orderRunning)
@@ -4084,6 +4140,7 @@ struct CurrentIssuesSheet: View {
 
 struct ServerChangesSheet: View {
     @ObservedObject var model: AppModel
+    @State private var manualHandlingGroup: ServerFolderChangeGroup?
 
     var body: some View {
         let groups = serverFolderChangeGroups(model.pendingServerChanges)
@@ -4150,7 +4207,7 @@ struct ServerChangesSheet: View {
                                                     }
                                                 }
                                             }
-                                            if group.manualOnly {
+                                            if group.manualOnly && !group.independentManual {
                                                 Text("自动处理时将校验文件格式，优先读取 material；缺少时从 Report 生成材料并尝试出库，失败会保留在待处理清单。")
                                                     .font(.caption)
                                                     .foregroundColor(.orange)
@@ -4164,7 +4221,7 @@ struct ServerChangesSheet: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 if group.manualOnly {
                                     Button("已人工处理") {
-                                        model.markTemporaryFolderManual(group.folderPath)
+                                        manualHandlingGroup = group
                                     }
                                     .buttonStyle(.glassProminent)
                                     .disabled(model.orderRunning)
@@ -4193,6 +4250,9 @@ struct ServerChangesSheet: View {
         }
         .padding(20)
         .background(LiquidGlassPreviewBackdrop())
+        .sheet(item: $manualHandlingGroup) { group in
+            FolderManualHandlingSheet(model: model, group: group)
+        }
     }
 
     private func changeIcon(_ type: String) -> String {
@@ -4634,13 +4694,13 @@ struct ServerWriteConfirmationSheet: View {
                 }
             }
 
-            if !order.hardwareChanges.isEmpty {
+            if !order.existingHardwareChanges.isEmpty {
                 VStack(alignment: .leading, spacing: 7) {
-                    Text("五金变化（本次不写入）")
+                    Text("五金种类和数量变化")
                         .font(.subheadline.weight(.semibold))
                         .foregroundColor(AppPalette.warning)
                     hardwareChangeHeaderRow()
-                    ForEach(order.hardwareChanges) { hardware in
+                    ForEach(order.existingHardwareChanges) { hardware in
                         hardwareChangeRow(hardware)
                     }
                 }

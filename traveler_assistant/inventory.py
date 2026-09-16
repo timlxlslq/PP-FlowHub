@@ -41,7 +41,13 @@ from .core import (
     progress,
 )
 from .operation_log import configure_operation_log, log_database_statement, log_progress_payload
-from .database import ensure_outbound_document_factory_links, ensure_schema
+from .database import (
+    catalog_material_attributes,
+    connect_database,
+    enable_foreign_keys,
+    ensure_outbound_document_factory_links,
+    ensure_schema,
+)
 
 
 TRAVELER_RE = re.compile(r"^Work Order Traveler\(.+\)\.xlsx$", re.IGNORECASE)
@@ -87,6 +93,35 @@ class TravelerItem:
     name: str
     quantity: float
     document_remark: str = ""
+    product_code: str = ""
+
+    def source_snapshot(self) -> dict:
+        """Serialize the historical source shape used by raw fingerprints.
+
+        ``product_code`` is a separate canonical identity for database-backed
+        facts.  It must not change old Traveler snapshots, outbound raw
+        fingerprints, or pending-operation payloads, all of which were defined
+        in terms of these five source fields.
+        """
+        return {
+            "row": self.row,
+            "section": self.section,
+            "name": self.name,
+            "quantity": self.quantity,
+            "document_remark": self.document_remark,
+        }
+
+
+def _with_product_code(item: TravelerItem, product_code: str) -> TravelerItem:
+    """Attach canonical SKU without changing serialized source identity.
+
+    ``TravelerItem`` snapshots and raw outbound fingerprints predate SKU-backed
+    material facts and intentionally contain the human source name only.
+    ``source_snapshot`` preserves that shape while this explicit field makes
+    SKU identity survive ``dataclasses.replace`` and other normal copies.
+    """
+    item.product_code = str(product_code or "").strip().upper()
+    return item
 
 
 @dataclass
@@ -105,11 +140,11 @@ class TravelerData:
         return {
             "order_id": self.order_id,
             "documents": {
-                remark: [asdict(item) for item in items]
+                remark: [item.source_snapshot() for item in items]
                 for remark, items in sorted(self.documents.items())
             },
-            "items": [asdict(item) for item in self.items],
-            "zero_items": [asdict(item) for item in self.zero_items],
+            "items": [item.source_snapshot() for item in self.items],
+            "zero_items": [item.source_snapshot() for item in self.zero_items],
         }
 
 
@@ -124,6 +159,10 @@ class Product:
     unit: str = ""
     cost_price: float | None = None
     brand: str = ""
+    material_kind: str = ""
+    material_color: str = ""
+    material_thickness: str = ""
+    catalog_present: bool = True
 
 
 @dataclass
@@ -188,7 +227,7 @@ class InventoryPreview:
             # diagnostics, but the Swift preview intentionally does not
             # render them as outbound rows.
             "zero_items": [
-                asdict(item) for item in self.traveler.zero_items
+                item.source_snapshot() for item in self.traveler.zero_items
                 if not selected or _normalize_name(item.document_remark) in selected
             ],
             "ignored_items": self.ignored_items,
@@ -452,7 +491,7 @@ def mark_customer_supplied_outbound(
         factory_order: database_outbound_fingerprint(config, normalized_order_id, factory_order)
         for factory_order in sorted(factory_ids)
     }
-    connection = sqlite3.connect(config.workflow_database)
+    connection = connect_database(config.workflow_database)
     try:
         placeholders = ",".join("?" for _ in factory_ids)
         rows = connection.execute(
@@ -543,7 +582,7 @@ def mark_no_hardware_outbound(
         factory_order: database_outbound_fingerprint(config, normalized_order_id, factory_order)
         for factory_order in sorted(factory_ids)
     }
-    connection = sqlite3.connect(config.workflow_database)
+    connection = connect_database(config.workflow_database)
     try:
         placeholders = ",".join("?" for _ in factory_ids)
         rows = connection.execute(
@@ -651,7 +690,7 @@ def database_document_items(
     if production_materials is not None:
         materials = [dict(row) for row in production_materials]
     elif production_batch_number:
-        connection = sqlite3.connect(config.workflow_database)
+        connection = connect_database(config.workflow_database)
         connection.row_factory = sqlite3.Row
         try:
             batch = connection.execute(
@@ -663,8 +702,15 @@ def database_document_items(
             if batch["status"] not in {"prepared", "completed"}:
                 raise RuleError("production_batch_status", "生产批次当前不能出库")
             materials = [dict(row) for row in connection.execute(
-                """select material_type, color, thickness, quantity, unit, edge
-                   from manual_production_batch_materials where batch_id=? order by material_type, color, thickness""",
+                """select m.product_code, p.material_kind as material_type,
+                          p.material_color as color,
+                          p.material_thickness as thickness,
+                          m.quantity, p.unit,
+                          case when p.material_kind='edge' then p.material_color else '' end as edge
+                   from manual_production_batch_materials m
+                   join products p on p.code=m.product_code
+                   where m.batch_id=? order by p.material_kind, p.material_color,
+                                                p.material_thickness, m.product_code""",
                 (batch["batch_id"],),
             ).fetchall()]
         finally:
@@ -677,10 +723,15 @@ def database_document_items(
     else:
         material_rows = []
     for row in material_rows:
+        product_code = str(row.get("product_code", "") or "").strip().upper()
+        if not product_code:
+            raise RuleError(
+                "inventory_material_sku",
+                "数据库材料缺少已确认商品 SKU，不能按名称重新匹配",
+            )
         kind = str(row.get("material_type", "")).strip().casefold()
         color = str(row.get("color", "")).strip()
         thickness = float(str(row.get("thickness", "0") or "0"))
-        quantity = float(row.get("quantity", 0) or 0)
         if kind == "plywood":
             name = f"{thickness:g}mm--Plywood"
         elif kind in {"panel", "back"}:
@@ -688,8 +739,17 @@ def database_document_items(
         elif kind == "edge":
             name = f"Edge banding--{color}"
         else:
-            raise RuleError("inventory_material", f"数据库中的材料类型暂不支持：{kind or '空白'}")
-        item = TravelerItem(row_number, "板材与封边", name, quantity, normalized_order_id)
+            raise RuleError(
+                "inventory_material",
+                f"数据库中的材料类型暂不支持：{kind or '空白'}",
+            )
+        quantity = float(row.get("quantity", 0) or 0)
+        item = _with_product_code(
+            TravelerItem(
+                row_number, "板材与封边", name, quantity, normalized_order_id
+            ),
+            product_code,
+        )
         row_number += 1
         if quantity <= 0:
             zero_items.append(item)
@@ -710,11 +770,19 @@ def database_document_items(
         source_code = str(row.get("source_code", "")).strip()
         name = (
             product_code
-            if product_code and (product_code.upper().startswith("M") or (source_code and source_code != product_code))
+            if product_code and (
+                product_code.upper().startswith("M")
+                or (source_code and source_code != product_code)
+            )
             else str(row.get("name", "")).strip() or product_code
         )
-        quantity = float(row.get("quantity", 0) or 0)
-        item = TravelerItem(row_number, "五金", name, quantity, remark)
+        item = _with_product_code(
+            TravelerItem(
+                row_number, "五金", name, float(row.get("quantity", 0) or 0), remark
+            ),
+            product_code,
+        )
+        quantity = item.quantity
         row_number += 1
         if quantity <= 0:
             zero_items.append(item)
@@ -754,7 +822,7 @@ def outbound_scope_decisions(
         for value in (selected_factory_orders or [])
         if str(value).strip()
     }
-    rows = sqlite3.connect(config.workflow_database)
+    rows = connect_database(config.workflow_database)
     rows.row_factory = sqlite3.Row
     try:
         decisions = rows.execute(
@@ -845,7 +913,7 @@ def set_outbound_scope(
     if requirement in {"customer_supplied", "remainder", "not_required"} and not reason.strip():
         raise RuleError("inventory_scope_reason", "不出库决定必须填写原因")
     now = datetime.now().astimezone().isoformat(timespec="seconds")
-    connection = sqlite3.connect(config.workflow_database)
+    connection = connect_database(config.workflow_database)
     try:
         connection.execute(
             """insert into outbound_scope_decisions(
@@ -947,14 +1015,14 @@ def build_database_preview(
         catalog = catalog_context or ProductCatalog(catalog_path)
         for remark, items in documents.items():
             for item in items:
-                reason = mappings.ignored_reason(item.name)
+                reason = None if item.product_code else mappings.ignored_reason(item.name)
                 if reason is not None:
-                    ignored.append({**asdict(item), "reason": reason})
+                    ignored.append({**item.source_snapshot(), "reason": reason})
                     continue
                 try:
                     outbound.extend(match_item(catalog, mappings, item))
                 except RuleError as exc:
-                    missing.append({**asdict(item), "code": exc.code, "message": str(exc), **exc.context})
+                    missing.append({**item.source_snapshot(), "code": exc.code, "message": str(exc), **exc.context})
     finally:
         if catalog_context is not None:
             catalog_context.close()
@@ -978,10 +1046,10 @@ def build_database_preview(
     snapshot = {
         "order_id": normalized_order_id,
         "documents": {
-            remark: [asdict(item) for item in items]
+            remark: [item.source_snapshot() for item in items]
             for remark, items in sorted(documents.items())
         },
-        "zero_items": [asdict(item) for item in zero_items],
+        "zero_items": [item.source_snapshot() for item in zero_items],
     }
     traveler = TravelerData(
         path=config.workflow_database.resolve(),
@@ -1023,7 +1091,7 @@ def _assert_single_server_material_source(config: Config, order_id: str) -> None
     normalized_order_id = str(order_id or "").strip().upper()
     if not normalized_order_id:
         return
-    connection = sqlite3.connect(config.workflow_database)
+    connection = connect_database(config.workflow_database)
     try:
         paths = [
             str(row[0] or "")
@@ -1104,6 +1172,43 @@ def build_factory_room_preview(
             source_path=str(material_path),
         )
 
+    def material_identity(kind: str, color: str, thickness: object) -> tuple[str, str, float]:
+        try:
+            normalized_thickness = round(float(str(thickness or "0")), 4)
+        except ValueError:
+            normalized_thickness = 0.0
+        return (
+            str(kind or "").strip().casefold(),
+            _normalize_name(str(color or "")),
+            normalized_thickness,
+        )
+
+    material_codes: dict[tuple[str, str, float], set[str]] = defaultdict(set)
+    for row in detail.get("materials", []):
+        if Path(str(row.get("source_path", "")).strip()) != material_path:
+            continue
+        code = str(row.get("product_code", "") or "").strip().upper()
+        if code:
+            material_codes[material_identity(
+                str(row.get("material_type", "")),
+                str(row.get("color", "")),
+                row.get("thickness", ""),
+            )].add(code)
+
+    def confirmed_material_code(kind: str, color: str, thickness: object) -> str:
+        identity = material_identity(kind, color, thickness)
+        codes = material_codes.get(identity, set())
+        if len(codes) != 1:
+            raise RuleError(
+                "inventory_material_sku",
+                "房间材料无法唯一对应已确认商品 SKU，不能按名称重新匹配",
+                material_kind=identity[0],
+                material_color=color,
+                material_thickness=identity[2],
+                product_codes=sorted(codes),
+            )
+        return next(iter(codes))
+
     documents: dict[str, list[TravelerItem]] = {factory_name: []}
     row_number = 1
     for _, items, edges in selected_rows:
@@ -1118,15 +1223,17 @@ def build_factory_room_preview(
                 name = f"Edge banding--{material.color}"
             else:
                 raise RuleError("inventory_material", f"数据库中的材料类型暂不支持：{material.kind or '空白'}")
-            documents[factory_name].append(
-                TravelerItem(row_number, "板材与封边", name, float(material.quantity), factory_name)
-            )
+            documents[factory_name].append(_with_product_code(
+                TravelerItem(row_number, "板材与封边", name, float(material.quantity), factory_name),
+                confirmed_material_code(material.kind, material.color, material.thickness),
+            ))
             row_number += 1
         for color, quantity in edges.items():
             if quantity > 0:
-                documents[factory_name].append(
-                    TravelerItem(row_number, "板材与封边", f"Edge banding--{color}", float(quantity), factory_name)
-                )
+                documents[factory_name].append(_with_product_code(
+                    TravelerItem(row_number, "板材与封边", f"Edge banding--{color}", float(quantity), factory_name),
+                    confirmed_material_code("edge", color, 0),
+                ))
                 row_number += 1
 
     for row in detail.get("hardware", []):
@@ -1142,9 +1249,10 @@ def build_factory_room_preview(
             if product_code and (product_code.upper().startswith("M") or (source_code and source_code != product_code))
             else str(row.get("name", "")).strip() or product_code
         )
-        documents[factory_name].append(
-            TravelerItem(row_number, "五金", name, quantity, factory_name)
-        )
+        documents[factory_name].append(_with_product_code(
+            TravelerItem(row_number, "五金", name, quantity, factory_name),
+            product_code,
+        ))
         row_number += 1
     if not documents[factory_name]:
         raise RuleError(
@@ -1165,14 +1273,14 @@ def build_factory_room_preview(
     try:
         catalog = catalog_context or ProductCatalog(catalog_path)
         for item in documents[factory_name]:
-            reason = mappings.ignored_reason(item.name)
+            reason = None if item.product_code else mappings.ignored_reason(item.name)
             if reason is not None:
-                ignored.append({**asdict(item), "reason": reason})
+                ignored.append({**item.source_snapshot(), "reason": reason})
                 continue
             try:
                 outbound.extend(match_item(catalog, mappings, item))
             except RuleError as exc:
-                missing.append({**asdict(item), "code": exc.code, "message": str(exc), **exc.context})
+                missing.append({**item.source_snapshot(), "code": exc.code, "message": str(exc), **exc.context})
     finally:
         if catalog_context is not None:
             catalog_context.close()
@@ -1185,7 +1293,7 @@ def build_factory_room_preview(
         zero_items=[],
         documents=documents,
         modified_at=datetime.fromtimestamp(material_path.stat().st_mtime).isoformat(timespec="seconds"),
-        fingerprint=_fingerprint({"factory_order": normalized_factory, "documents": {factory_name: [asdict(item) for item in documents[factory_name]]}}),
+        fingerprint=_fingerprint({"factory_order": normalized_factory, "documents": {factory_name: [item.source_snapshot() for item in documents[factory_name]]}}),
     )
     return InventoryPreview(
         traveler=traveler,
@@ -1473,10 +1581,10 @@ def parse_traveler(path: Path) -> TravelerData:
     snapshot = {
         "order_id": order_id,
         "documents": {
-            remark: [asdict(item) for item in values]
+            remark: [item.source_snapshot() for item in values]
             for remark, values in sorted(documents.items())
         },
-        "zero_items": [asdict(item) for item in zero_items],
+        "zero_items": [item.source_snapshot() for item in zero_items],
     }
     return TravelerData(
         path=path.resolve(),
@@ -1620,7 +1728,7 @@ class ProductDatabase:
         if not path.is_file():
             raise RuleError("product_database_missing", f"尚未导入库存商品数据库：{path}")
         try:
-            self.connection = sqlite3.connect(path)
+            self.connection = connect_database(path)
             self.connection.set_trace_callback(lambda statement: log_database_statement(path, statement))
             version = int(self.connection.execute("pragma user_version").fetchone()[0])
             # The product catalog lives in the shared workflow database, whose
@@ -1662,13 +1770,18 @@ class ProductDatabase:
             remark=str(row[6] or ""),
             unit=str(row[7] or ""),
             cost_price=None if row[8] is None else float(row[8]),
+            material_kind=str(row[9] or ""),
+            material_color=str(row[10] or ""),
+            material_thickness=str(row[11] or ""),
+            catalog_present=bool(row[12]),
         )
 
     @property
     def products(self) -> list[Product]:
         rows = self.connection.execute(
             """
-            select category, code, name, spec, status, brand, remark, unit, cost_price
+            select category, code, name, spec, status, brand, remark, unit, cost_price,
+                   material_kind, material_color, material_thickness, catalog_present
             from products order by code
             """
         ).fetchall()
@@ -1680,7 +1793,8 @@ class ProductDatabase:
     def require_code(self, code: str) -> Product:
         rows = self.connection.execute(
             """
-            select category, code, name, spec, status, brand, remark, unit, cost_price
+            select category, code, name, spec, status, brand, remark, unit, cost_price,
+                   material_kind, material_color, material_thickness, catalog_present
             from products where normalized_code = ?
             """,
             (_normalize_name(code),),
@@ -1690,6 +1804,8 @@ class ProductDatabase:
         product = self._from_row(rows[0])
         if not product.code or not product.name:
             raise RuleError("product_invalid", f"当前需要的商品 {code} 缺少编号或名称")
+        if not product.catalog_present:
+            raise RuleError("product_catalog_missing", f"商品已不在最新商品目录中：{code} {product.name}")
         if product.status and product.status != "启用":
             raise RuleError("product_disabled", f"商品已停用：{code} {product.name}")
         return product
@@ -1718,7 +1834,8 @@ class ProductDatabase:
             )
             parameters.extend([f"%{token}%"] * 5)
         query = """
-            select category, code, name, spec, status, brand, remark, unit, cost_price
+            select category, code, name, spec, status, brand, remark, unit, cost_price,
+                   material_kind, material_color, material_thickness, catalog_present
             from products
         """
         if clauses:
@@ -1728,6 +1845,7 @@ class ProductDatabase:
             self._from_row(row)
             for row in self.connection.execute(query, parameters).fetchall()
         ]
+        results = [product for product in results if product.catalog_present]
         if spec_thickness is None:
             return results
         aliases = {14.5: 15.0, 5.4: 5.2, 8.0: 9.0}
@@ -1745,7 +1863,7 @@ class ProductDatabase:
 
 def _create_product_database(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path)
+    connection = connect_database(path)
     connection.set_trace_callback(lambda statement: log_database_statement(path, statement))
     try:
         connection.executescript(
@@ -1764,7 +1882,11 @@ def _create_product_database(path: Path) -> None:
                 normalized_name text not null,
                 normalized_spec text not null,
                 normalized_category text not null,
-                normalized_remark text not null
+                normalized_remark text not null,
+                material_kind text not null default '',
+                material_color text not null default '',
+                material_thickness text not null default '',
+                catalog_present integer not null default 1
             );
             create index if not exists idx_products_name on products(normalized_name);
             create index if not exists idx_products_category on products(normalized_category);
@@ -1790,18 +1912,67 @@ def _replace_product_database(path: Path, products: list[Product]) -> None:
             product_codes=duplicate_codes,
         )
     _create_product_database(path)
-    connection = sqlite3.connect(path)
+    connection = connect_database(path)
     connection.set_trace_callback(lambda statement: log_database_statement(path, statement))
     try:
         connection.execute("begin immediate")
-        connection.execute("delete from products")
+        reference_tables = [
+            table for table in (
+                "material_items",
+                "manual_production_batch_materials",
+                "server_material_allocations",
+            )
+            if connection.execute(
+                "select 1 from sqlite_master where type='table' and name=?",
+                (table,),
+            ).fetchone()
+        ]
+        referenced_codes: set[str] = set()
+        for table in reference_tables:
+            referenced_codes.update(
+                str(row[0] or "").strip().upper()
+                for row in connection.execute(
+                    f"select distinct product_code from {table}"
+                ).fetchall()
+                if str(row[0] or "").strip()
+            )
+        bound_attributes = {
+            str(row[0] or "").strip().upper(): (
+                str(row[1] or ""), str(row[2] or ""), str(row[3] or "")
+            )
+            for row in connection.execute(
+                """select code,material_kind,material_color,material_thickness
+                   from products"""
+            ).fetchall()
+            if str(row[0] or "").strip().upper() in referenced_codes
+        }
+        connection.execute("update products set catalog_present=0")
         connection.executemany(
             """
             insert into products(
                 category, code, name, spec, status, brand, remark, unit, cost_price,
                 normalized_code, normalized_name, normalized_spec,
-                normalized_category, normalized_remark
-            ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                normalized_category, normalized_remark,
+                material_kind, material_color, material_thickness, catalog_present
+            ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+            on conflict(code) do update set
+                category=excluded.category,
+                name=excluded.name,
+                spec=excluded.spec,
+                status=excluded.status,
+                brand=excluded.brand,
+                remark=excluded.remark,
+                unit=excluded.unit,
+                cost_price=excluded.cost_price,
+                normalized_code=excluded.normalized_code,
+                normalized_name=excluded.normalized_name,
+                normalized_spec=excluded.normalized_spec,
+                normalized_category=excluded.normalized_category,
+                normalized_remark=excluded.normalized_remark,
+                material_kind=excluded.material_kind,
+                material_color=excluded.material_color,
+                material_thickness=excluded.material_thickness,
+                catalog_present=1
             """,
             [
                 (
@@ -1819,6 +1990,12 @@ def _replace_product_database(path: Path, products: list[Product]) -> None:
                     _normalize_name(product.spec),
                     _normalize_name(product.category),
                     _normalize_name(product.remark),
+                    *bound_attributes.get(
+                        product.code.strip().upper(),
+                        catalog_material_attributes(
+                            product.category, product.name, product.spec, product.code
+                        ),
+                    ),
                 )
                 for product in products
             ],
@@ -1870,7 +2047,7 @@ class InventoryMappings:
             ensure_schema(self.database_path)
 
     def _rows(self, rule_type: str | None = None) -> list[sqlite3.Row]:
-        connection = self._connection or sqlite3.connect(self.database_path)
+        connection = self._connection or connect_database(self.database_path)
         connection.row_factory = sqlite3.Row
         try:
             if rule_type:
@@ -1932,7 +2109,7 @@ class InventoryMappings:
         if self._legacy_path is not None:
             legacy_name = self.manual_display_names.get(_normalize_name(source_name), "").strip()
             return legacy_name or HARDWARE_PRODUCT_DISPLAY_NAMES.get(code, "") or source_name.strip()
-        connection = self._connection or sqlite3.connect(self.database_path)
+        connection = self._connection or connect_database(self.database_path)
         try:
             row = connection.execute(
                 """select display_name from inventory_resolution_rules
@@ -1968,7 +2145,7 @@ class InventoryMappings:
         normalized = _normalize_name(name)
         if self._legacy_path is not None:
             return self.ignored.get(normalized)
-        connection = self._connection or sqlite3.connect(self.database_path)
+        connection = self._connection or connect_database(self.database_path)
         try:
             row = connection.execute(
                 "select reason from inventory_resolution_rules where normalized_name=? and rule_type='ignore'",
@@ -1983,7 +2160,7 @@ class InventoryMappings:
         normalized = _normalize_name(name)
         if self._legacy_path is not None:
             return self.manual.get(normalized)
-        connection = self._connection or sqlite3.connect(self.database_path)
+        connection = self._connection or connect_database(self.database_path)
         try:
             row = connection.execute(
                 "select product_code from inventory_resolution_rules where normalized_name=? and rule_type='mapping'",
@@ -2055,7 +2232,7 @@ class InventoryMappings:
         reason: str,
         display_name: str = "",
     ) -> None:
-        connection = sqlite3.connect(self.database_path)
+        connection = connect_database(self.database_path)
         try:
             connection.execute(
                 """insert into inventory_resolution_rules(
@@ -2085,7 +2262,7 @@ class InventoryMappings:
                     self.manual_display_names[normalized] = display_name
             self._save()
             return
-        connection = sqlite3.connect(self.database_path)
+        connection = connect_database(self.database_path)
         try:
             connection.execute(
                 """update inventory_resolution_rules
@@ -2098,7 +2275,7 @@ class InventoryMappings:
             connection.close()
 
     def _delete(self, normalized: str, rule_type: str) -> None:
-        connection = sqlite3.connect(self.database_path)
+        connection = connect_database(self.database_path)
         try:
             connection.execute(
                 "delete from inventory_resolution_rules where normalized_name=? and rule_type=?",
@@ -2165,7 +2342,7 @@ def remove_ignored_hardware_records(config: Config, names: Iterable[str]) -> int
     ignored_names = {_normalize_name(name) for name in names if _normalize_name(name)}
     if not ignored_names or not config.workflow_database.is_file():
         return 0
-    connection = sqlite3.connect(config.workflow_database)
+    connection = connect_database(config.workflow_database)
     try:
         rows = connection.execute(
             "select id, name, product_code, source_code from hardware_items"
@@ -2234,6 +2411,12 @@ def match_item(catalog: ProductCatalog, mappings: InventoryMappings, item: Trave
             f"{source}（{item.quantity:g}m→{rounded:g}m，四舍五入取整）",
         )
 
+    canonical_code = str(getattr(item, "product_code", "") or "").strip().upper()
+    if canonical_code:
+        product = catalog.require_code(canonical_code)
+        if _normalize_name(product.category) == _normalize_name("Edge band"):
+            return [edge_outbound(product, "数据库 canonical SKU")]
+        return [outbound(product, item.quantity, "数据库 canonical SKU")]
     ignored = mappings.ignored_reason(item.name)
     if ignored is not None:
         return []
@@ -2251,6 +2434,8 @@ def match_item(catalog: ProductCatalog, mappings: InventoryMappings, item: Trave
     except RuleError:
         product = None
     if product is not None:
+        if _normalize_name(product.category) == _normalize_name("Edge band"):
+            return [edge_outbound(product, "数据库 canonical SKU")]
         return [outbound(product, item.quantity, "数据库 canonical SKU")]
     normalized = _normalize_name(item.name)
     if normalized == "PUSHOPEN":
@@ -2350,7 +2535,7 @@ def resolve_inventory_items(
                     "ignored": True,
                 })
                 ignored.append({
-                    **asdict(item),
+                    **item.source_snapshot(),
                     "source_code": source_code,
                     "reason": reason,
                 })
@@ -2372,7 +2557,7 @@ def resolve_inventory_items(
                     "ignored": False,
                 })
                 missing.append({
-                    **asdict(item),
+                    **item.source_snapshot(),
                     "source_code": source_code,
                     "code": exc.code,
                     "message": str(exc),
@@ -2396,6 +2581,76 @@ def resolved_product_code(resolution: dict, index: int, fallback: str = "") -> s
     return str(fallback or "").strip()
 
 
+def confirm_product_material_attributes(
+    connection: sqlite3.Connection,
+    product_code: str,
+    material_kind: str,
+    material_color: str = "",
+    material_thickness: object = "",
+) -> None:
+    """Bind catalog-owned workflow attributes on first confirmed SKU use.
+
+    Raw catalog names/specifications remain unchanged.  Once an SKU is used
+    by an order material, a later mapping cannot silently reinterpret that SKU
+    as another workflow color or nominal thickness.
+    """
+    code = str(product_code or "").strip().upper()
+    kind = str(material_kind or "").strip().casefold()
+    color = str(material_color or "").strip() if kind in {"panel", "edge", "back"} else ""
+    thickness_text = str(material_thickness or "").strip()
+    try:
+        thickness = f"{float(thickness_text):g}" if thickness_text else ""
+    except ValueError as exc:
+        raise RuleError("product_material_attributes", f"商品 {code} 的材料厚度无效：{thickness_text}") from exc
+    row = connection.execute(
+        """select material_kind,material_color,material_thickness,catalog_present,status
+           from products where code=?""",
+        (code,),
+    ).fetchone()
+    if row is None:
+        raise RuleError("product_conflict", f"商品编号 {code} 匹配到 0 条记录", product_code=code)
+    if not bool(row[3]) or (row[4] and str(row[4]) != "启用"):
+        raise RuleError("product_disabled", f"商品不可用于新的材料确认：{code}")
+    has_confirmed_fact = any(
+        connection.execute(
+            f"select 1 from {table} where product_code=? limit 1", (code,)
+        ).fetchone() is not None
+        for table in (
+            "material_items",
+            "manual_production_batch_materials",
+            "server_material_allocations",
+        )
+        if connection.execute(
+            "select 1 from sqlite_master where type='table' and name=?", (table,)
+        ).fetchone() is not None
+    )
+    existing = (str(row[0] or ""), str(row[1] or ""), str(row[2] or ""))
+    desired = (kind, color, thickness)
+    if has_confirmed_fact:
+        same_color = _normalize_name(existing[1]) == _normalize_name(desired[1])
+        same_thickness = (
+            (not existing[2] and not desired[2])
+            or (
+                existing[2] and desired[2]
+                and abs(float(existing[2]) - float(desired[2])) < 0.01
+            )
+        )
+        if existing[0] != desired[0] or not same_color or not same_thickness:
+            raise RuleError(
+                "product_material_attribute_conflict",
+                f"商品 {code} 已关联其他材料属性，不能静默重绑",
+                product_code=code,
+                existing={"material_kind": existing[0], "material_color": existing[1], "material_thickness": existing[2]},
+                requested={"material_kind": kind, "material_color": color, "material_thickness": thickness},
+            )
+        return
+    connection.execute(
+        """update products set material_kind=?,material_color=?,material_thickness=?
+           where code=?""",
+        (kind, color, thickness, code),
+    )
+
+
 def repair_hardware_inventory_codes(config: Config) -> dict:
     """Backfill canonical SKUs and collapse historical rail-pair rows.
 
@@ -2405,7 +2660,7 @@ def repair_hardware_inventory_codes(config: Config) -> dict:
     left untouched and returned for explicit review.
     """
     ensure_schema(config.workflow_database)
-    connection = sqlite3.connect(config.workflow_database)
+    connection = connect_database(config.workflow_database)
     connection.row_factory = sqlite3.Row
     unresolved: list[dict] = []
     canonicalized = 0
@@ -2546,13 +2801,13 @@ def build_preview(
                 continue
             reason = mappings.ignored_reason(item.name)
             if reason is not None:
-                ignored.append({**asdict(item), "reason": reason})
+                ignored.append({**item.source_snapshot(), "reason": reason})
                 continue
             try:
                 outbound.extend(match_item(catalog, mappings, item))
             except RuleError as exc:
                 missing.append({
-                    **asdict(item),
+                    **item.source_snapshot(),
                     "code": exc.code,
                     "message": str(exc),
                     **exc.context,
@@ -2735,7 +2990,7 @@ class InventoryOperationJournal:
         })
         operation_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         now = datetime.now().astimezone().isoformat(timespec="seconds")
-        connection = sqlite3.connect(self.database)
+        connection = connect_database(self.database)
         connection.row_factory = sqlite3.Row
         try:
             connection.execute(
@@ -2782,7 +3037,7 @@ class InventoryOperationJournal:
         increment_attempt: bool = False,
     ) -> None:
         now = datetime.now().astimezone().isoformat(timespec="seconds")
-        connection = sqlite3.connect(self.database)
+        connection = connect_database(self.database)
         try:
             assignments = ["status=?", "last_error=?", "updated_at=?"]
             values: list[object] = [status, str(error or ""), now]
@@ -2854,8 +3109,34 @@ class InventorySyncStore:
             )
         })
 
+    @staticmethod
+    def canonical_document_fingerprint(
+        items: list[TravelerItem],
+    ) -> str | None:
+        """Return mapped identity when every database item carries its SKU.
+
+        Files parsed directly from a Traveler do not yet have canonical SKUs,
+        so their status continues to rely on the historical raw fingerprint.
+        Database projections carry the explicit SKU and can therefore
+        detect a same-name/same-quantity product change as well.
+        """
+        values: list[tuple[str, float]] = []
+        for item in items:
+            product_code = str(item.product_code or "").strip().upper()
+            if not product_code:
+                return None
+            quantity = float(item.quantity)
+            if EDGE_RE.fullmatch(str(item.name or "").strip()):
+                quantity = float(
+                    Decimal(str(quantity)).quantize(
+                        Decimal("1"), rounding=ROUND_HALF_UP
+                    )
+                )
+            values.append((product_code, quantity))
+        return _fingerprint({"items": sorted(values)})
+
     def _records(self) -> list[dict]:
-        connection = sqlite3.connect(self.database)
+        connection = connect_database(self.database)
         try:
             rows = connection.execute(
                 """select document_number, document_type, order_id, factory_order,
@@ -2939,6 +3220,14 @@ class InventorySyncStore:
             document_numbers.append(str(record.get("document_number", "")))
             if record.get("raw_fingerprint") != self.raw_document_fingerprint(items):
                 changed = True
+                continue
+            canonical_fingerprint = self.canonical_document_fingerprint(items)
+            if (
+                canonical_fingerprint is not None
+                and record.get("mapped_fingerprint")
+                and record.get("mapped_fingerprint") != canonical_fingerprint
+            ):
+                changed = True
         if changed:
             return "需要更新", "、".join(filter(None, document_numbers))
         if missing:
@@ -3020,7 +3309,7 @@ class InventorySyncStore:
     ) -> None:
         self._backup_current()
         prepared = {item["remark"]: item for item in self.prepare_documents(preview)}
-        connection = sqlite3.connect(self.database)
+        connection = connect_database(self.database)
         try:
             for result in results:
                 if not result.get("saved") and not result.get("unchanged"):
@@ -3245,10 +3534,14 @@ def bootstrap_product_database(config: Config) -> Path:
             has_products = connection.execute(
                 "select 1 from sqlite_master where type='table' and name='products'"
             ).fetchone() is not None
+            product_count = (
+                int(connection.execute("select count(*) from products").fetchone()[0])
+                if has_products else 0
+            )
             connection.close()
         except sqlite3.Error:
             has_products = False
-        if has_products:
+        if has_products and product_count:
             return destination
         if source.is_file():
             import_catalog(config, source)

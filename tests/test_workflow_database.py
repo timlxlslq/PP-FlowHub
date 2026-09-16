@@ -87,11 +87,24 @@ class WorkflowDatabaseTests(unittest.TestCase):
                     source_fingerprint text not null default '',
                     updated_at text not null
                 );
+                create table products(
+                    category text not null default '', code text primary key,
+                    name text not null default '', spec text not null default '',
+                    status text not null default '', brand text not null default '',
+                    remark text not null default '', unit text not null default '',
+                    cost_price real, normalized_code text not null,
+                    normalized_name text not null, normalized_spec text not null,
+                    normalized_category text not null, normalized_remark text not null
+                );
+                insert into products values(
+                    'Panel','M-PANEL','White','19.1mm','启用','','','pcs',null,
+                    'MPANEL','WHITE','191MM','PANEL',''
+                );
                 create table material_allocations(id integer primary key);
-                insert into material_items(order_id, factory_order, scope, material_type, quantity, unit, updated_at)
-                    values('PP9999', '', 'order', 'panel', 4, 'pcs', 'now');
-                insert into material_items(order_id, factory_order, scope, material_type, quantity, unit, updated_at)
-                    values('PP9999', 'F100', 'factory_order', 'panel', 2, 'pcs', 'now');
+                insert into material_items(order_id, factory_order, scope, material_type, color, thickness, quantity, unit, updated_at)
+                    values('PP9999', '', 'order', 'panel', 'White', '19.1', 4, 'pcs', 'now');
+                insert into material_items(order_id, factory_order, scope, material_type, color, thickness, quantity, unit, updated_at)
+                    values('PP9999', 'F100', 'factory_order', 'panel', 'White', '19.1', 2, 'pcs', 'now');
                 """
             )
             connection.commit()
@@ -103,7 +116,12 @@ class WorkflowDatabaseTests(unittest.TestCase):
             columns = [row[1] for row in connection.execute("pragma table_info(material_items)")]
             self.assertNotIn("factory_order", columns)
             self.assertNotIn("scope", columns)
+            self.assertEqual(columns, [
+                "id", "order_id", "product_code", "quantity", "source_type",
+                "source_path", "source_fingerprint", "updated_at",
+            ])
             self.assertEqual(connection.execute("select quantity from material_items").fetchone()[0], 4)
+            self.assertEqual(connection.execute("select product_code from material_items").fetchone()[0], "M-PANEL")
             self.assertIsNone(connection.execute("select 1 from sqlite_master where name='material_allocations'").fetchone())
             connection.close()
 
@@ -128,11 +146,12 @@ class WorkflowDatabaseTests(unittest.TestCase):
             self.assertEqual(result["status"], "completed")
             connection = sqlite3.connect(central)
             self.assertEqual(connection.execute("select order_id from orders").fetchone()[0], "PP9999")
-            self.assertIsNone(
+            self.assertIsNotNone(
                 connection.execute(
                     "select 1 from sqlite_master where type='table' and name='products'"
                 ).fetchone()
             )
+            self.assertIsNone(connection.execute("select code from products where code='M1'").fetchone())
             connection.close()
             self.assertTrue(list((state / "migration-archives").rglob("*.sqlite3")))
             self.assertTrue(legacy_inventory.is_file())

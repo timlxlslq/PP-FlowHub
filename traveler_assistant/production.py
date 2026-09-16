@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Iterable
 
 from .core import Config, RuleError
-from .database import ensure_schema
+from .database import connect_database, ensure_schema
 
 
 def _now() -> str:
@@ -26,14 +26,19 @@ def _normal(value: object) -> str:
 
 
 def material_key(row: dict) -> str:
-    return "|".join(
-        _normal(row.get(name))
-        for name in ("material_type", "color", "thickness", "edge", "unit")
-    )
+    product_code = _normal(row.get("product_code")).upper()
+    if not product_code:
+        raise RuleError(
+            "production_material_sku",
+            "生产材料缺少已确认商品 SKU，不能按颜色、厚度或单位重新识别",
+        )
+    return product_code
 
 
 def _material_row(row: sqlite3.Row | dict) -> dict:
-    result = {name: _normal(row[name]) for name in ("material_type", "color", "thickness", "edge", "unit")}
+    result = {name: _normal(row[name]) for name in (
+        "product_code", "material_type", "color", "thickness", "edge", "unit"
+    )}
     result["quantity"] = float(row["quantity"] or 0)
     result["key"] = material_key(result)
     return result
@@ -41,7 +46,7 @@ def _material_row(row: sqlite3.Row | dict) -> dict:
 
 def _connect(config: Config) -> sqlite3.Connection:
     ensure_schema(config.workflow_database)
-    connection = sqlite3.connect(config.workflow_database)
+    connection = connect_database(config.workflow_database)
     connection.row_factory = sqlite3.Row
     return connection
 
@@ -67,44 +72,30 @@ def _selected_factory_rows(connection: sqlite3.Connection, order_id: str, factor
 
 def _consumed(connection: sqlite3.Connection, order_id: str) -> dict[str, float]:
     rows = connection.execute(
-        """select material_type, color, thickness, edge, unit, coalesce(sum(quantity), 0) quantity
+        """select product_code, coalesce(sum(quantity), 0) quantity
            from manual_production_batch_materials m
            join manual_production_batches b on b.batch_id=m.batch_id
            where m.order_id=? and b.status='completed'
-           group by material_type, color, thickness, edge, unit""",
+           group by product_code""",
         (order_id,),
     ).fetchall()
-    return {material_key(dict(row)): float(row["quantity"] or 0) for row in rows}
+    return {str(row["product_code"] or "").upper(): float(row["quantity"] or 0) for row in rows}
 
 
 def _order_material_rows(connection: sqlite3.Connection, order_id: str) -> list[dict]:
     """Read one row per order-material identity, including duplicate sources."""
     rows = connection.execute(
-        """select material_type, color, thickness, edge, unit, coalesce(sum(quantity), 0) quantity
-           from material_items
-           where order_id=?
-           group by material_type, color, thickness, edge, unit
-           order by material_type, color, thickness, edge, unit""",
+        """select m.product_code, p.material_kind as material_type,
+                  p.material_color as color, p.material_thickness as thickness,
+                  case when p.material_kind='edge' then p.material_color else '' end as edge,
+                  p.unit, coalesce(sum(m.quantity), 0) quantity
+           from material_items m join products p on p.code=m.product_code
+           where m.order_id=?
+           group by m.product_code
+           order by p.material_kind, p.material_color, p.material_thickness, m.product_code""",
         (order_id,),
     ).fetchall()
     return [_material_row(row) for row in rows]
-
-
-def _inventory_name_key(value: object) -> str:
-    return "".join(character for character in str(value or "").casefold() if character.isalnum())
-
-
-def _material_display_name(item: dict) -> str:
-    material_type = _normal(item.get("material_type")).casefold()
-    color = _normal(item.get("color"))
-    thickness = _normal(item.get("thickness"))
-    if material_type in {"panel", "back"}:
-        return f"{thickness}mm--{color}"
-    if material_type == "edge":
-        return f"Edge banding--{color}"
-    if material_type == "plywood":
-        return f"{thickness}mm--Plywood"
-    return ""
 
 
 def _historical_material_product_codes(
@@ -114,63 +105,14 @@ def _historical_material_product_codes(
     """Resolve current material facts to inventory SKUs for legacy documents.
 
     New production writes already store material quantities in
-    ``manual_production_batch_materials``.  Older inventory documents only
-    retain SKU/quantity in the audit JSON, so use the saved mapping first and
-    the product catalog as a deterministic fallback.  Ambiguous products are
-    deliberately ignored rather than guessed.
+    ``manual_production_batch_materials``.  Older inventory documents retain
+    SKU/quantity in the audit JSON, so compare their saved SKU directly with
+    the currently confirmed order-material SKU; never rematch by attributes.
     """
-    display_names = {
-        _inventory_name_key(_material_display_name(item)): item["key"]
-        for item in materials
-        if _material_display_name(item)
+    return {
+        item["key"]: _normal(item.get("product_code")).upper()
+        for item in materials if _normal(item.get("product_code"))
     }
-    code_by_material_key: dict[str, str] = {}
-    if connection.execute(
-        "select 1 from sqlite_master where type='table' and name='inventory_resolution_rules'"
-    ).fetchone():
-        for row in connection.execute(
-            "select normalized_name, product_code from inventory_resolution_rules where rule_type='mapping'"
-        ).fetchall():
-            material_key_value = display_names.get(_inventory_name_key(row[0]))
-            if material_key_value and row[1]:
-                code_by_material_key[material_key_value] = str(row[1]).strip().upper()
-
-    if not connection.execute(
-        "select 1 from sqlite_master where type='table' and name='products'"
-    ).fetchone():
-        return code_by_material_key
-
-    products = connection.execute(
-        "select code, name, spec, category, status from products"
-    ).fetchall()
-    for item in materials:
-        key = item["key"]
-        if key in code_by_material_key:
-            continue
-        material_type = _normal(item.get("material_type")).casefold()
-        color_key = _inventory_name_key(item.get("color"))
-        thickness_key = _inventory_name_key(item.get("thickness"))
-        candidates = []
-        for product in products:
-            if str(product[4] or "").strip() not in {"", "启用"}:
-                continue
-            category_key = _inventory_name_key(product[3])
-            name_key = _inventory_name_key(product[1])
-            spec_key = _inventory_name_key(product[2])
-            if material_type == "edge":
-                category_matches = "edge" in category_key or "封边" in category_key
-            elif material_type == "plywood":
-                category_matches = "plywood" in category_key or "夹板" in category_key
-            else:
-                category_matches = "panel" in category_key or "板" in category_key
-            if not category_matches or (color_key and color_key not in name_key):
-                continue
-            if material_type != "edge" and thickness_key and thickness_key not in spec_key:
-                continue
-            candidates.append(str(product[0]).strip().upper())
-        if len(set(candidates)) == 1:
-            code_by_material_key[key] = candidates[0]
-    return code_by_material_key
 
 
 def _legacy_inventory_consumed(
@@ -314,6 +256,7 @@ def cumulative_production_materials(
                     f"{quantity:g} > {item['total_quantity']:g}",
                 )
             result.append({
+                "product_code": item["product_code"],
                 "material_type": item["material_type"],
                 "color": item["color"],
                 "thickness": item["thickness"],
@@ -408,6 +351,7 @@ def prepare_production(config: Config, order_id: str, factory_orders: Iterable[s
             continue
         item = available[key]
         selected_materials.append({
+            "product_code": item["product_code"],
             "material_type": item["material_type"],
             "color": item["color"],
             "thickness": item["thickness"],
@@ -468,16 +412,12 @@ def record_completed_production(
             continue
         connection.execute(
             """insert into manual_production_batch_materials(
-                   batch_id, order_id, material_type, color, thickness, edge, unit, quantity
-               ) values(?,?,?,?,?,?,?,?)""",
+                   batch_id, order_id, product_code, quantity
+               ) values(?,?,?,?)""",
             (
                 batch_id,
                 order_id,
-                _normal(item.get("material_type")),
-                _normal(item.get("color")),
-                _normal(item.get("thickness")),
-                _normal(item.get("edge")),
-                _normal(item.get("unit")),
+                _normal(item.get("product_code")).upper(),
                 quantity,
             ),
         )

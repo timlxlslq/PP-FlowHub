@@ -75,4 +75,4 @@ API Key 保存在被 Git 忽略的 `.env.local`，不会写入源码或 SQLite�
 - [Product Design 订单中心审查](docs/learning/10-product-design-order-center-audit.md)：基于已安装 App 截图的真实页面状态、UX 问题和后续设计探索建议。
 - [数据库与 WeCom 同步学习说明](docs/learning/11-database-guide.md)：中央 SQLite 路径、连接/事务边界、表关系和隔离教学示例。
 - [数据库地图](docs/learning/12-database-map.md)：两个正式 SQLite 运行库的角色、表分层和完整字段入口。
-- [当前数据库字段字典](docs/learning/database-map/current-schema.md)：两个正式运行库的当前表字段、约束和源码证据。
+- [2026-09-12 数据库字段历史快照](docs/learning/database-map/current-schema.md)：材料 SKU 外键迁移前两个运行库的表字段、约束和源码证据；现行结构以数据模型、当前源码和迁移后数据库 PRAGMA 为准。

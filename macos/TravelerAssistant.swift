@@ -262,6 +262,8 @@ struct ServerChangePreview: Identifiable {
     let oldPath: String
     let message: String
     let manualOnly: Bool
+    let handlingMode: String
+    let referenceOrderIDs: [String]
     let eventTime: String
 
     init(
@@ -274,6 +276,8 @@ struct ServerChangePreview: Identifiable {
         oldPath: String = "",
         message: String,
         manualOnly: Bool,
+        handlingMode: String = "",
+        referenceOrderIDs: [String] = [],
         eventTime: String
     ) {
         self.id = id
@@ -285,6 +289,8 @@ struct ServerChangePreview: Identifiable {
         self.oldPath = oldPath
         self.message = message
         self.manualOnly = manualOnly
+        self.handlingMode = handlingMode
+        self.referenceOrderIDs = referenceOrderIDs
         self.eventTime = eventTime
     }
 }
@@ -530,6 +536,7 @@ struct ServerWriteFactoryPreview: Identifiable {
     let outboundDocument: String
     let batchID: String
     let hardware: [ServerWriteHardwarePreview]
+    let hasExistingHardware: Bool
     let changeType: String
     let hardwareChanges: [ServerWriteHardwareChange]
 
@@ -549,6 +556,7 @@ struct ServerWriteFactoryPreview: Identifiable {
             ServerWriteHardwarePreview(row: $0.element, index: $0.offset)
         }
         self.changeType = row["change_type"] as? String ?? ""
+        self.hasExistingHardware = row["has_existing_hardware"] as? Bool ?? false
         self.hardwareChanges = (row["hardware_changes"] as? [[String: Any]] ?? []).enumerated().compactMap {
             ServerWriteHardwareChange(row: $0.element, index: $0.offset)
         }
@@ -567,6 +575,11 @@ struct ServerWriteOrderPreview: Identifiable {
     let factories: [ServerWriteFactoryPreview]
     let excludedFactories: [ServerWriteFactoryPreview]
     let hardwareChanges: [ServerWriteHardwareChange]
+
+    var existingHardwareChanges: [ServerWriteHardwareChange] {
+        let existingFactories = Set(factories.filter(\.hasExistingHardware).map(\.factoryOrder))
+        return hardwareChanges.filter { existingFactories.contains($0.factoryOrder) }
+    }
 
     init(
         id: String,
@@ -659,6 +672,12 @@ struct ServerFolderChangeGroup: Identifiable {
     let changes: [ServerChangePreview]
     let manualOnly: Bool
 
+    var independentManual: Bool {
+        changes.contains { ["supplemental", "external_manual"].contains($0.handlingMode) }
+    }
+
+    var referenceOrderIDs: [String] { changes.first?.referenceOrderIDs ?? [] }
+
     var requiresManualReview: Bool {
         changes.contains { $0.changeType == "missing_report" }
     }
@@ -743,7 +762,7 @@ func buildPendingCenterItems(
         let source = reviews.isEmpty && formatWarnings.isEmpty ? "Server" : "Server · AIMES"
         result.append(PendingCenterItem(
             id: "folder:\(group.folderPath)",
-            title: group.orderId.isEmpty ? group.folderName : group.orderId,
+            title: group.manualOnly || group.orderId.isEmpty ? group.folderName : group.orderId,
             subtitle: "\(source) · \(group.folderName)",
             status: status,
             folderPath: group.folderPath,
@@ -1002,6 +1021,8 @@ func serverChangePreviews(_ rows: [[String: Any]]) -> [ServerChangePreview] {
                 operation: "扫描 Server"
             ),
             manualOnly: row["manual_only"] as? Bool ?? false,
+            handlingMode: row["handling_mode"] as? String ?? "",
+            referenceOrderIDs: row["reference_order_ids"] as? [String] ?? [],
             eventTime: row["event_time"] as? String ?? ""
         )
     }
@@ -3041,19 +3062,14 @@ final class AppModel: ObservableObject {
             self.applyDashboardOperationTrace(object)
             self.applyDashboardObject(object, includeChanges: false)
             let rows = server["changes"] as? [[String: Any]] ?? []
-            let scanStats = server["scan_stats"] as? [String: Any] ?? [:]
-            let optimizationRefreshCount = (scanStats["optimization_artifact_refresh_count"] as? NSNumber)?.intValue ?? 0
             self.pendingServerChanges = serverChangePreviews(rows)
             self.selectedServerFolderPaths.removeAll()
-            // Material and factory identity still require preview plus explicit
-            // confirmation. The scan only adds the approved AICNC optimization
-            // evidence whose XML embeds the exact AIMES factory order.
+            // Discovery never confirms materials, optimization state, or XML
+            // baselines. Only the explicit material confirmation does that.
             if self.pendingServerChanges.isEmpty {
                 self.closePendingCenterIfEmpty()
                 self.dashboardServerStatus = "✅ Server 扫描完成，没有待处理变化"
-                self.dashboardSyncStatus = optimizationRefreshCount > 0
-                    ? "✅ 订单数据已刷新；已更新 \(optimizationRefreshCount) 个工厂单的优化证据"
-                    : "✅ 订单数据已刷新；材料与工厂单身份未写入，优化证据已核对"
+                self.dashboardSyncStatus = "✅ Server 扫描完成；订单状态未更改"
             } else {
                 self.dashboardServerStatus = "⚠️ Server 发现 \(self.pendingServerChanges.count) 项待逐单确认变化"
                 self.dashboardSyncStatus = "请在待处理中心预览并逐单确认写入"
@@ -3337,14 +3353,17 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func markTemporaryFolderManual(_ folderPath: String) {
-        logUserAction("点击标记临时文件夹已人工处理")
-        guard !orderRunning else { return }
+    func markTemporaryFolderManual(_ folderPath: String, referenceOrderIDs: [String], outboundDocument: String) {
+        logUserAction("点击登记文件夹已在外部人工出库")
+        guard !orderRunning, !inventoryRunning else { return }
+        guard let referenceData = try? JSONSerialization.data(withJSONObject: referenceOrderIDs),
+              let referenceJSON = String(data: referenceData, encoding: .utf8) else { return }
         beginDashboardOperation("server", label: "登记临时文件夹人工处理")
         dashboardServerStatus = "正在登记人工处理：\(URL(fileURLWithPath: folderPath).lastPathComponent)…"
         dashboardSyncStatus = dashboardServerStatus
         runOrder(
-            ["mark-temporary-manual", "--folder", folderPath],
+            ["mark-temporary-manual", "--folder", folderPath,
+             "--reference-orders-json", referenceJSON, "--outbound-document", outboundDocument],
             failureStatus: "登记临时文件夹人工处理失败",
             onFailure: {
                 self.finishDashboardOperation("server")
@@ -3359,7 +3378,9 @@ final class AppModel: ObservableObject {
             )
             self.selectedServerFolderPaths.remove(folderPath)
             self.closePendingCenterIfEmpty()
-            self.dashboardServerStatus = "✅ 已登记人工处理；未来三天只观察两个 XML 文件"
+            self.dashboardServerStatus = (object["unchanged"] as? Bool == true)
+                ? "✅ 本次内容已登记；保留原完成时间和观察期限"
+                : "✅ 已登记人工处理；未来三天独立观察 XML 文件"
             self.dashboardSyncStatus = self.dashboardServerStatus
         }
     }

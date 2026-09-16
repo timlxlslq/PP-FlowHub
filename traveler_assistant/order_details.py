@@ -3,71 +3,16 @@
 from __future__ import annotations
 
 import sqlite3
-import re
 from pathlib import Path
 
-from .core import Config, _normalize_name
-from .database import ensure_schema
-from .inventory import InventoryMappings, ignored_hardware_reason
-
-
-def _panel_products_by_name(connection: sqlite3.Connection) -> dict[str, list[dict[str, str]]]:
-    """Return active Panel catalog rows grouped by their canonical name.
-
-    Material facts intentionally keep the business color and thickness only.
-    The product catalog supplies the presentation-only SKU, brand and image key.
-    """
-    table = connection.execute(
-        "select 1 from sqlite_master where type='table' and name='products'"
-    ).fetchone()
-    if table is None:
-        return {}
-    columns = {str(row[1]) for row in connection.execute("pragma table_info(products)").fetchall()}
-    if "brand" not in columns:
-        return {}
-    rows = connection.execute(
-        """
-        select code, name, brand, spec, status
-        from products
-        where normalized_category = ?
-        order by code
-        """,
-        (_normalize_name("Panel"),),
-    ).fetchall()
-    grouped: dict[str, list[dict[str, str]]] = {}
-    for row in rows:
-        if row[4] not in ("", "启用"):
-            continue
-        grouped.setdefault(_normalize_name(row[1]), []).append({
-            "code": str(row[0] or ""),
-            "name": str(row[1] or ""),
-            "brand": str(row[2] or ""),
-            "spec": str(row[3] or ""),
-        })
-    return grouped
-
-
-def _panel_product_for_color(
-    products: dict[str, list[dict[str, str]]], color: str
-) -> dict[str, str]:
-    """Choose one color-level image identity, independent of thickness."""
-    candidates = list(products.get(_normalize_name(color), []))
-    if not candidates:
-        return {"product_code": "", "brand": ""}
-
-    def rank(item: dict[str, str]) -> tuple[int, str]:
-        numbers = re.findall(r"\d+(?:\.\d+)?", item["spec"])
-        thickness = float(numbers[0]) if numbers else 0.0
-        # Prefer the standard 19.1mm product as the canonical color image.
-        return (0 if abs(thickness - 19.1) < 0.6 else 1, item["code"])
-
-    selected = sorted(candidates, key=rank)[0]
-    return {"product_code": selected["code"], "brand": selected["brand"]}
+from .core import Config
+from .database import connect_database, ensure_schema
+from .inventory import InventoryMappings
 
 
 def order_detail(config: Config, order_id: str) -> dict:
     ensure_schema(config.workflow_database)
-    connection = sqlite3.connect(config.workflow_database)
+    connection = connect_database(config.workflow_database)
     connection.row_factory = sqlite3.Row
     try:
         connection.execute(
@@ -108,20 +53,22 @@ def order_detail(config: Config, order_id: str) -> dict:
         ).fetchall()
         materials = connection.execute(
             """
-            select material_type, color, thickness,
-                   quantity, unit, edge, source_type, source_path, updated_at
-            from material_items where order_id=? order by material_type, color, thickness
+            select m.product_code,
+                   p.material_kind as material_type,
+                   p.material_color as color,
+                   p.material_thickness as thickness,
+                   m.quantity, p.unit,
+                   case when p.material_kind='edge' then p.material_color else '' end as edge,
+                   m.source_type, m.source_path, m.updated_at,
+                   p.brand, p.name as product_name, p.spec as product_spec,
+                   p.catalog_present, p.status as product_status
+            from material_items m
+            join products p on p.code=m.product_code
+            where m.order_id=?
+            order by p.material_kind, p.material_color, p.material_thickness, m.product_code
             """, (order_id.upper(),)
         ).fetchall()
-        panel_products = _panel_products_by_name(connection)
-        material_records = []
-        for row in materials:
-            record = dict(row)
-            if record.get("material_type") == "panel":
-                record.update(_panel_product_for_color(panel_products, record.get("color", "")))
-            else:
-                record.update({"product_code": "", "brand": ""})
-            material_records.append(record)
+        material_records = [dict(row) for row in materials]
         hardware_rows = connection.execute(
             """
             select factory_order, scope, product_code, source_code, name, spec, quantity,
@@ -140,11 +87,12 @@ def order_detail(config: Config, order_id: str) -> dict:
         mappings = InventoryMappings(config.workflow_database)
         hardware = []
         for row in hardware_rows:
-            if ignored_hardware_reason(mappings, row[4], row[2], row[3]) is not None:
-                continue
             record = dict(row)
             # This is a read-time projection only.  The raw hardware_items
             # columns remain the source name, source code and canonical SKU.
+            # Ignore rules decide whether a source row is accepted before it
+            # becomes a fact; changing one later must not hide or rebind a
+            # hardware fact that already carries its confirmed SKU.
             record["display_name"] = mappings.display_name_for_hardware(
                 str(row[2] or ""), str(row[4] or ""), str(row[3] or "")
             )

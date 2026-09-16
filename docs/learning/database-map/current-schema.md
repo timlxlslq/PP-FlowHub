@@ -1,15 +1,17 @@
-# 当前数据库字段字典
+# 2026-09-12 数据库字段历史快照
 
-本页是当前 checkout 与 `data/workflow.sqlite3` schema 快照对应的正式业务字段字典。中央业务库已核实为 33 张表、307 个字段；助手运行库另有 2 张表、9 个字段。本轮实库整理后采集时间为 2026-09-12 22:37 PDT（America/Los_Angeles）；后续源码或 schema 变化后需要重新核对。
+本页是 2026-09-12 22:37 PDT（America/Los_Angeles）当时 checkout 与 `data/workflow.sqlite3` 的历史 schema 快照：中央业务库当时为 33 张表、307 个字段，助手运行库为 2 张表、9 个字段。它早于材料 SKU 外键迁移，不能作为当前 schema 或真实数据库已经迁移的证据；现行结构先看[数据模型](../../architecture/pp-flowhub-data-model.md)和[数据库地图](../12-database-map.md)，再以当前源码及迁移后数据库的 PRAGMA 结果核对。
 
-字段证据来自当前源码的 CREATE/ALTER、读写调用、动态全字段恢复和 SQLite 元数据。未把应用层关联误列为 schema 外键，也未读取业务行。
+字段证据来自采集时源码的 CREATE/ALTER、读写调用、动态全字段恢复和 SQLite 元数据。未把应用层关联误列为 schema 外键，也未读取业务行。
+
+> 历史阅读说明：下文保留采集时的表项、源码行号和“当前”措辞，均只代表 2026-09-12 快照。本轮不手工把数百个字段改写成新结构，以免制造一份看似现行、实际无法重复生成的字典。
 
 ### 阅读约定
 
 - “可空”按 SQLite `PRAGMA table_info` 的 `notnull` 解释；“是”表示该列未声明 `NOT NULL`，不代表业务上一定允许空值。
 - `INTEGER PRIMARY KEY` 是 SQLite rowid 别名；插入 `NULL` 或省略值时由 SQLite 分配 rowid。普通 rowid 表中的 `TEXT PRIMARY KEY` 若没有另写 `NOT NULL`，PRAGMA 仍可能显示可空，不能把文本主键的唯一性误读成非空约束。
 - 时间列按用途区分业务发生时间、外部系统同步/签发时间、本地记录创建时间和更新时间；不要用操作耗时替代业务事件时间。
-- JSON 字段只说明当前源码已证明的外层用途；内部键可能扩展。状态/类别值列出当前已见值，除 SQLite CHECK 明确限制外均非穷举。SQLite schema 中的 `REFERENCES` 关系与应用层关联分开记录；当前项目没有统一开启 `PRAGMA foreign_keys=ON`，因此声明关系不自动等于每个连接都会强制校验。
+- JSON 字段只说明快照源码已证明的外层用途；内部键可能扩展。状态/类别值列出当时已见值，除 SQLite CHECK 明确限制外均非穷举。SQLite schema 中的 `REFERENCES` 关系与应用层关联分开记录；“没有统一开启 `PRAGMA foreign_keys=ON`”是当时的连接现状，不是 SKU 迁移后的应用连接契约。
 
 ### 中央业务库表索引
 

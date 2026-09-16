@@ -6,7 +6,7 @@ from io import StringIO
 from pathlib import Path
 
 from traveler_assistant.assistant_cli import main as assistant_main
-from traveler_assistant.database import ensure_schema
+from traveler_assistant.database import connect_database, ensure_schema
 from traveler_assistant.runtime_store import RuntimeStore, TokenUsage, runtime_database_path
 
 
@@ -32,13 +32,23 @@ class RuntimeStoreTests(unittest.TestCase):
             state = Path(temp)
             workflow = state / "workflow.sqlite3"
             ensure_schema(workflow)
-            connection = __import__("sqlite3").connect(workflow)
+            connection = connect_database(workflow)
+            connection.execute(
+                """insert into products(
+                       category,code,name,spec,status,unit,normalized_code,
+                       normalized_name,normalized_spec,normalized_category,
+                       normalized_remark,material_kind,material_color,
+                       material_thickness,catalog_present
+                   ) values('Panel','M-RUNTIME','Woodline 4','19.1mm','启用','pcs',
+                            'MRUNTIME','WOODLINE4','191MM','PANEL','',
+                            'panel','Woodline 4','19.1',1)"""
+            )
             connection.execute(
                 """insert into material_items(
-                    order_id, material_type, color, thickness,
-                    quantity, unit, edge, source_type, source_path, source_fingerprint, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
-                ("CS005", "panel", "Woodline 4", "19.1", 4, "pcs", "", "aihouse", "fixture.xlsx", "fp", "now"),
+                    order_id, product_code, quantity, source_type, source_path,
+                    source_fingerprint, updated_at
+                ) values(?,?,?,?,?,?,?)""",
+                ("CS005", "M-RUNTIME", 4, "aihouse", "fixture.xlsx", "fp", "now"),
             )
             connection.commit()
             connection.close()

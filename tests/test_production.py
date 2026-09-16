@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from traveler_assistant.core import Config
-from traveler_assistant.database import ensure_schema
+from traveler_assistant.database import connect_database, ensure_schema
 from traveler_assistant.order_index import OrderIndexStore
 from traveler_assistant.production import (
     cumulative_production_materials,
@@ -18,27 +18,18 @@ from traveler_assistant.production import (
 
 class ProductionTransactionTests(unittest.TestCase):
     @staticmethod
-    def _create_product_table(connection):
-        connection.execute(
-            """create table products(
-                category text not null default '', code text primary key,
-                name text not null default '', spec text not null default '',
-                status text not null default '', brand text not null default '',
-                remark text not null default '', unit text not null default '',
-                cost_price real, normalized_code text not null,
-                normalized_name text not null, normalized_spec text not null,
-                normalized_category text not null, normalized_remark text not null
-            )"""
-        )
+    def _seed_products(connection):
         connection.executemany(
             """insert into products(
                 category, code, name, spec, status, unit,
                 normalized_code, normalized_name, normalized_spec,
-                normalized_category, normalized_remark
-            ) values(?,?,?,?,?,?,?,?,?,?,?)""",
+                normalized_category, normalized_remark,
+                material_kind, material_color, material_thickness, catalog_present
+            ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
             [
-                ("Panel", "M0019", "Woodline 4", "19.1*1220*2745mm", "启用", "SHT", "m0019", "woodline4", "19112202745mm", "panel", ""),
-                ("Edge band", "M0020", "Woodline 4 Edge Banding", "22mm*1mm*225m", "启用", "M", "m0020", "woodline4edgebanding", "22mm1mm225m", "edgeband", ""),
+                ("Panel", "M0019", "Woodline 4", "19.1*1220*2745mm", "启用", "SHT", "m0019", "woodline4", "19112202745mm", "panel", "", "panel", "Woodline 4", "19.1"),
+                ("Edge band", "M0020", "Woodline 4 Edge Banding", "22mm*1mm*225m", "启用", "M", "m0020", "woodline4edgebanding", "22mm1mm225m", "edgeband", "", "edge", "Woodline 4", ""),
+                ("Panel", "M-ROS", "Rosales 3", "19.1*1220*2745mm", "启用", "SHT", "mros", "rosales3", "19112202745mm", "panel", "", "panel", "Rosales 3", "19.1"),
             ],
         )
 
@@ -49,6 +40,7 @@ class ProductionTransactionTests(unittest.TestCase):
             ensure_schema(config.workflow_database)
             store = OrderIndexStore(config.workflow_database)
             connection = store.connection
+            self._seed_products(connection)
             connection.execute(
                 "insert into orders(order_id, order_type, updated_at) values(?,?,?)",
                 ("PP010", "owned", "now"),
@@ -62,12 +54,12 @@ class ProductionTransactionTests(unittest.TestCase):
             )
             connection.executemany(
                 """insert into material_items(
-                       order_id, material_type, color, thickness, quantity,
-                       unit, edge, source_type, source_path, updated_at
-                   ) values(?,?,?,?,?,?,?,?,?,?)""",
+                       order_id, product_code, quantity, source_type, source_path,
+                       source_fingerprint, updated_at
+                   ) values(?,?,?,?,?,?,?)""",
                 [
-                    ("PP010", "panel", "Rosales 3", "19.1", 8, "pcs", "", "aihouse", "source-a", "now"),
-                    ("PP010", "panel", "Rosales 3", "19.1", 10, "pcs", "", "aihouse", "source-b", "now"),
+                    ("PP010", "M-ROS", 8, "aihouse", "source-a", "source-a-fp", "now"),
+                    ("PP010", "M-ROS", 10, "aihouse", "source-b", "source-b-fp", "now"),
                 ],
             )
             store.commit()
@@ -86,7 +78,7 @@ class ProductionTransactionTests(unittest.TestCase):
             ensure_schema(config.workflow_database)
             store = OrderIndexStore(config.workflow_database)
             connection = store.connection
-            self._create_product_table(connection)
+            self._seed_products(connection)
             connection.execute(
                 "insert into orders(order_id, order_type, updated_at) values(?,?,?)",
                 ("CS010", "cutToSize", "now"),
@@ -103,12 +95,12 @@ class ProductionTransactionTests(unittest.TestCase):
             )
             connection.executemany(
                 """insert into material_items(
-                       order_id, material_type, color, thickness, quantity,
-                       unit, edge, source_type, updated_at
-                   ) values(?,?,?,?,?,?,?,?,?)""",
+                       order_id, product_code, quantity, source_type, source_path,
+                       source_fingerprint, updated_at
+                   ) values(?,?,?,?,?,?,?)""",
                 [
-                    ("CS010", "panel", "Woodline 4", "19.1", 5, "pcs", "", "aihouse", "now"),
-                    ("CS010", "edge", "Woodline 4", "", 158, "m", "Woodline 4", "aihouse", "now"),
+                    ("CS010", "M0019", 5, "aihouse", "panel-source", "panel-fp", "now"),
+                    ("CS010", "M0020", 158, "aihouse", "edge-source", "edge-fp", "now"),
                 ],
             )
             connection.execute(
@@ -155,13 +147,15 @@ class ProductionTransactionTests(unittest.TestCase):
                 "CS010",
                 [
                     {
+                        "product_code": "M0019",
                         "material_type": "panel", "color": "Woodline 4",
-                        "thickness": "19.1", "edge": "", "unit": "pcs",
+                        "thickness": "19.1", "edge": "", "unit": "SHT",
                         "quantity": 1,
                     },
                     {
+                        "product_code": "M0020",
                         "material_type": "edge", "color": "Woodline 4",
-                        "thickness": "", "edge": "Woodline 4", "unit": "m",
+                        "thickness": "", "edge": "Woodline 4", "unit": "M",
                         "quantity": 56,
                     },
                 ],
@@ -169,18 +163,18 @@ class ProductionTransactionTests(unittest.TestCase):
             cumulative_by_type = {item["material_type"]: item["quantity"] for item in cumulative}
             self.assertEqual(cumulative_by_type, {"edge": 158, "panel": 5})
 
-            connection = sqlite3.connect(config.workflow_database)
+            connection = connect_database(config.workflow_database)
             connection.execute(
                 """insert into manual_production_batch_materials(
-                       batch_id, order_id, material_type, color, thickness, edge, unit, quantity
-                   ) values(?,?,?,?,?,?,?,?)""",
-                (batch_id, "CS010", "panel", "Woodline 4", "19.1", "", "pcs", 4),
+                       batch_id, order_id, product_code, quantity
+                   ) values(?,?,?,?)""",
+                (batch_id, "CS010", "M0019", 4),
             )
             connection.execute(
                 """insert into manual_production_batch_materials(
-                       batch_id, order_id, material_type, color, thickness, edge, unit, quantity
-                   ) values(?,?,?,?,?,?,?,?)""",
-                (batch_id, "CS010", "edge", "Woodline 4", "", "Woodline 4", "m", 102),
+                       batch_id, order_id, product_code, quantity
+                   ) values(?,?,?,?)""",
+                (batch_id, "CS010", "M0020", 102),
             )
             connection.commit()
             connection.close()
@@ -197,6 +191,7 @@ class ProductionTransactionTests(unittest.TestCase):
             ensure_schema(config.workflow_database)
             store = OrderIndexStore(config.workflow_database)
             connection = store.connection
+            self._seed_products(connection)
             connection.execute(
                 "insert into orders(order_id, order_type, updated_at) values(?,?,?)",
                 ("CS010", "cutToSize", "now"),
@@ -210,21 +205,22 @@ class ProductionTransactionTests(unittest.TestCase):
             )
             connection.execute(
                 """insert into material_items(
-                       order_id, material_type, color, thickness, quantity,
-                       unit, source_type, updated_at
-                   ) values(?,?,?,?,?,?,?,?)""",
-                ("CS010", "panel", "Woodline 4", "19.1", 5, "pcs", "aihouse", "now"),
+                       order_id, product_code, quantity, source_type, source_path,
+                       source_fingerprint, updated_at
+                   ) values(?,?,?,?,?,?,?)""",
+                ("CS010", "M0019", 5, "aihouse", "panel-source", "panel-fp", "now"),
             )
             connection.commit()
             store.commit()
             store.close()
 
             key = material_key({
+                "product_code": "M0019",
                 "material_type": "panel",
                 "color": "Woodline 4",
                 "thickness": "19.1",
                 "edge": "",
-                "unit": "pcs",
+                "unit": "SHT",
             })
             draft = prepare_production(
                 config,
@@ -246,7 +242,8 @@ class ProductionTransactionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "workflow.sqlite3"
             ensure_schema(database)
-            connection = sqlite3.connect(database)
+            connection = connect_database(database)
+            self._seed_products(connection)
             result = record_completed_production(
                 connection,
                 {
@@ -254,11 +251,12 @@ class ProductionTransactionTests(unittest.TestCase):
                     "order_id": "CS010",
                     "selected_factory_orders": ["F1010"],
                     "materials": [{
+                        "product_code": "M0019",
                         "material_type": "panel",
                         "color": "Woodline 4",
                         "thickness": "19.1",
                         "edge": "",
-                        "unit": "pcs",
+                        "unit": "SHT",
                         "quantity": 2,
                     }],
                 },

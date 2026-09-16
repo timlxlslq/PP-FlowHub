@@ -4,7 +4,7 @@
 
 ## 1. 覆盖范围
 
-- 当前 Git 共追踪 **351** 个文件；连同本次新增但可能尚未进入 Git 索引的文档，共登记 **351** 个文件。
+- 当前 Git 共追踪 **393** 个文件；连同本次新增但可能尚未进入 Git 索引的文档，共登记 **393** 个文件。
 - `vendor/` 是固定打包的第三方依赖：保留逐文件登记，但不把其内部函数当作 PP FlowHub 业务代码解释。
 - `data/`、`.env.local`、构建目录和安装版属于本机运行状态，通常不受 Git 追踪；只登记文件用途，不读取其内容。
 - `outputs/` 是历史诊断或交付证据，不属于正式 App 运行链路。
@@ -17,6 +17,13 @@
 | `"outputs/pp0018-material-cost/previews/\344\273\267\346\240\274\344\270\216\346\235\245\346\272\220.png"` | 项目配置、资源或辅助文件。 | 0 |
 | `"outputs/pp0018-material-cost/previews/\346\235\220\346\226\231\346\210\220\346\234\254\346\261\207\346\200\273.png"` | 项目配置、资源或辅助文件。 | 0 |
 | `.gitignore` | Git 忽略规则：排除本地状态、构建产物和敏感配置。 | 0 |
+| `.superpowers/tasks/pending-center-tasks12/REPORT.md` | 项目配置、资源或辅助文件。 | 0 |
+| `.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift` | Swift/macOS 源码或测试辅助文件。 | 397 |
+| `.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift` | Swift/macOS 源码或测试辅助文件。 | 61 |
+| `.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift` | Swift/macOS 源码或测试辅助文件。 | 401 |
+| `.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift` | Swift/macOS 源码或测试辅助文件。 | 63 |
+| `.superpowers/tasks/pending-center-tasks12/review-fix.patch` | 项目配置、资源或辅助文件。 | 0 |
+| `.superpowers/tasks/pending-center-tasks12/task-only.patch` | 项目配置、资源或辅助文件。 | 0 |
 | `AGENTS.md` | 项目协作规则：规定判断、验证、发布和汇报要求。 | 0 |
 | `CHANGELOG.md` | 项目配置、资源或辅助文件。 | 0 |
 | `README.md` | 项目总入口：介绍用途、安装、运行方式和文档导航。 | 0 |
@@ -34,6 +41,7 @@
 | `docs/architecture/pp-flowhub-data-model.md` | 项目文档：PP FlowHub 数据模型与边界。 | 0 |
 | `docs/architecture/system-architecture.md` | 项目文档：系统架构。 | 0 |
 | `docs/business-rules.md` | 项目文档：已确认业务规则。 | 0 |
+| `docs/diagnostics/pp0008-rail-pair-repair-20260910-085146.json` | 项目文档：pp0008-rail-pair-repair-20260910-085146。 | 0 |
 | `docs/diagnostics/scan-server-app-trace-2026-08-14.md` | 项目文档：工作流程助手真实启动扫描 Server 追踪（2026-08-14）。 | 0 |
 | `docs/diagnostics/scan-server-trace-2026-08-14.md` | 项目文档：`scan-server` 实际运行追踪（2026-08-14）。 | 0 |
 | `docs/inventory-outbound-rules.md` | 项目文档：库存查询与出库契约。 | 0 |
@@ -47,16 +55,31 @@
 | `docs/learning/07-swift-symbol-reference.md` | 项目文档：PP FlowHub Swift/macOS 全符号中文参考。 | 0 |
 | `docs/learning/08-support-test-symbol-reference.md` | 项目文档：PP FlowHub 测试、脚本与工具全符号中文参考。 | 0 |
 | `docs/learning/09-user-operation-call-chains.md` | 项目文档：PP FlowHub 用户操作与业务调用链全解。 | 0 |
+| `docs/learning/10-product-design-order-center-audit.md` | 项目文档：Product Design 审查：订单中心主流程。 | 0 |
+| `docs/learning/10-visual-architecture-map.md` | 项目文档：PP FlowHub 结构图与入口调用链。 | 0 |
+| `docs/learning/11-database-guide.md` | 项目文档：学习：把外部数据保存到 PP FlowHub 的 SQLite。 | 0 |
+| `docs/learning/12-database-map.md` | 项目文档：数据库地图：当前文件、角色与 SKU 关系。 | 0 |
+| `docs/learning/database-map/current-schema.md` | 项目文档：2026-09-12 数据库字段历史快照。 | 0 |
+| `docs/learning/pending-center-preview/PendingCenterPreview.swift` | 项目文档：PendingCenterPreview。 | 36 |
+| `docs/learning/product-design-audit/01-order-center-loading.jpeg` | 项目文档：8#f#�#�#�$$M$|$�$�%	%8%h%�%�%�&'&W&�&�&�''I'z'�'�(。 | 0 |
+| `docs/learning/product-design-audit/02-order-center-loaded.jpeg` | 项目文档：8#f#�#�#�$$M$|$�$�%	%8%h%�%�%�&'&W&�&�&�''I'z'�'�(。 | 0 |
+| `docs/learning/product-design-audit/03-order-detail.jpeg` | 项目文档：8#f#�#�#�$$M$|$�$�%	%8%h%�%�%�&'&W&�&�&�''I'z'�'�(。 | 0 |
+| `docs/learning/product-design-audit/04-pending-center.jpeg` | 项目文档：8#f#�#�#�$$M$|$�$�%	%8%h%�%�%�&'&W&�&�&�''I'z'�'�(。 | 0 |
+| `docs/learning/product-design-audit/05-inventory-comparison-loading.jpeg` | 项目文档：8#f#�#�#�$$M$|$�$�%	%8%h%�%�%�&'&W&�&�&�''I'z'�'�(。 | 0 |
+| `docs/learning/product-design-audit/06-order-row-actions.jpeg` | 项目文档：8#f#�#�#�$$M$|$�$�%	%8%h%�%�%�&'&W&�&�&�''I'z'�'�(。 | 0 |
 | `docs/operation-logging.md` | 项目文档：操作日志。 | 0 |
 | `docs/order-dashboard-prototype-spec.md` | 项目文档：订单看板界面与操作原型规格。 | 0 |
 | `docs/project-handoff-log.md` | 项目文档：项目交接记录。 | 0 |
 | `docs/project-static-context.md` | 项目文档：PP FlowHub 静态上下文。 | 0 |
-| `docs/release-testing.md` | 项目文档：发布测试与安装流程。 | 0 |
-| `macos/AssistantView.swift` | 助手页面、语音输入、任务队列和业务进度轨道。 | 73 |
+| `docs/release-testing.md` | 项目文档：发布测试与安装验收。 | 0 |
+| `docs/superpowers/plans/2026-09-02-pending-center-workflow-plan.md` | 项目文档：待处理中心工作流 Implementation Plan。 | 0 |
+| `docs/superpowers/plans/2026-09-14-folder-manual-handling.md` | 项目文档：临时及混合补单文件夹人工登记。 | 0 |
+| `docs/superpowers/specs/2026-09-02-pending-center-workflow-design.md` | 项目文档：待处理中心工作流设计。 | 0 |
+| `macos/AssistantView.swift` | 助手页面、语音输入、任务队列和业务进度轨道。 | 74 |
 | `macos/Info.plist` | macOS App 的权限声明、Bundle 配置和系统元数据。 | 0 |
 | `macos/OperationLog.swift` | App 端操作日志读取、展示、脱敏和清理。 | 23 |
-| `macos/OrderDashboardView.swift` | 订单看板、待处理中心、订单详情及生产/出库交互。 | 250 |
-| `macos/TravelerAssistant.swift` | App 入口与 AppModel：全局状态、页面、子进程和业务编排。 | 383 |
+| `macos/OrderDashboardView.swift` | 订单看板、待处理中心、订单详情及生产/出库交互。 | 264 |
+| `macos/TravelerAssistant.swift` | App 入口与 AppModel：全局状态、页面、子进程和业务编排。 | 429 |
 | `outputs/019fe269-fc5a-7fa2-aa70-62173698f0c7/PP0067-material-final/Sheet1.png` | 历史诊断、工作簿或视觉核对产物，用于保留交付证据。 | 0 |
 | `outputs/019fe269-fc5a-7fa2-aa70-62173698f0c7/build_material_template.mjs` | 历史诊断/交付过程的一次性辅助脚本，不属于正式运行链路。 | 0 |
 | `outputs/019fe269-fc5a-7fa2-aa70-62173698f0c7/material-reference/manual-material-reference.png` | 历史诊断、工作簿或视觉核对产物，用于保留交付证据。 | 0 |
@@ -113,11 +136,15 @@
 | `resources/panel-images/M1109_Ida_1_9mm.jpg` | 订单详情 Panel 材料的本地图片资源，文件名编码对应材料型号。 | 0 |
 | `resources/panel-images/M1134_Rosales_3_8mm.jpg` | 订单详情 Panel 材料的本地图片资源，文件名编码对应材料型号。 | 0 |
 | `resources/panel-images/M1143_Frappe_3.jpg` | 订单详情 Panel 材料的本地图片资源，文件名编码对应材料型号。 | 0 |
+| `resources/status-icons/status-icon-optimization.png` | 图片资源或视觉验证产物。 | 0 |
+| `resources/status-icons/status-icon-production.png` | 图片资源或视觉验证产物。 | 0 |
+| `resources/status-icons/status-icon-split.png` | 图片资源或视觉验证产物。 | 0 |
 | `resources/templates/Order Materials.xlsx` | 受业务结构约束的 Excel 模板；生成流程在副本上写入。 | 0 |
 | `resources/templates/Work Order Traveler.xlsx` | 受业务结构约束的 Excel 模板；生成流程在副本上写入。 | 0 |
 | `scripts/build-app` | 构建 PP FlowHub.app，组装 Swift、Python、资源和辅助工具。 | 1 |
 | `scripts/install-app` | 签名、校验并把构建产物安装到 /Applications。 | 1 |
 | `scripts/pp-flowhub` | 统一命令入口：选择 Python 运行时并分发 assistant/order/inventory 子命令。 | 1 |
+| `scripts/test-aimes-table` | 项目配置、资源或辅助文件。 | 1 |
 | `scripts/test-macos-ui` | 编译并运行 Swift/macOS 源码契约与 UI 回归测试。 | 1 |
 | `scripts/test-release` | 正式发布测试门禁：串联 Python、Swift UI 和工作簿测试。 | 1 |
 | `scripts/test-workbook-e2e` | 用固定样本执行 Traveler/材料工作簿端到端验证。 | 3 |
@@ -135,42 +162,57 @@
 | `skills/traveler-management/references/manual-hardware.md` | 项目内业务 Skill 的专项参考规则。 | 0 |
 | `skills/traveler-management/references/update.md` | 项目内业务 Skill 的专项参考规则。 | 0 |
 | `skills/traveler-management/references/workbook-contract.md` | 项目内业务 Skill 的专项参考规则。 | 0 |
+| `tests/test_aimes_table.mjs` | 自动化测试：验证 `aimes_table` 模块或业务场景。 | 3 |
 | `tests/test_command_router.py` | 自动化测试：验证 `command_router` 模块或业务场景。 | 13 |
-| `tests/test_core.py` | 自动化测试：验证 `core` 模块或业务场景。 | 11 |
+| `tests/test_core.py` | 自动化测试：验证 `core` 模块或业务场景。 | 18 |
 | `tests/test_costing.py` | 自动化测试：验证 `costing` 模块或业务场景。 | 6 |
-| `tests/test_inventory.py` | 自动化测试：验证 `inventory` 模块或业务场景。 | 96 |
-| `tests/test_macos_ui.swift` | 自动化测试：验证 `macos_ui` 模块或业务场景。 | 56 |
+| `tests/test_hardware_facts.py` | 自动化测试：验证 `hardware_facts` 模块或业务场景。 | 9 |
+| `tests/test_inventory.py` | 自动化测试：验证 `inventory` 模块或业务场景。 | 99 |
+| `tests/test_legacy_fittings.py` | 自动化测试：验证 `legacy_fittings` 模块或业务场景。 | 2 |
+| `tests/test_macos_ui.swift` | 自动化测试：验证 `macos_ui` 模块或业务场景。 | 72 |
 | `tests/test_operation_log.py` | 自动化测试：验证 `operation_log` 模块或业务场景。 | 4 |
-| `tests/test_order_details.py` | 自动化测试：验证 `order_details` 模块或业务场景。 | 2 |
-| `tests/test_order_index.py` | 自动化测试：验证 `order_index` 模块或业务场景。 | 108 |
-| `tests/test_order_workflow.py` | 自动化测试：验证 `order_workflow` 模块或业务场景。 | 50 |
+| `tests/test_order_details.py` | 自动化测试：验证 `order_details` 模块或业务场景。 | 3 |
+| `tests/test_order_index.py` | 自动化测试：验证 `order_index` 模块或业务场景。 | 127 |
+| `tests/test_order_service.py` | 自动化测试：验证 `order_service` 模块或业务场景。 | 5 |
+| `tests/test_order_workflow.py` | 自动化测试：验证 `order_workflow` 模块或业务场景。 | 53 |
 | `tests/test_production.py` | 自动化测试：验证 `production` 模块或业务场景。 | 6 |
+| `tests/test_report_selection.py` | 自动化测试：验证 `report_selection` 模块或业务场景。 | 10 |
 | `tests/test_runtime_store.py` | 自动化测试：验证 `runtime_store` 模块或业务场景。 | 7 |
 | `tests/test_security.py` | 自动化测试：验证 `security` 模块或业务场景。 | 3 |
+| `tests/test_server_rail_units.py` | 自动化测试：验证 `server_rail_units` 模块或业务场景。 | 11 |
 | `tests/test_workflow_database.py` | 自动化测试：验证 `workflow_database` 模块或业务场景。 | 8 |
-| `tools/aimes_lookup.mjs` | 通过浏览器自动化查询 AIMES 工厂单名称和近期订单。 | 3 |
+| `tools/aimes_lookup.mjs` | 通过浏览器自动化查询 AIMES 工厂单名称和近期订单。 | 4 |
+| `tools/aimes_table.mjs` | Node.js ES Module 辅助脚本。 | 3 |
 | `tools/generate_code_reference.py` | 静态扫描一方源码，生成中文文件地图和符号索引。 | 35 |
 | `tools/jdy_inventory.mjs` | 通过浏览器自动化读取库存、填单并执行金蝶云出库。 | 24 |
 | `tools/keychain_read.swift` | 从 macOS Keychain 读取指定服务的凭据。 | 0 |
+| `tools/repair_hardware_history.py` | Python 源码或一次性辅助文件。 | 5 |
 | `tools/verify_workbook.mjs` | 用 LibreOffice/Node 辅助校验工作簿可打开性与结构。 | 0 |
 | `traveler_assistant/__init__.py` | Python 包标识；不承载业务逻辑。 | 0 |
 | `traveler_assistant/agent_runner.py` | Agent 路由适配层：把模糊自然语言转换为结构化动作。 | 5 |
 | `traveler_assistant/assistant_cli.py` | 助手 CLI 入口：选择本地解析、学习缓存或 Agent，再进入 Gateway。 | 4 |
 | `traveler_assistant/backup.py` | 数据与配置备份、状态检查和保留策略。 | 4 |
 | `traveler_assistant/command_router.py` | 常用中英文命令的确定性本地解析器。 | 5 |
-| `traveler_assistant/core.py` | 共享配置、错误、进度、AIMES 查询和五金解析基础能力。 | 38 |
+| `traveler_assistant/core.py` | 共享配置、错误、进度、AIMES 查询和五金解析基础能力。 | 40 |
 | `traveler_assistant/costing.py` | 订单成本计算、展示排序和 Excel 导出。 | 12 |
-| `traveler_assistant/database.py` | 中央 SQLite 路径、Schema、迁移和通用缓存读写。 | 13 |
-| `traveler_assistant/fittings.py` | 五金记录签名与最新来源选择规则。 | 3 |
-| `traveler_assistant/inventory.py` | 库存需求、商品映射、预检、浏览器出库和出库留痕。 | 145 |
-| `traveler_assistant/operation_log.py` | JSONL 操作日志、脱敏和数据库语句记录。 | 11 |
-| `traveler_assistant/order_details.py` | 从中央事实组装订单详情和 Panel 展示数据。 | 4 |
-| `traveler_assistant/order_index.py` | 订单索引核心：AIMES、Server、问题、确认、状态与同步证据。 | 217 |
-| `traveler_assistant/order_workflow.py` | 订单文件解析、预览、Traveler/材料工作簿生成与更新。 | 97 |
-| `traveler_assistant/production.py` | 生产备料预览、生产完成记录和出货前置校验。 | 20 |
+| `traveler_assistant/database.py` | 中央 SQLite 路径、Schema、迁移和通用缓存读写。 | 27 |
+| `traveler_assistant/fittings.py` | 五金记录签名与最新来源选择规则。 | 6 |
+| `traveler_assistant/hardware_facts.py` | Python 源码或一次性辅助文件。 | 7 |
+| `traveler_assistant/hardware_source_decisions.py` | Python 源码或一次性辅助文件。 | 5 |
+| `traveler_assistant/inventory.py` | 库存需求、商品映射、预检、浏览器出库和出库留痕。 | 156 |
+| `traveler_assistant/operation_log.py` | JSONL 操作日志、脱敏和数据库语句记录。 | 14 |
+| `traveler_assistant/order_details.py` | 从中央事实组装订单详情和 Panel 展示数据。 | 1 |
+| `traveler_assistant/order_index.py` | 订单索引核心：AIMES、Server、问题、确认、状态与同步证据。 | 232 |
+| `traveler_assistant/order_service.py` | Python 源码或一次性辅助文件。 | 3 |
+| `traveler_assistant/order_workflow.py` | 订单文件解析、预览、Traveler/材料工作簿生成与更新。 | 101 |
+| `traveler_assistant/production.py` | 生产备料预览、生产完成记录和出货前置校验。 | 18 |
+| `traveler_assistant/report_read_context.py` | Python 源码或一次性辅助文件。 | 8 |
 | `traveler_assistant/runtime_store.py` | 助手学习命令与 Agent Token 用量的 SQLite 存储。 | 10 |
+| `traveler_assistant/streaming_process.py` | Python 源码或一次性辅助文件。 | 1 |
+| `traveler_assistant/test.json` | 项目配置、资源或辅助文件。 | 0 |
 | `traveler_assistant/test_data.py` | 创建隔离的本地测试订单和工作簿样本。 | 5 |
 | `traveler_assistant/tool_gateway.py` | Typed Tool Gateway：审批校验和确定性业务动作分发。 | 2 |
+| `traveler_assistant/wecom_service.py` | Python 源码或一次性辅助文件。 | 9 |
 | `vendor/et_xmlfile/__init__.py` | 第三方 et_xmlfile 源码文件；由上游库维护，项目只作为固定依赖打包。 | 0 |
 | `vendor/et_xmlfile/incremental_tree.py` | 第三方 et_xmlfile 源码文件；由上游库维护，项目只作为固定依赖打包。 | 0 |
 | `vendor/et_xmlfile/xmlfile.py` | 第三方 et_xmlfile 源码文件；由上游库维护，项目只作为固定依赖打包。 | 0 |
@@ -369,10 +411,7 @@
 
 | 文件 | 中文职责 |
 | --- | --- |
-| `data/aimes-orders.json` | AIMES 近期订单缓存。 |
 | `data/assistant-runtime.sqlite3` | 助手学习命令与 Token 用量数据库。 |
-| `data/factory-names.json` | 工厂单号到名称的本地缓存。 |
-| `data/inventory-outbound-records.json` | 旧版/兼容出库记录。 |
 | `data/operation-log.jsonl` | 脱敏后的操作审计和分阶段耗时日志。 |
 | `data/order-index.sqlite3` | 旧版订单索引数据库；当前事实边界以 workflow.sqlite3 及迁移规则为准。 |
 | `data/server-scan-snapshot.json` | Server 扫描元数据快照。 |

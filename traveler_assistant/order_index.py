@@ -43,10 +43,19 @@ from .report_read_context import report_paths, preview_read_session, current_rep
 from .hardware_source_decisions import load_source_decisions, decision_revision, commit_source_decisions, with_source_decisions
 from .database import (
     collapse_actual_installation_days,
+    connect_database,
+    enable_foreign_keys,
     ensure_outbound_document_factory_links,
     ensure_schema,
+    server_material_identity_key,
 )
-from .inventory import InventoryMappings
+from .inventory import (
+    InventoryMappings,
+    ProductDatabase,
+    TravelerItem,
+    confirm_product_material_attributes,
+    match_item,
+)
 
 
 ORDER_ID_FROM_FACTORY_RE = re.compile(
@@ -69,6 +78,7 @@ _SHARED_WORKFLOW_CONNECTION: sqlite3.Connection | None = None
 
 def install_shared_workflow_connection(path: Path, connection: sqlite3.Connection) -> None:
     global _SHARED_WORKFLOW_PATH, _SHARED_WORKFLOW_CONNECTION
+    enable_foreign_keys(connection)
     _SHARED_WORKFLOW_PATH = path.resolve()
     _SHARED_WORKFLOW_CONNECTION = connection
 
@@ -217,6 +227,15 @@ def _material_source_fingerprint(store: "OrderIndexStore", path: Path) -> str:
         return ""
 
 
+def _material_fact_fingerprint(source_fingerprint: str, product_code: str) -> str:
+    """Bind parsed material evidence to the SKU selected at confirmation time."""
+    payload = "\x1f".join((
+        str(source_fingerprint or "").strip(),
+        str(product_code or "").strip().upper(),
+    ))
+    return "v2:" + hashlib.sha256(payload.encode()).hexdigest()
+
+
 def _replace_server_material_facts(
     store: "OrderIndexStore",
     order_id: str,
@@ -264,29 +283,46 @@ def _insert_server_material_source_facts(
 
     normalized_order_id = order_id.upper()
     source_fingerprint = _material_source_fingerprint(store, path)
-    for item in parsed_materials:
-        if mappings.ignored_reason(_material_inventory_name(item.kind, item.thickness, item.color)) is not None:
-            continue
-        store.connection.execute(
-            """insert or replace into material_items(
-                order_id,material_type,color,thickness,quantity,unit,edge,
-                source_type,source_path,source_fingerprint,updated_at
-            ) values(?,?,?,?,?,?,?,?,?,?,?)""",
-            (normalized_order_id, item.kind, item.color, str(item.thickness),
-             float(item.quantity), "pcs", "", "aihouse", str(path),
-             source_fingerprint, observed_at),
-        )
-    for color, quantity in parsed_edges.items():
-        if mappings.ignored_reason(f"Edge banding--{color}") is not None:
-            continue
-        store.connection.execute(
-            """insert or replace into material_items(
-                order_id,material_type,color,thickness,quantity,unit,edge,
-                source_type,source_path,source_fingerprint,updated_at
-            ) values(?,?,?,?,?,?,?,?,?,?,?)""",
-            (normalized_order_id, "edge", color, "", float(quantity), "m", color,
-             "aihouse", str(path), source_fingerprint, observed_at),
-        )
+    with ProductDatabase(store.path) as catalog:
+        rows = [
+            (item.kind, item.color, item.thickness, float(item.quantity),
+             _material_inventory_name(item.kind, item.thickness, item.color))
+            for item in parsed_materials
+        ] + [
+            ("edge", color, "", float(quantity), f"Edge banding--{color}")
+            for color, quantity in parsed_edges.items()
+        ]
+        for kind, color, thickness, quantity, name in rows:
+            if quantity <= MATERIAL_ALLOCATION_EPSILON:
+                continue
+            if mappings.ignored_reason(name) is not None:
+                continue
+            matched = match_item(
+                catalog, mappings,
+                TravelerItem(0, "板材与封边", name, quantity, normalized_order_id),
+            )
+            codes = sorted({entry.product_code.strip().upper() for entry in matched})
+            if len(codes) != 1:
+                raise RuleError(
+                    "order_inventory_mapping_required",
+                    f"材料 {name} 未唯一对应一个商品 SKU",
+                )
+            product_code = codes[0]
+            confirm_product_material_attributes(
+                store.connection, product_code, kind, color, thickness
+            )
+            store.connection.execute(
+                """insert into material_items(
+                    order_id,product_code,quantity,source_type,source_path,
+                    source_fingerprint,updated_at
+                ) values(?,?,?,?,?,?,?)
+                on conflict(order_id,product_code,source_type,source_path)
+                do update set quantity=material_items.quantity+excluded.quantity,
+                    source_fingerprint=excluded.source_fingerprint,
+                    updated_at=excluded.updated_at""",
+                (normalized_order_id, product_code, quantity, "aihouse", str(path),
+                 _material_fact_fingerprint(source_fingerprint, product_code), observed_at),
+            )
 
 
 def _replace_server_incremental_material_facts(
@@ -714,9 +750,9 @@ class OrderIndexStore:
         self._owns_connection = connection is None
         if connection is None:
             ensure_schema(path)
-            self.connection = sqlite3.connect(path)
+            self.connection = connect_database(path)
         else:
-            self.connection = connection
+            self.connection = enable_foreign_keys(connection)
         self.connection.set_trace_callback(lambda statement: log_database_statement(self.path, statement))
         version = self.connection.execute("pragma user_version").fetchone()[0]
         if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, INDEX_SCHEMA_VERSION):
@@ -799,21 +835,18 @@ class OrderIndexStore:
                 on server_scan_xml_state(source_folder, kind);
             create table if not exists server_material_allocations(
                 id integer primary key,
-                source_material_id integer not null,
                 source_path text not null default '',
                 source_material_key text not null default '',
-                material_type text not null default '',
-                color text not null default '',
-                thickness text not null default '',
-                unit text not null default '',
-                edge text not null default '',
+                product_code text not null check(trim(product_code) <> ''),
                 source_quantity real not null default 0,
                 order_id text not null,
                 allocated_quantity real not null default 0,
                 source_fingerprint text not null default '',
                 created_at text not null,
                 updated_at text not null,
-                unique(source_path, source_material_key, order_id)
+                unique(source_path, source_material_key, order_id),
+                foreign key(product_code) references products(code)
+                    on update cascade on delete restrict
             );
             create index if not exists idx_server_material_allocations_source
                 on server_material_allocations(source_path, source_material_key);
@@ -994,6 +1027,8 @@ class OrderIndexStore:
             row[1] for row in self.connection.execute("pragma table_info(temporary_orders)").fetchall()
         }
         for column, definition in (
+            ("handling_mode", "text not null default ''"),
+            ("reference_order_ids", "text not null default '[]'"),
             ("traveler_fingerprint", "text not null default ''"),
             ("traveler_include_hardware", "integer not null default 1"),
             ("traveler_status", "text not null default '未生成'"),
@@ -1133,7 +1168,8 @@ class OrderIndexStore:
                    processing_status,
                    outbound_status, outbound_document, processed_at,
                    outbound_at, last_error, server_scan_policy,
-                   server_scan_watch_until, server_scan_policy_updated_at, updated_at
+                   server_scan_watch_until, server_scan_policy_updated_at, updated_at,
+                   handling_mode, reference_order_ids
             from temporary_orders where source_folder = ?
             """,
             (source_folder,),
@@ -1148,8 +1184,11 @@ class OrderIndexStore:
             "outbound_status", "outbound_document", "processed_at",
             "outbound_at", "last_error", "server_scan_policy",
             "server_scan_watch_until", "server_scan_policy_updated_at", "updated_at",
+            "handling_mode", "reference_order_ids",
         )
-        return dict(zip(keys, row))
+        result = dict(zip(keys, row))
+        result["reference_order_ids"] = json.loads(result["reference_order_ids"])
+        return result
 
     def upsert_temporary_order(
         self,
@@ -1173,6 +1212,8 @@ class OrderIndexStore:
         server_scan_policy: str = "",
         server_scan_watch_until: str = "",
         server_scan_policy_updated_at: str = "",
+        handling_mode: str = "",
+        reference_order_ids: list[str] | None = None,
     ) -> None:
         previous = self.temporary_order(source_folder) or {}
         self.connection.execute(
@@ -1184,10 +1225,12 @@ class OrderIndexStore:
                 processing_status,
                 outbound_status, outbound_document, processed_at, outbound_at,
                 last_error, server_scan_policy, server_scan_watch_until,
-                server_scan_policy_updated_at, updated_at
-            ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                server_scan_policy_updated_at, updated_at, handling_mode, reference_order_ids
+            ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             on conflict(source_folder) do update set
                 temporary_id=excluded.temporary_id,
+                handling_mode=excluded.handling_mode,
+                reference_order_ids=excluded.reference_order_ids,
                 folder_name=excluded.folder_name,
                 folder_created_at=excluded.folder_created_at,
                 content_fingerprint=excluded.content_fingerprint,
@@ -1228,6 +1271,8 @@ class OrderIndexStore:
                 server_scan_watch_until or previous.get("server_scan_watch_until", ""),
                 server_scan_policy_updated_at or previous.get("server_scan_policy_updated_at", ""),
                 _now(),
+                handling_mode or previous.get("handling_mode", ""),
+                json.dumps(reference_order_ids if reference_order_ids is not None else previous.get("reference_order_ids", [])),
             ),
         )
 
@@ -2279,7 +2324,7 @@ class OrderIndexStore:
             for row in rows
         ]
 
-    def summaries(self) -> list[dict]:
+    def summaries(self, *, persist: bool = True) -> list[dict]:
         orders = self.connection.execute(
             "select order_id, order_type, source_folder, source_folder_mtime, validation_status, stage, material_status, last_server_seen, last_aimes_seen, updated_at, validation_message, user_note from orders order by order_id"
         ).fetchall()
@@ -2429,7 +2474,7 @@ class OrderIndexStore:
             # the dashboard still presents ``数据异常`` from validation_status.
             # For normal rows, persist the derived business stage so restart
             # and direct SQLite reads agree with the factory-order evidence.
-            if row[4] != "数据异常" and row[5] != stage:
+            if persist and row[4] != "数据异常" and row[5] != stage:
                 self.connection.execute(
                     "update orders set stage = ?, updated_at = ? where order_id = ?",
                     (stage, _now(), order_id),
@@ -2943,13 +2988,29 @@ def _merge_cached_server_candidate(
     return used
 
 
+def _confirmed_material_folders(store: OrderIndexStore, folders: list[Path]) -> list[Path]:
+    """Only a successful material write can establish a business XML baseline."""
+    confirmed = {
+        row[0] for row in store.connection.execute(
+            """select distinct source_folder from orders
+               where validation_status = '正常' and exists (
+                   select 1 from material_items
+                   where material_items.order_id = orders.order_id and quantity > 0)
+               and not exists (select 1 from factory_orders
+                   where factory_orders.order_id = orders.order_id
+                     and aimes_status = 'active' and optimized = 0)"""
+        )
+    }
+    return [folder for folder in folders if str(folder) in confirmed]
+
+
 def _refresh_cached_optimization_artifacts(
     store: OrderIndexStore,
     validation_rows: list[tuple[str, str]],
     *,
     timing_sink: list[dict[str, object]] | None = None,
 ) -> int:
-    """Persist exact AICNC optimization evidence and refresh factory state.
+    """Record XML metadata only for factories with written, validated materials.
 
     ``nesting_result.xml`` embeds the AIMES factory order in ``OrderID``.
     Its modification time is the AICNC generation time; filesystem birth time
@@ -2967,7 +3028,9 @@ def _refresh_cached_optimization_artifacts(
                 """
                 select factory_order
                 from factory_orders
-                where order_id = ? and aimes_status = 'active' and ownership_status = '已确认'
+                where order_id = ? and aimes_status = 'active' and ownership_status = '已确认' and optimized = 1
+                  and exists (select 1 from material_items
+                      where material_items.order_id = factory_orders.order_id and quantity > 0)
                 """,
                 (order_id,),
             ).fetchall()
@@ -3029,7 +3092,7 @@ def _refresh_cached_optimization_artifacts(
                             "error": artifact_error,
                         })
                     continue
-            for factory_order in sorted(artifact_factory_orders):
+            for factory_order in sorted(artifact_factory_orders & active_factory_orders):
                 store.connection.execute(
                     """
                     insert into optimization_artifacts(
@@ -3055,9 +3118,8 @@ def _refresh_cached_optimization_artifacts(
                     "duration_seconds": round(time.perf_counter() - artifact_started, 6),
                     "error": artifact_error,
                 })
-        # A complete readable scan may correct the historical blanket status.
-        # Previously observed evidence remains durable even if an old Server
-        # file is later archived, while a newly added AIMES factory starts at 0.
+        # Material validation already established the covered factory state.
+        # Keep XML timestamps only as supplementary provenance for that write.
         if not scan_complete:
             continue
         for factory_order in sorted(active_factory_orders):
@@ -3079,7 +3141,8 @@ def _refresh_cached_optimization_artifacts(
                 """,
                 (order_id, factory_order),
             ).fetchone()
-            optimized = bool(evidence and evidence[1])
+            if not evidence or not evidence[1]:
+                continue
             current = store.connection.execute(
                 """
                 select optimized, optimization_first_completed_at,
@@ -3090,7 +3153,7 @@ def _refresh_cached_optimization_artifacts(
                 (factory_order,),
             ).fetchone()
             desired = (
-                int(optimized),
+                1,
                 str(evidence[0] or "") if evidence else "",
                 str(evidence[1] or "") if evidence else "",
                 str(evidence[2] or "") if evidence else "",
@@ -3112,7 +3175,7 @@ def _refresh_cached_optimization_artifacts(
                     updated_at=?
                 where factory_order=? and order_id=?
                 """,
-                desired + (int(optimized), observed_at, factory_order, order_id),
+                desired + (1, observed_at, factory_order, order_id),
             )
             refreshed += 1
     return refreshed
@@ -3759,6 +3822,8 @@ def _server_folder_scan_allowed(
     aimes_rows: list[dict] | None = None,
 ) -> bool:
     """Apply per-order historical and seven-day Server scan policies."""
+    if _server_folder_handling_mode(store, folder, aimes_rows) in {"supplemental", "external_manual"}:
+        return _temporary_folder_is_candidate(config, store, folder)
     order_ids = _server_folder_order_ids(folder)
     if not order_ids:
         return True
@@ -3786,6 +3851,8 @@ def _finalize_server_scan_policies(
     """Commit AIMES baselines after the corresponding folders were scanned."""
     requires_scan = _orders_requiring_server_scan(config, store)
     for folder in folders:
+        if _server_folder_handling_mode(store, folder) in {"supplemental", "external_manual"}:
+            continue
         order_ids = _server_folder_order_ids(folder)
         for order_id in order_ids:
             existing = store.server_scan_policy(order_id)
@@ -3928,6 +3995,8 @@ def _server_folder_is_fully_shipped(
     known.  Fresh AIMES rows are merged in memory so a newly discovered factory
     order can reopen a folder during the same sync.
     """
+    if _server_folder_handling_mode(store, folder, aimes_rows) in {"supplemental", "external_manual"}:
+        return False
     order_ids = _server_folder_order_ids(folder)
     if not order_ids:
         return False
@@ -4446,18 +4515,65 @@ def sync_aimes_index(config: Config, *, force: bool = False, if_needed: bool = F
     return result
 
 
+def _folder_name_order_ids(folder: Path) -> list[str]:
+    """Read references from the name without opening reports or inferring ownership."""
+    return list(dict.fromkeys(match.group(1).upper() for match in ORDER_TOKEN_RE.finditer(folder.name)))
+
+
+def _server_folder_handling_mode(
+    store: OrderIndexStore, folder: Path, aimes_rows: list[dict] | None = None,
+) -> str:
+    """Keep external work independent; infer supplements only from known shipped facts.
+
+    AIMES facts come from the latest successful sync (or supplied fresh rows).
+    Unknown orders and newly added/unshipped factories cannot prove a supplement.
+    """
+    if _is_standard_order_folder(folder.name):
+        return "standard"
+    previous = store.temporary_order(str(folder)) or {}
+    if previous.get("handling_mode") == "external_manual" or previous.get("processing_status") == "已人工处理":
+        return "external_manual"
+    order_ids = set(_folder_name_order_ids(folder))
+    factories = _aimes_factory_records(store, aimes_rows)
+    relevant = [row for row in factories.values() if row["order_id"] in order_ids]
+    all_shipped = bool(order_ids) and {row["order_id"] for row in relevant} == order_ids and all(
+        row.get("outbound_status") == "已出库" for row in relevant
+    )
+    known = store.connection.execute(
+        "select 1 from source_files where source_folder=? limit 1", (str(folder),)
+    ).fetchone()
+    if all_shipped and (not known or previous.get("handling_mode") == "supplemental"):
+        return "supplemental"
+    return "mixed" if _is_mixed_order_folder(folder) else "temporary"
+
+
 def _temporary_folder_is_candidate(config: Config, store: OrderIndexStore, folder: Path) -> bool:
     """Select eligible recent or never-processed non-standard folders for review."""
     try:
         created_at = _folder_created_at(folder)
     except OSError:
         return False
+    existing = store.temporary_order(str(folder))
+    if existing and (existing.get("handling_mode") == "external_manual" or existing.get("processing_status") == "已人工处理"):
+        policy = existing.get("server_scan_policy")
+        if policy == "manual_pending":
+            return True
+        if policy == "permanent":
+            return False
+        deadline = existing.get("server_scan_watch_until", "")
+        if deadline:
+            if datetime.fromisoformat(deadline) <= datetime.now():
+                store.connection.execute("update temporary_orders set server_scan_policy='permanent' where source_folder=?", (str(folder),))
+                return False
+            if not _temporary_xml_baseline_matches(store, folder):
+                store.connection.execute("update temporary_orders set server_scan_policy='manual_pending' where source_folder=?", (str(folder),))
+            return True
     baseline = _server_scan_baseline(config)
 
     # Ordinary old temporary folders are excluded before any recursive report
     # enumeration.  This is intentionally before the fingerprint call above:
     # the age check is the inexpensive guard on a network-mounted Server.
-    if created_at < baseline:
+    if created_at < baseline and not existing:
         return False
 
     existing = store.temporary_order(str(folder))
@@ -4513,8 +4629,15 @@ def _temporary_folder_is_candidate(config: Config, store: OrderIndexStore, folde
                 return False
         except (TypeError, ValueError):
             return False
+        if (existing.get("handling_mode") == "external_manual" or existing.get("processing_status") == "已人工处理") and not _temporary_xml_baseline_matches(store, folder):
+            store.connection.execute(
+                "update temporary_orders set server_scan_policy='manual_pending', updated_at=? where source_folder=?",
+                (_now(), str(folder)),
+            )
         return True
 
+    if existing and existing.get("handling_mode") == "supplemental":
+        return True
     recent_cutoff = max(
         time.time() - timedelta(days=30).total_seconds(),
         baseline,
@@ -4553,6 +4676,7 @@ def _clear_stale_server_pending_state(config: Config, store: OrderIndexStore) ->
     stale_folders: set[str] = set()
     for root in roots:
         stale_folders.update(_temporary_folders_before_server_baseline(config, root))
+    stale_folders = {path for path in stale_folders if not store.temporary_order(path)}
     if stale_folders:
         store.clear_server_folder_pending_records(stale_folders)
         store.commit()
@@ -4791,11 +4915,15 @@ def record_temporary_outbound(config: Config, traveler_path: Path, outbound: dic
     store.close()
 
 
-def mark_temporary_folder_manual(config: Config, folder: Path) -> dict:
-    """Record a temporary Server folder that was completed outside the App.
+def mark_temporary_folder_manual(
+    config: Config, folder: Path, *,
+    reference_order_ids: list[str] | None = None,
+    outbound_document: str = "",
+) -> dict:
+    """Record external completion for one folder, without calling inventory.
 
-    Manual handling is an outbound fact and starts the three-day XML-only
-    watch. It is not a reminder-suppression action.
+    Optional order references are labels, never ownership or shipment updates.
+    Repeating the same report/XML revision keeps its original completion time.
     """
     roots = _available_server_roots(config)
     if not roots:
@@ -4807,69 +4935,81 @@ def mark_temporary_folder_manual(config: Config, folder: Path) -> dict:
     if not selected_resolved.is_dir() or root is None:
         raise ValueError("所选 Server 文件夹无法访问或不在 Server 根目录内")
     selected = root / selected_resolved.relative_to(root.resolve())
-    if _is_standard_order_folder(selected.name) or _is_mixed_order_folder(selected):
-        raise ValueError("已人工处理只适用于普通临时文件夹")
+    if reference_order_ids is None:
+        reference_order_ids = _folder_name_order_ids(selected)
+    if not isinstance(reference_order_ids, list) or any(
+        not isinstance(value, str) or not _is_standard_order_folder(value.strip().upper())
+        for value in reference_order_ids
+    ):
+        raise ValueError("参考订单请填写 PP####、PP####-# 或 CS###；也可以全部留空")
+    references = list(dict.fromkeys(value.strip().upper() for value in reference_order_ids))
+    if not _server_optimization_monitor_files(selected):
+        raise ValueError("该文件夹没有 Optimize file.xml 或 nesting_result.xml，无法建立三天 XML 观察基线")
 
-    marker_files = _server_optimization_monitor_files(selected)
-    if not marker_files:
-        raise ValueError("该临时文件夹没有 Optimize file.xml 或 nesting_result.xml，无法建立三天 XML 观察基线")
-
+    fingerprint = _temporary_folder_fingerprint(selected)
+    xml_entries = _server_scan_xml_entries([selected])
     now = _now()
-    watch_until = (
-        datetime.fromisoformat(now) + timedelta(days=TEMPORARY_SHIPPED_WATCH_DAYS)
-    ).isoformat(timespec="seconds")
     store = OrderIndexStore(config.workflow_database)
     try:
+        store.connection.execute("begin immediate")
+        if _server_folder_handling_mode(store, selected) not in {"temporary", "supplemental", "external_manual"}:
+            raise ValueError("已人工处理适用于普通临时文件夹或补单；补单要求相关订单全部出库且 AIMES 没有新增待处理工厂单")
         path = str(selected)
         previous = store.temporary_order(path) or {}
-        fingerprint = _temporary_folder_fingerprint(selected)
+        same_revision = (
+            previous.get("processing_status") == "已人工处理"
+            and previous.get("outbound_status") == "已出库"
+            and previous.get("content_fingerprint") == fingerprint
+            and _temporary_xml_baseline_matches(store, selected)
+        )
+        watch_until = previous.get("server_scan_watch_until", "") if same_revision else (
+            datetime.fromisoformat(now) + timedelta(days=TEMPORARY_SHIPPED_WATCH_DAYS)
+        ).isoformat(timespec="seconds")
+        policy = "permanent" if same_revision and previous.get("server_scan_policy") == "permanent" else "watching"
         store.upsert_temporary_order(
             temporary_id=previous.get("temporary_id") or _temporary_order_id(selected),
-            folder_name=selected.name,
-            source_folder=path,
-            folder_created_at=_folder_created_at(selected),
-            content_fingerprint=fingerprint,
-            traveler_path=previous.get("traveler_path", ""),
-            traveler_fingerprint=previous.get("traveler_fingerprint", ""),
-            traveler_include_hardware=previous.get("traveler_include_hardware"),
-            traveler_status=previous.get("traveler_status", ""),
-            traveler_generated_at=previous.get("traveler_generated_at", ""),
-            processing_status="已人工处理",
-            outbound_status="已出库",
-            outbound_document=previous.get("outbound_document", ""),
-            processed_at=previous.get("processed_at", "") or now,
-            outbound_at=now,
-            last_error="",
-            server_scan_policy="watching",
+            folder_name=selected.name, source_folder=path,
+            folder_created_at=_folder_created_at(selected), content_fingerprint=fingerprint,
+            processing_status="已人工处理", outbound_status="已出库",
+            processed_at=previous.get("processed_at", "") if same_revision else now,
+            outbound_at=previous.get("outbound_at", "") if same_revision else now,
+            last_error="", server_scan_policy=policy,
             server_scan_watch_until=watch_until,
-            server_scan_policy_updated_at=now,
+            server_scan_policy_updated_at=previous.get("server_scan_policy_updated_at", "") if same_revision else now,
+            handling_mode="external_manual", reference_order_ids=references,
         )
-        _record_server_baseline(store, selected, order_id=selected.name.upper())
-        store.save_server_scan_xml_baseline(
-            [selected], _server_scan_xml_entries([selected]), observed_at=now
+        # Empty is intentional: a new revision must not inherit an old external document.
+        store.connection.execute(
+            "update temporary_orders set outbound_document=? where source_folder=?",
+            (outbound_document.strip(), path),
         )
-        store.resolve_active_issue(f"temporary_processing:{selected}")
-        store.resolve_active_issue(f"server_missing_report:{selected}")
-        store.add_change(
-            severity="info",
-            kind="temporary_manual_outbound_reconciled",
-            path=path,
-            message=(
-                f"用户确认临时文件夹 {selected.name} 已人工处理并出库；"
-                "已记录当前文件基线，未来三天只观察两个 XML 文件"
-            ),
-            observed_at=now,
-        )
+        if not same_revision:
+            _record_server_baseline(store, selected)
+            store.save_server_scan_xml_baseline([selected], xml_entries, observed_at=now)
+        for issue in store.active_issues():
+            issue_path = str(issue.get("path") or "")
+            if issue_path == path or issue_path.startswith(path + "/"):
+                store.resolve_active_issue(issue["issue_key"], resolved_at=now)
+        if not same_revision or references != previous.get("reference_order_ids", []) or outbound_document.strip() != previous.get("outbound_document", ""):
+            store.add_change(
+                severity="info", kind="temporary_manual_outbound_reconciled", path=path,
+                message=(f"用户确认文件夹 {selected.name} 已在外部人工出库；"
+                         f"参考订单：{'、'.join(references) or '无'}；"
+                         f"外部单号：{outbound_document.strip() or '未填写'}；"
+                         + ("保留本次完成时间及观察期限" if same_revision else "未来三天独立观察 XML")),
+                observed_at=now,
+            )
         store.commit()
         return {
-            "ok": True,
-            "temporary_manual_handled": path,
-            "outbound_status": "已出库",
-            "server_scan_policy": "watching",
+            "ok": True, "temporary_manual_handled": path,
+            "unchanged": same_revision, "reference_order_ids": references,
+            "outbound_status": "已出库", "server_scan_policy": policy,
             "server_scan_watch_until": watch_until,
-            "pending_server_changes": [],
-            "current_issues": store.active_issues(),
+            "pending_server_changes": [], "current_issues": store.active_issues(),
         }
+    except Exception:
+        store.connection.rollback()
+        raise
     finally:
         store.close()
 
@@ -5191,19 +5331,16 @@ def _server_snapshot(
         for folder in sorted(server_root.iterdir(), key=lambda item: item.name.casefold()):
             if not folder.is_dir():
                 continue
-            is_order_folder = _is_standard_order_folder(folder.name)
-            if is_order_folder:
+            mode = _server_folder_handling_mode(store, folder)
+            if mode in {"temporary", "supplemental", "external_manual"}:
+                if not _temporary_folder_is_candidate(config, store, folder):
+                    continue
+            elif mode == "standard":
                 if _order_type(folder.name) != _server_root_order_type(server_root):
                     continue
                 if not _server_folder_scan_allowed(config, store, folder):
                     continue
-            if (
-                not is_order_folder
-                and _is_mixed_order_folder(folder)
-                and not _server_folder_scan_allowed(config, store, folder)
-            ):
-                continue
-            if not is_order_folder and not _is_mixed_order_folder(folder) and not _temporary_folder_is_candidate(config, store, folder):
+            elif not _server_folder_scan_allowed(config, store, folder):
                 continue
             folders.append(folder)
 
@@ -5214,7 +5351,7 @@ def _server_snapshot(
         str(folder)
         for folder in folders
         if not _is_standard_order_folder(folder.name)
-        and (store.temporary_order(str(folder)) or {}).get("server_scan_policy") == "watching"
+        and (store.temporary_order(str(folder)) or {}).get("server_scan_policy") in {"watching", "manual_pending"}
     }
     scan_targets = [
         (folder, str(folder) in xml_only_folders)
@@ -5223,6 +5360,23 @@ def _server_snapshot(
     worker_count = min(SERVER_SNAPSHOT_MAX_WORKERS, len(scan_targets))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         for folder_snapshot, folder_timing in executor.map(_server_snapshot_folder, scan_targets):
+            folder = Path(str(folder_timing["source_folder"]))
+            mode = _server_folder_handling_mode(store, folder)
+            previous = store.temporary_order(str(folder)) or {}
+            references = previous.get("reference_order_ids", _folder_name_order_ids(folder))
+            if mode == "supplemental" and not previous:
+                store.upsert_temporary_order(
+                    temporary_id=_temporary_order_id(folder), folder_name=folder.name,
+                    source_folder=str(folder), folder_created_at=_folder_created_at(folder),
+                    content_fingerprint="", processing_status="待人工处理",
+                    handling_mode="supplemental", reference_order_ids=references,
+                )
+            for item in folder_snapshot.values():
+                item["handling_mode"] = mode
+                item["reference_order_ids"] = references
+                if mode in {"supplemental", "external_manual"}:
+                    item["manual_only"] = True
+                    item["order_id"] = "、".join(references)
             snapshot.update(folder_snapshot)
             if timing_sink is not None:
                 timing_sink.append(folder_timing)
@@ -5664,14 +5818,13 @@ def scan_server_changes(config: Config) -> dict:
 
     The scan may clean stale pending state for folders excluded by the configured
     baseline; it never marks currently visible material/report files as processed.
-    AICNC ``nesting_result.xml`` is a separately approved, read-only status
-    source, so the scan may persist its exact factory-order optimization evidence.
+    Optimization XML is an in-memory discovery only. Its evidence, timestamps
+    and comparison baseline belong to the material confirmation transaction.
     """
     scanned_at = _now()
     scan_started = time.perf_counter()
     store = OrderIndexStore(config.workflow_database)
     server_folder_timings: list[dict[str, object]] = []
-    optimization_file_timings: list[dict[str, object]] = []
     _clear_stale_server_pending_state(config, store)
     root, current = _server_snapshot(
         config,
@@ -5694,7 +5847,7 @@ def scan_server_changes(config: Config) -> dict:
         if item.get("kind") == "folder"
         and not _is_standard_order_folder(Path(str(item.get("source_folder") or "")).name)
         and (store.temporary_order(str(item.get("source_folder") or "")) or {}).get("outbound_status") == "已出库"
-        and (store.temporary_order(str(item.get("source_folder") or "")) or {}).get("server_scan_policy") == "watching"
+        and (store.temporary_order(str(item.get("source_folder") or "")) or {}).get("server_scan_policy") in {"watching", "manual_pending"}
     }
     legacy_folders = {
         str(item.get("source_folder") or "")
@@ -5748,44 +5901,6 @@ def scan_server_changes(config: Config) -> dict:
         ).fetchall()
         if row[1] in legacy_folders
     }
-    # Existing processed folders already have a folder baseline in source_files.
-    # Seed the new XML-only baseline for those folders without turning the first
-    # post-migration scan into a false batch of new changes.
-    known_folders = {
-        str(row[0])
-        for row in store.connection.execute(
-            "select path from source_files where kind = 'folder'"
-        ).fetchall()
-    }
-    bootstrap_folders = {
-        folder for folder in current_folders
-        if folder in known_folders
-        and not any(item.get("source_folder") == folder for item in previous_all.values())
-    }
-    bootstrap_entries = [
-        dict(item, path=path)
-        for path, item in current_xml.items()
-        if item.get("source_folder") in bootstrap_folders
-    ]
-    if bootstrap_folders:
-        store.save_server_scan_xml_baseline(
-            [Path(folder) for folder in bootstrap_folders],
-            bootstrap_entries,
-            observed_at=scanned_at,
-        )
-        store.commit()
-        previous_all.update({
-            str(item["path"]): {
-                "source_folder": str(item["source_folder"]),
-                "kind": str(item["kind"]),
-                "order_id": str(item.get("order_id") or ""),
-                "modified_at": int(item.get("modified_at") or 0),
-                "size": 0,
-                "manual_only": False,
-                "mixed_order": False,
-            }
-            for item in bootstrap_entries
-        })
     previous_all = {
         path: item for path, item in previous_all.items()
         if root is None or any(
@@ -5967,6 +6082,14 @@ def scan_server_changes(config: Config) -> dict:
                 "mixed_order": bool(item.get("mixed_order")),
                 "event_time": str(issue.get("last_seen") or scanned_at),
             })
+    for change in changes:
+        folder_path = str(change.get("source_folder") or "")
+        item = current.get(folder_path, {})
+        change["handling_mode"] = item.get("handling_mode", "")
+        change["reference_order_ids"] = item.get("reference_order_ids", [])
+        if item.get("handling_mode") in {"supplemental", "external_manual"}:
+            change["manual_only"] = True
+            change["order_id"] = item.get("order_id", "")
     order_folder_count = sum(item["kind"] == "folder" for item in current.values())
     related_xml_count = len(current_xml)
     related_legacy_count = sum(item["kind"] != "folder" for item in current_legacy.values())
@@ -5992,86 +6115,11 @@ def scan_server_changes(config: Config) -> dict:
         "deleted_count": sum(item["change_type"] == "removed" for item in changes),
         "renamed_count": sum(item["change_type"] == "renamed" for item in changes),
     }
-    store.commit()
-    store.close()
-    store = OrderIndexStore(config.workflow_database)
-    optimization_started = time.perf_counter()
-    optimization_rows = store.connection.execute(
-        """
-        select distinct orders.order_id, orders.source_folder
-        from orders
-        join factory_orders on factory_orders.order_id = orders.order_id
-        where orders.source_folder <> ''
-          and factory_orders.aimes_status = 'active'
-          and exists (
-              select 1 from factory_orders pending
-              where pending.order_id = orders.order_id
-                and pending.aimes_status = 'active'
-                and pending.outbound_status <> '已出库'
-          )
-        """
-    ).fetchall()
-    optimization_refreshed = _refresh_cached_optimization_artifacts(
-        store,
-        optimization_rows,
-        timing_sink=optimization_file_timings,
-    )
+    finalize_started = time.perf_counter()
     folder_timing_by_path = {
-        str(item.get("source_folder") or ""): item
-        for item in server_folder_timings
+        str(item["source_folder"]): item for item in server_folder_timings
         if item.get("source_folder")
     }
-    for item in optimization_file_timings:
-        folder_path = str(item.get("source_folder") or "")
-        if not folder_path:
-            continue
-        folder = folder_timing_by_path.setdefault(
-            folder_path,
-            {
-                "source_folder": folder_path,
-                "duration_seconds": 0.0,
-                "files": [],
-                "error": "",
-            },
-        )
-        files = folder.setdefault("files", [])
-        existing = next(
-            (
-                value for value in files
-                if isinstance(value, dict)
-                and str(value.get("path") or "") == str(item.get("path") or "")
-            ),
-            None,
-        )
-        if existing is None:
-            files.append(item)
-        else:
-            existing["duration_seconds"] = round(
-                float(existing.get("duration_seconds", 0) or 0)
-                + float(item.get("duration_seconds", 0) or 0),
-                6,
-            )
-            if item.get("error"):
-                existing["error"] = item["error"]
-        # Recalculate from the final file list so rounding and same-path
-        # aggregation cannot make the folder total differ from its files.
-        folder["duration_seconds"] = round(
-            sum(
-                float(value.get("duration_seconds", 0) or 0)
-                for value in folder.get("files", [])
-                if isinstance(value, dict)
-            ),
-            6,
-        )
-    for folder in folder_timing_by_path.values():
-        folder["duration_seconds"] = round(
-            sum(
-                float(value.get("duration_seconds", 0) or 0)
-                for value in folder.get("files", [])
-                if isinstance(value, dict)
-            ),
-            6,
-        )
     _finalize_server_scan_policies(
         config,
         store,
@@ -6086,7 +6134,6 @@ def scan_server_changes(config: Config) -> dict:
     orders = store.summaries()
     store.commit()
     store.close()
-    optimization_finished = time.perf_counter()
     snapshot_path = ""
     try:
         snapshot_path = str(
@@ -6095,27 +6142,21 @@ def scan_server_changes(config: Config) -> dict:
                 root=root,
                 roots=_available_server_roots(config),
                 scanned_at=scanned_at,
-                entries=current,
+                entries={path: item for path, item in current.items()
+                         if item.get("kind") not in SERVER_SCAN_XML_KINDS},
             )
         )
     except OSError:
         # The next sync can safely fall back to its own read-only traversal.
         snapshot_path = ""
     completed = time.perf_counter()
-    scan_stats["optimization_evidence_seconds"] = round(optimization_finished - optimization_started, 6)
-    scan_stats["optimization_artifact_refresh_count"] = optimization_refreshed
-    scan_stats["finalize_seconds"] = round(completed - optimization_finished, 6)
+    scan_stats["finalize_seconds"] = round(completed - finalize_started, 6)
     scan_stats["duration_seconds"] = round(completed - scan_started, 6)
     timing_stages = [
         {
             "stage": "server_metadata",
             "label": "读取并比对 Server 文件",
             "duration_seconds": scan_stats["metadata_scan_seconds"],
-        },
-        {
-            "stage": "optimization_evidence",
-            "label": "读取 AICNC 优化证据",
-            "duration_seconds": scan_stats["optimization_evidence_seconds"],
         },
         {
             "stage": "scan_finalize",
@@ -6186,13 +6227,17 @@ def _server_folders_for_sync(
         folders = []
         for selected in selected_folders:
             candidate = selected.expanduser().resolve()
-            if not candidate.is_dir() or containing_root(candidate) is None:
+            source_root = containing_root(candidate)
+            if not candidate.is_dir() or source_root is None:
                 raise RuleError("server_folder_invalid", f"所选 Server 文件夹无法访问或不在 Server 根目录内：{selected}")
             if not _is_standard_order_folder(candidate.name) and not _report_files(candidate):
                 raise RuleError(
                     "server_folder_invalid",
                     f"无法识别所选文件夹：{candidate}。该目录及子目录中未找到可识别的 material、板材清单或 Fittingslist .xlsx 报表。请选择包含这些报表的订单目录；若选择的是优化结果目录，请返回上一级订单目录。",
                 )
+            # Independent folder records use the configured scan root spelling.
+            if not _is_standard_order_folder(candidate.name):
+                candidate = source_root / candidate.relative_to(source_root.resolve())
             folders.append(candidate)
         return root, list(dict.fromkeys(folders))
 
@@ -6230,8 +6275,11 @@ def _server_folders_for_sync(
         return root, folders
 
     selected = selected_folder.expanduser().resolve()
-    if not selected.is_dir() or containing_root(selected) is None:
+    source_root = containing_root(selected)
+    if not selected.is_dir() or source_root is None:
         raise RuleError("server_folder_invalid", "所选文件夹无法访问，请重新选择 Server 订单文件夹。")
+    if not _is_standard_order_folder(selected.name):
+        selected = source_root / selected.relative_to(source_root.resolve())
     if _is_standard_order_folder(selected.name):
         return selected, [selected]
     if _direct_report_files(selected):
@@ -6632,13 +6680,22 @@ def sync_order_index(
             server_read_items.append((str(folder), str(folder), "folder"))
             standard_folder = _is_standard_order_folder(folder.name)
             mixed_folder = _is_mixed_order_folder(folder)
-            manual_folder = not (standard_folder or mixed_folder)
+            handling_mode = _server_folder_handling_mode(store, folder, aimes_rows)
+            independent_manual = handling_mode in {"supplemental", "external_manual"}
+            manual_folder = not (standard_folder or mixed_folder) or independent_manual
+            if handling_mode == "supplemental" and not store.temporary_order(str(folder)):
+                store.upsert_temporary_order(
+                    temporary_id=_temporary_order_id(folder), folder_name=folder.name,
+                    source_folder=str(folder), folder_created_at=_folder_created_at(folder),
+                    content_fingerprint="", processing_status="待人工处理",
+                    handling_mode="supplemental", reference_order_ids=_folder_name_order_ids(folder),
+                )
             folder_metadata = (
                 server_snapshot_entries.get(str(folder))
                 if server_snapshot_entries is not None
                 else None
             )
-            if manual_folder and process_temporary:
+            if manual_folder and process_temporary and not independent_manual:
                 try:
                     temporary_processing_results.append(
                         _process_temporary_folder(
@@ -6906,6 +6963,7 @@ def sync_order_index(
                                     "",
                                 )
                                 for index, item in enumerate(parsed_materials, start=1)
+                                if float(item.quantity or 0) > MATERIAL_ALLOCATION_EPSILON
                             ]
                             resolution_items.extend(
                                 (
@@ -6919,6 +6977,7 @@ def sync_order_index(
                                     "",
                                 )
                                 for index, (color, quantity) in enumerate(parsed_edges.items(), start=1)
+                                if float(quantity or 0) > MATERIAL_ALLOCATION_EPSILON
                             )
                             resolution = resolve_inventory_items(config, resolution_items)
                             if resolution["missing"]:
@@ -7496,8 +7555,6 @@ def sync_order_index(
         row for row in all_validation_rows
         if str(row[0]).upper() in changed_order_ids
     ]
-    artifact_refreshed = _refresh_cached_optimization_artifacts(store, all_validation_rows)
-    finish_phase("optimization_artifact_check")
 
     # Validate the current source against each logical order. A successful
     # preview is the existing, auditable material/factory evidence for the
@@ -7518,26 +7575,42 @@ def sync_order_index(
             preview = preview_order(
                 config, Path(source_folder), order_id, persist_facts=False, include_hardware=include_hardware
             )
-            factory_ids = {factory.factory_order for factory in preview.factories}
-            if not factory_ids:
-                # CUT TO SIZE previews intentionally omit hardware/factory
-                # blocks. A successful board/material preview still proves
-                # the indexed factory orders for that order are optimized.
-                factory_ids = {
-                    row[0]
-                    for row in store.connection.execute(
-                        "select factory_order from factory_orders where order_id = ? and aimes_status = 'active' and ownership_status = '已确认'",
-                        (order_id,),
-                    ).fetchall()
-                }
+            # Ownership in AIMES alone does not mean this material write covers
+            # a newly added factory. Require its identity in the selected reports
+            # or XML; XML only scopes the write, never establishes state by itself.
+            source_factory_ids = {
+                factory.strip().upper()
+                for row in store.connection.execute(
+                    "select factory_order from source_files where source_folder=? and kind in ('board','fittings')",
+                    (source_folder,),
+                )
+                for factory in str(row[0] or "").split(",") if factory.strip()
+            }
+            if store.connection.execute(
+                "select 1 from material_items where order_id=? and quantity > 0 limit 1", (order_id,)
+            ).fetchone():
+                for artifact in _optimization_result_artifacts(Path(source_folder)):
+                    try:
+                        source_factory_ids.update(_optimization_factory_orders(artifact))
+                    except (OSError, ET.ParseError):
+                        pass
+            factory_ids = {
+                row[0] for row in store.connection.execute(
+                    "select factory_order from factory_orders where order_id=? and aimes_status='active' and ownership_status='已确认'",
+                    (order_id,),
+                ) if row[0] in source_factory_ids
+            }
             store.connection.execute(
                 "update orders set validation_status = ?, validation_message = '', material_status = ?, updated_at = ? where order_id = ?",
                 ("正常", "板材 · 封边", _now(), order_id),
             )
             for factory_order in factory_ids:
                 store.connection.execute(
-                    "update factory_orders set report_state = '已发现', updated_at = ? where factory_order = ? and order_id = ?",
-                    (_now(), factory_order, order_id),
+                    """update factory_orders set report_state = '已发现',
+                       optimized = exists (select 1 from material_items
+                           where order_id = ? and quantity > 0), updated_at = ?
+                       where factory_order = ? and order_id = ?""",
+                    (order_id, _now(), factory_order, order_id),
                 )
         except Exception as exc:
             validation_message = _business_validation_message(exc)
@@ -7552,8 +7625,8 @@ def sync_order_index(
             if order_id.upper().startswith("CS") and indexed_factory_ids and optimization_outputs:
                 # Some CUT TO SIZE exports contain only the production reports
                 # and CNC nesting output, without a generated material workbook.
-                # The optimization artifact is sufficient for the optimization
-                # column; keep material validation visibly pending.
+                # Keep missing materials visibly pending; XML alone must not
+                # establish optimization state or a processed-file baseline.
                 store.connection.execute(
                     "update orders set validation_status = ?, validation_message = ?, material_status = ?, updated_at = ? where order_id = ?",
                     (
@@ -7588,6 +7661,7 @@ def sync_order_index(
             )
         store.commit()
 
+    artifact_refreshed = _refresh_cached_optimization_artifacts(store, validation_rows)
     finish_phase("order_validation")
 
     _clear_stale_mapping_validation_status(
@@ -7604,8 +7678,8 @@ def sync_order_index(
         )
         try:
             store.save_server_scan_xml_baseline(
-                server_folders,
-                _server_scan_xml_entries(server_folders),
+                _confirmed_material_folders(store, server_folders),
+                _server_scan_xml_entries(_confirmed_material_folders(store, server_folders)),
                 observed_at=server_seen,
             )
         except OSError:
@@ -7789,13 +7863,12 @@ def _server_material_allocation_rows(
 ) -> list[dict]:
     rows = store.connection.execute(
         """
-        select order_id, allocated_quantity, material_type, color,
-               thickness, unit, edge
+        select order_id, allocated_quantity
         from server_material_allocations
-        where source_path = ?
+        where source_path = ? and source_material_key = ?
         order by order_id
         """,
-        (source_path,),
+        (source_path, material_key),
     ).fetchall()
     return [
         {
@@ -7803,66 +7876,31 @@ def _server_material_allocation_rows(
             "quantity": float(row[1] or 0),
         }
         for row in rows
-        if _server_material_identity_key(
-            source_path, row[2], row[3], row[4], row[5], row[6]
-        ) == material_key
     ]
 
 
-def _server_material_identity_key(
-    source_path: str,
-    material_type: str,
-    color: str,
-    thickness: str,
-    unit: str,
-    edge: str,
-) -> str:
-    """Return a stable identity for one parsed Server material fact.
-
-    ``material_items.id`` is an SQLite row id and changes whenever a source
-    workbook is refreshed.  Allocation records must therefore use the source
-    path and normalized material fields instead of that transient id.
-    """
-    values = [
-        str(value or "").strip().casefold()
-        for value in (source_path, material_type, color, thickness, unit, edge)
-    ]
-    return "v2:" + hashlib.sha256("\x1f".join(values).encode()).hexdigest()
-
-
-def _server_material_preview_row(store: OrderIndexStore, row: tuple) -> dict:
-    (
-        material_id,
-        provisional_order_id,
-        material_type,
-        color,
-        thickness,
-        quantity,
-        unit,
-        edge,
-        source_path,
-        source_fingerprint,
-    ) = row
-    source_quantity = float(quantity or 0)
-    material_key = _server_material_identity_key(
-        str(source_path or ""), material_type, color, thickness, unit, edge
-    )
-    allocations = _server_material_allocation_rows(store, str(source_path or ""), material_key)
+def _server_material_preview_row(store: OrderIndexStore, row: dict) -> dict:
+    source_quantity = float(row.get("quantity", 0) or 0)
+    source_path = str(row.get("source_path", "") or "")
+    product_code = str(row.get("product_code", "") or "").strip().upper()
+    material_key = server_material_identity_key(source_path, product_code)
+    allocations = _server_material_allocation_rows(store, source_path, material_key)
     allocated_quantity = sum(item["quantity"] for item in allocations)
     return {
-        "material_id": int(material_id),
-        "source_order_id": str(provisional_order_id or "").upper(),
-        "material_type": str(material_type or ""),
-        "color": str(color or ""),
-        "thickness": str(thickness or ""),
+        "material_id": int(row["id"]),
+        "source_order_id": str(row.get("order_id", "") or "").upper(),
+        "product_code": product_code,
+        "material_type": str(row.get("material_type", "") or ""),
+        "color": str(row.get("color", "") or ""),
+        "thickness": str(row.get("thickness", "") or ""),
         "quantity": source_quantity,
         "source_quantity": source_quantity,
         "allocated_quantity": allocated_quantity,
         "remaining_quantity": max(0.0, source_quantity - allocated_quantity),
-        "unit": str(unit or ""),
-        "edge": str(edge or ""),
-        "source_path": str(source_path or ""),
-        "source_fingerprint": str(source_fingerprint or ""),
+        "unit": str(row.get("unit", "") or ""),
+        "edge": str(row.get("edge", "") or ""),
+        "source_path": source_path,
+        "source_fingerprint": str(row.get("source_fingerprint", "") or ""),
         "allocations": allocations,
     }
 
@@ -7870,18 +7908,31 @@ def _server_material_preview_row(store: OrderIndexStore, row: tuple) -> dict:
 def _server_material_source_rows(
     store: OrderIndexStore | sqlite3.Connection,
     folder_paths: list[str],
-) -> list[tuple]:
+) -> list[dict]:
     connection = store.connection if isinstance(store, OrderIndexStore) else store
     rows = connection.execute(
         """
-        select id, order_id, material_type, color, thickness, quantity,
-               unit, edge, source_path, source_fingerprint
-        from material_items
-        where source_type = 'aihouse'
-        order by source_path, id
+        select m.id, m.order_id, m.product_code,
+               p.material_kind, p.material_color, p.material_thickness,
+               m.quantity, p.unit,
+               case when p.material_kind='edge' then p.material_color else '' end,
+               m.source_path, m.source_fingerprint
+        from material_items m
+        join products p on p.code=m.product_code
+        where m.source_type = 'aihouse'
+        order by m.source_path, m.id
         """
     ).fetchall()
-    return [row for row in rows if _path_in_folders(str(row[8] or ""), folder_paths)]
+    names = (
+        "id", "order_id", "product_code", "material_type", "color",
+        "thickness", "quantity", "unit", "edge", "source_path",
+        "source_fingerprint",
+    )
+    return [
+        dict(zip(names, row))
+        for row in rows
+        if _path_in_folders(str(row[9] or ""), folder_paths)
+    ]
 
 
 def _server_material_sort_key(item: dict) -> tuple:
@@ -7926,38 +7977,46 @@ def _server_material_change_rows(
             path_clause = " and source_path in (" + ",".join("?" for _ in source_paths) + ")"
             params.extend(source_paths)
         rows = connection.execute(
-            f"""select material_type, color, thickness, unit, edge, sum(quantity)
-                from material_items
-                where order_id=? and source_type='aihouse'{path_clause}
-                group by material_type, color, thickness, unit, edge""",
+            f"""select m.product_code, p.material_kind, p.material_color,
+                       p.material_thickness, p.unit,
+                       case when p.material_kind='edge' then p.material_color else '' end,
+                       sum(m.quantity)
+                from material_items m join products p on p.code=m.product_code
+                where m.order_id=? and m.source_type='aihouse'{path_clause}
+                group by m.product_code, p.material_kind, p.material_color,
+                         p.material_thickness, p.unit""",
             params,
         ).fetchall()
         return {
-            _server_change_key(row[0], row[1], row[2], row[3], row[4]): {
-                "material_type": str(row[0] or ""),
-                "color": str(row[1] or ""),
-                "thickness": str(row[2] or ""),
-                "unit": str(row[3] or ""),
-                "edge": str(row[4] or ""),
-                "quantity": float(row[5] or 0),
+            _server_change_key(row[0]): {
+                "product_code": str(row[0] or ""),
+                "material_type": str(row[1] or ""),
+                "color": str(row[2] or ""),
+                "thickness": str(row[3] or ""),
+                "unit": str(row[4] or ""),
+                "edge": str(row[5] or ""),
+                "quantity": float(row[6] or 0),
             }
             for row in rows
         }
 
     preview_rows = _server_material_source_rows(preview, folder_paths)
-    source_paths = sorted({str(row[8] or "") for row in preview_rows if str(row[8] or "")})
+    source_paths = sorted({str(row["source_path"] or "") for row in preview_rows if str(row["source_path"] or "")})
     current_rows = grouped(current, source_paths)
     preview_values: dict[tuple[str, ...], dict] = {}
     for row in preview_rows:
-        if str(row[1] or "").strip().upper() != order_id:
+        if str(row["order_id"] or "").strip().upper() != order_id:
             continue
-        key = _server_change_key(row[2], row[3], row[4], row[6], row[7])
+        key = _server_change_key(row["product_code"])
         item = preview_values.setdefault(key, {
-            "material_type": str(row[2] or ""), "color": str(row[3] or ""),
-            "thickness": str(row[4] or ""), "unit": str(row[6] or ""),
-            "edge": str(row[7] or ""), "quantity": 0.0,
+            "product_code": str(row["product_code"] or ""),
+            "material_type": str(row["material_type"] or ""),
+            "color": str(row["color"] or ""),
+            "thickness": str(row["thickness"] or ""),
+            "unit": str(row["unit"] or ""),
+            "edge": str(row["edge"] or ""), "quantity": 0.0,
         })
-        item["quantity"] += float(row[5] or 0)
+        item["quantity"] += float(row["quantity"] or 0)
     changes = []
     for key in sorted(set(current_rows) | set(preview_values)):
         old = current_rows.get(key, {})
@@ -7970,6 +8029,7 @@ def _server_material_change_rows(
         base = new or old
         changes.append({
             "change_type": "新增" if old_quantity == 0 else ("删除" if new_quantity == 0 else "数量变化"),
+            "product_code": base.get("product_code", ""),
             "material_type": base.get("material_type", ""),
             "color": base.get("color", ""),
             "thickness": base.get("thickness", ""),
@@ -8302,6 +8362,10 @@ def _server_preview_payload(
             "outbound_document": str(row[12] or ""),
             "production_batch_id": row[13],
             "hardware": hardware,
+            "has_existing_hardware": bool(current.execute(
+                "select 1 from hardware_items where factory_order=? and active=1 limit 1",
+                (factory_order.upper(),),
+            ).fetchone()),
         })
 
     orders = []
@@ -8469,6 +8533,11 @@ def _server_preview_payload(
             tuple(selected_factory_orders) + tuple(sorted(order_ids))
             if selected_factory_orders and order_ids else (),
         ),
+        "server_scan_xml_state": table_records(
+            "server_scan_xml_state",
+            "source_folder in ({})".format(",".join("?" for _ in folder_paths))
+            if folder_paths else "0", tuple(folder_paths),
+        ),
         "server_material_allocations": table_records(
             "server_material_allocations",
             "source_path in ({})".format(",".join("?" for _ in selected_source_paths))
@@ -8603,7 +8672,14 @@ def preview_server_changes(
 
     fittings_cache: dict = {}
     normalized_folders = [folder.expanduser().resolve() for folder in selected_folders]
-    _server_folders_for_sync(config, None, selected_folders=normalized_folders)
+    _, normalized_folders = _server_folders_for_sync(config, None, selected_folders=normalized_folders)
+    routing_store = OrderIndexStore(config.workflow_database)
+    try:
+        for folder in normalized_folders:
+            if _server_folder_handling_mode(routing_store, folder) in {"supplemental", "external_manual"}:
+                raise RuleError("server_folder_manual_only", f"{folder.name} 是独立人工处理文件夹；请在外部完成出库后登记“已人工处理”")
+    finally:
+        routing_store.close()
     if not isinstance(hardware_source_choices or {}, dict):
         raise ValueError("五金来源选择必须是工厂单到报表的映射")
     context = current_report_context()
@@ -8629,6 +8705,12 @@ def preview_server_changes(
             # Preserve existing detailed workbook validation/error presentation.
     context.decisions_prepared = True
     finish_timing_stage("source_selection", "检查五金来源")
+    # The shadow database must include the current catalog parents before any
+    # parsed material can bind its SKU foreign key or business attributes.
+    # Importing after the backup would update only the disk database and leave
+    # the in-memory preview with an empty ``products`` table.
+    from .inventory import bootstrap_product_database
+    bootstrap_product_database(config)
     memory = sqlite3.connect(":memory:")
     if config.workflow_database.is_file():
         source = sqlite3.connect(config.workflow_database)
@@ -8640,11 +8722,6 @@ def preview_server_changes(
     stage_config.workflow_connection = memory
     preview_store = OrderIndexStore(config.workflow_database, connection=memory)
     try:
-        # Product mappings and the order index share the central SQLite file;
-        # create the shadow product tables before opening OrderIndexStore so
-        # the preview never tries to migrate the same file while it is locked.
-        from .inventory import bootstrap_product_database
-        bootstrap_product_database(stage_config)
         finish_timing_stage("preview_database", "复制中央数据库到内存预览")
         # The preview intentionally never runs temporary-order outbound or
         # traveler generation. Those are separate user-approved operations.
@@ -8755,64 +8832,61 @@ def allocate_server_material(
             "select 1 from orders where order_id = ?", (order_id,)
         ).fetchone() is None:
             raise ValueError("所选订单不在本次 Server 预览中")
-        row = preview.connection.execute(
+        raw_row = preview.connection.execute(
             """
-            select id, order_id, material_type, color, thickness, quantity,
-                   unit, edge, source_path, source_fingerprint
-            from material_items
-            where id = ? and source_type = 'aihouse'
+            select m.id, m.order_id, m.product_code,
+                   p.material_kind, p.material_color, p.material_thickness,
+                   m.quantity, p.unit,
+                   case when p.material_kind='edge' then p.material_color else '' end,
+                   m.source_path, m.source_fingerprint
+            from material_items m join products p on p.code=m.product_code
+            where m.id = ? and m.source_type = 'aihouse'
             """,
             (int(material_id),),
         ).fetchone()
-        if row is None:
+        if raw_row is None:
             raise ValueError("所选材料明细不在本次 Server 预览中")
-        source_quantity = float(row[5] or 0)
-        source_path = str(row[8] or "")
-        material_key = _server_material_identity_key(
-            source_path, row[2], row[3], row[4], row[6], row[7]
-        )
+        row = dict(zip((
+            "id", "order_id", "product_code", "material_type", "color",
+            "thickness", "quantity", "unit", "edge", "source_path",
+            "source_fingerprint",
+        ), raw_row))
+        source_quantity = float(row["quantity"] or 0)
+        source_path = str(row["source_path"] or "")
+        product_code = str(row["product_code"] or "").strip().upper()
+        material_key = server_material_identity_key(source_path, product_code)
         allocation_rows = preview.connection.execute(
             """
-            select id, order_id, allocated_quantity, material_type, color,
-                   thickness, unit, edge
+            select id, order_id, allocated_quantity
             from server_material_allocations
-            where source_path = ?
+            where source_path = ? and source_material_key = ?
             """,
-            (source_path,),
+            (source_path, material_key),
         ).fetchall()
-        matching_allocations = [
-            item for item in allocation_rows
-            if _server_material_identity_key(
-                source_path, item[3], item[4], item[5], item[6], item[7]
-            ) == material_key
-        ]
-        allocated = sum(float(item[2] or 0) for item in matching_allocations)
+        allocated = sum(float(item[2] or 0) for item in allocation_rows)
         remaining = source_quantity - float(allocated or 0)
         if quantity - remaining > MATERIAL_ALLOCATION_EPSILON:
             raise ValueError(
-                f"分配数量超过剩余数量：剩余 {remaining:g} {row[6] or ''}，本次 {quantity:g}"
+                f"分配数量超过剩余数量：剩余 {remaining:g} {row['unit'] or ''}，本次 {quantity:g}"
             )
         now = _now()
         existing = next(
-            (item for item in matching_allocations if str(item[1]).upper() == order_id),
+            (item for item in allocation_rows if str(item[1]).upper() == order_id),
             None,
         )
-        source_key = material_key
         if existing is None:
             preview.connection.execute(
                 """
                 insert into server_material_allocations(
-                    source_material_id, source_path, source_material_key,
-                    material_type, color, thickness, unit, edge,
+                    source_path, source_material_key, product_code,
                     source_quantity, order_id, allocated_quantity,
                     source_fingerprint, created_at, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) values(?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    int(material_id), source_path, source_key,
-                    str(row[2] or ""), str(row[3] or ""), str(row[4] or ""),
-                    str(row[6] or ""), str(row[7] or ""), source_quantity,
-                    order_id, quantity, str(row[9] or ""), now, now,
+                    source_path, material_key, product_code, source_quantity,
+                    order_id, quantity, str(row["source_fingerprint"] or ""),
+                    now, now,
                 ),
             )
         else:
@@ -8822,7 +8896,7 @@ def allocate_server_material(
                 set allocated_quantity = ?, updated_at = ?
                 where id = ?
                 """,
-                (float(existing[1]) + quantity, now, int(existing[0])),
+                (float(existing[2]) + quantity, now, int(existing[0])),
             )
         preview.connection.commit()
         material = _server_material_preview_row(preview, row)
@@ -9173,13 +9247,16 @@ def _confirm_memory_preview(
             for folder in payload.get("source_folders", [])
             if str(folder).strip()
         ]
-        baseline_entries = _server_scan_xml_entries(baseline_folders)
+        baseline_entries = records.get("server_scan_xml_state", [])
         production = OrderIndexStore(config.workflow_database)
         try:
             production.connection.execute("begin")
+            confirmed_orders = {row[0] for row in production.connection.execute(
+                "select distinct order_id from material_items where quantity > 0")}
+            optimization_rows = [row for row in optimization_rows if row["order_id"] in confirmed_orders]
             _upsert_memory_optimization_artifacts(production.connection, optimization_rows)
             production.save_server_scan_xml_baseline(
-                baseline_folders,
+                _confirmed_material_folders(production, baseline_folders),
                 baseline_entries,
                 observed_at=_now(),
             )
@@ -9253,6 +9330,38 @@ def _confirm_memory_preview(
         commit_source_decisions(production.connection, payload, selected_factory_ids, skipped_orders)
         _insert_memory_records(production.connection, "orders", order_rows)
 
+        material_attributes = {
+            (
+                str(item.get("source_order_id", "")).strip().upper(),
+                str(item.get("source_path", "")),
+                str(item.get("product_code", "")).strip().upper(),
+            ): item
+            for item in payload.get("materials", [])
+            if isinstance(item, dict)
+        }
+        for row in material_rows:
+            identity = (
+                str(row.get("order_id", "")).strip().upper(),
+                str(row.get("source_path", "")),
+                str(row.get("product_code", "")).strip().upper(),
+            )
+            attributes = material_attributes.get(identity)
+            if attributes is None:
+                raise RuleError(
+                    "server_material_identity",
+                    f"材料 {identity[2] or '未知 SKU'} 的已验证商品属性缺失，请重新扫描",
+                )
+            # Validate against the still-present production facts before any
+            # source rows are deleted.  Historical consumption/allocation
+            # references also keep an SKU's workflow attributes immutable.
+            confirm_product_material_attributes(
+                production.connection,
+                identity[2],
+                str(attributes.get("material_type", "")),
+                str(attributes.get("color", "")),
+                str(attributes.get("thickness", "")),
+            )
+
         material_paths_by_order: dict[str, set[str]] = defaultdict(set)
         for row in material_rows:
             material_paths_by_order[str(row.get("order_id", "")).strip().upper()].add(
@@ -9269,6 +9378,12 @@ def _confirm_memory_preview(
         for row in factory_rows:
             current_factory = str(row.get("factory_order", "")).strip().upper()
             current_order = str(row.get("order_id", "")).strip().upper()
+            has_materials = production.connection.execute(
+                "select 1 from material_items where order_id=? and quantity > 0 limit 1",
+                (current_order,),
+            ).fetchone() is not None
+            if row.get("optimized") and not has_materials:
+                raise RuleError("missing_confirmed_material", "工厂单完成优化前必须先写入有效材料明细")
             _insert_memory_records(production.connection, "factory_orders", [row])
             preserve_confirmed_shipment(production.connection, current_factory)
             if current_order in skipped_orders or current_factory in payload.get('hardware_keep_factories', []):
@@ -9337,6 +9452,9 @@ def _confirm_memory_preview(
             "production_batches",
             [row for row in records.get("production_batches", []) if str(row.get("batch_number", "")) in batch_numbers],
         )
+        confirmed_orders = {row[0] for row in production.connection.execute(
+            "select distinct order_id from material_items where quantity > 0")}
+        optimization_rows = [row for row in optimization_rows if row["order_id"] in confirmed_orders]
         _upsert_memory_optimization_artifacts(production.connection, optimization_rows)
         baseline_folders = [
             Path(str(folder))
@@ -9344,10 +9462,16 @@ def _confirm_memory_preview(
             if str(folder).strip()
         ]
         production.save_server_scan_xml_baseline(
-            baseline_folders,
-            _server_scan_xml_entries(baseline_folders),
+            _confirmed_material_folders(production, baseline_folders),
+            records.get("server_scan_xml_state", []),
             observed_at=_now(),
         )
+        for summary in production.summaries(persist=False):
+            if summary["order_id"] in selected_order_ids:
+                production.connection.execute(
+                    "update orders set stage=? where order_id=? and validation_status <> '数据异常'",
+                    (summary["stage"], summary["order_id"]),
+                )
         production.connection.commit()
     except Exception:
         production.connection.rollback()
@@ -9507,49 +9631,51 @@ def confirm_server_material_allocations(
         material_rows = _server_material_source_rows(preview, scope_paths)
         if not material_rows and not actionable_factories:
             raise ValueError("本次预览没有可写入的板材、封边条或五金")
-        allocations_by_material: dict[str, list[tuple]] = defaultdict(list)
+        allocations_by_material: dict[str, list[dict]] = defaultdict(list)
         for row in preview.connection.execute(
             """
-            select id, source_path, order_id, allocated_quantity,
-                   material_type, color, thickness, unit, edge
+            select id, source_path, source_material_key, product_code,
+                   order_id, allocated_quantity
             from server_material_allocations
             order by source_path, order_id, id
             """
         ).fetchall():
-            allocation_key = _server_material_identity_key(
-                row[1], row[4], row[5], row[6], row[7], row[8]
-            )
-            allocations_by_material[allocation_key].append(
-                (int(row[0]), str(row[2]).upper(), float(row[3] or 0))
-            )
+            expected_key = server_material_identity_key(row[1], row[3])
+            if str(row[2] or "") != expected_key:
+                raise ValueError("Server 材料分配身份已过期，请重新扫描并分配")
+            allocations_by_material[expected_key].append({
+                "id": int(row[0]),
+                "order_id": str(row[4]).upper(),
+                "quantity": float(row[5] or 0),
+                "product_code": str(row[3] or "").strip().upper(),
+            })
         # Material room ownership is already explicit in the Server workbook
         # and is persisted as source_order_id during the read-only preview.
         # Default unallocated quantity to that source order so confirmation
         # never asks the user to select a factory order for order-level
         # material facts. Existing manual splits remain untouched.
         for row in material_rows:
-            source_order_id = str(row[1] or "").strip().upper()
-            source_quantity = float(row[5] or 0)
-            source_path = str(row[8] or "")
-            source_key = _server_material_identity_key(
-                source_path, row[2], row[3], row[4], row[6], row[7]
-            )
+            source_order_id = str(row["order_id"] or "").strip().upper()
+            source_quantity = float(row["quantity"] or 0)
+            source_path = str(row["source_path"] or "")
+            product_code = str(row["product_code"] or "").strip().upper()
+            source_key = server_material_identity_key(source_path, product_code)
             material_allocations = allocations_by_material[source_key]
             allocated_quantity = sum(
-                float(item[2] or 0) for item in material_allocations
+                float(item["quantity"] or 0) for item in material_allocations
             )
             remaining = source_quantity - allocated_quantity
             if remaining <= MATERIAL_ALLOCATION_EPSILON:
                 continue
             if not source_order_id:
                 raise ValueError(
-                    f"材料 {row[3] or row[2] or '未命名'} 没有明确订单归属，不能自动确认"
+                    f"材料 {row['color'] or row['material_type'] or product_code} 没有明确订单归属，不能自动确认"
                 )
             now = _now()
             existing_index = next(
                 (
                     index for index, item in enumerate(material_allocations)
-                    if item[1] == source_order_id
+                    if item["order_id"] == source_order_id
                 ),
                 None,
             )
@@ -9561,22 +9687,23 @@ def confirm_server_material_allocations(
                 cursor = preview.connection.execute(
                     """
                     insert into server_material_allocations(
-                        source_material_id, source_path, source_material_key,
-                        material_type, color, thickness, unit, edge,
+                        source_path, source_material_key, product_code,
                         source_quantity, order_id, allocated_quantity,
                         source_fingerprint, created_at, updated_at
-                    ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ) values(?,?,?,?,?,?,?,?,?)
                     """,
                     (
-                        int(row[0]), source_path, source_key,
-                        str(row[2] or ""), str(row[3] or ""), str(row[4] or ""),
-                        str(row[6] or ""), str(row[7] or ""), source_quantity,
-                        source_order_id, remaining, str(row[9] or ""), now, now,
+                        source_path, source_key, product_code, source_quantity,
+                        source_order_id, remaining,
+                        str(row["source_fingerprint"] or ""), now, now,
                     ),
                 )
-                material_allocations.append(
-                    (int(cursor.lastrowid), source_order_id, remaining)
-                )
+                material_allocations.append({
+                    "id": int(cursor.lastrowid),
+                    "order_id": source_order_id,
+                    "quantity": remaining,
+                    "product_code": product_code,
+                })
             else:
                 preview.connection.execute(
                     """
@@ -9584,27 +9711,25 @@ def confirm_server_material_allocations(
                     set allocated_quantity = allocated_quantity + ?, updated_at = ?
                     where id = ?
                     """,
-                    (remaining, now, int(existing[0])),
+                    (remaining, now, int(existing["id"])),
                 )
-                material_allocations[existing_index] = (
-                    existing[0], existing[1], existing[2] + remaining
-                )
+                existing["quantity"] += remaining
         for row in material_rows:
-            source_quantity = float(row[5] or 0)
-            source_key = _server_material_identity_key(
-                str(row[8] or ""), row[2], row[3], row[4], row[6], row[7]
+            source_quantity = float(row["quantity"] or 0)
+            source_key = server_material_identity_key(
+                row["source_path"], row["product_code"]
             )
             allocated_quantity = sum(
-                float(item[2] or 0) for item in allocations_by_material[source_key]
+                float(item["quantity"] or 0) for item in allocations_by_material[source_key]
             )
             if abs(source_quantity - allocated_quantity) > MATERIAL_ALLOCATION_EPSILON:
                 remaining = source_quantity - allocated_quantity
                 raise ValueError(
-                    f"材料尚未分配完成：{row[3] or row[2] or '未命名'}，"
-                    f"还差 {remaining:g} {row[6] or ''}"
+                    f"材料尚未分配完成：{row['color'] or row['material_type'] or row['product_code']}，"
+                    f"还差 {remaining:g} {row['unit'] or ''}"
                 )
         material_orders = {
-            str(item[1]).upper()
+            str(item["order_id"]).upper()
             for values in allocations_by_material.values()
             for item in values
         }
@@ -9612,14 +9737,16 @@ def confirm_server_material_allocations(
         affected_orders = sorted(material_orders | factory_orders)
         if material_rows and not material_orders:
             raise ValueError("请先将板材和封边条分配到订单")
-        source_paths = sorted({str(row[8] or "") for row in material_rows if row[8]})
+        source_paths = sorted({str(row["source_path"] or "") for row in material_rows if row["source_path"]})
         orders_by_source_path: dict[str, set[str]] = defaultdict(set)
         for row in material_rows:
-            source_key = _server_material_identity_key(
-                str(row[8] or ""), row[2], row[3], row[4], row[6], row[7]
+            source_key = server_material_identity_key(
+                row["source_path"], row["product_code"]
             )
             for allocation in allocations_by_material[source_key]:
-                orders_by_source_path[str(row[8] or "")].add(str(allocation[1]).upper())
+                orders_by_source_path[str(row["source_path"] or "")].add(
+                    str(allocation["order_id"]).upper()
+                )
 
         factory_source_paths: set[str] = set()
         if actionable_factories:
@@ -9640,6 +9767,14 @@ def confirm_server_material_allocations(
         production = OrderIndexStore(config.workflow_database)
         try:
             production.connection.execute("begin")
+            for row in material_rows:
+                confirm_product_material_attributes(
+                    production.connection,
+                    str(row["product_code"] or "").strip().upper(),
+                    str(row["material_type"] or ""),
+                    str(row["color"] or ""),
+                    str(row["thickness"] or ""),
+                )
             order_columns = [
                 item[1]
                 for item in preview.connection.execute("pragma table_info(orders)").fetchall()
@@ -9665,13 +9800,13 @@ def confirm_server_material_allocations(
                     )
 
             material_columns = (
-                "order_id", "material_type", "color", "thickness", "quantity",
-                "unit", "edge", "source_type", "source_path", "source_fingerprint", "updated_at",
+                "order_id", "product_code", "quantity", "source_type",
+                "source_path", "source_fingerprint", "updated_at",
             )
             material_sql = f"""
                 insert into material_items({','.join(material_columns)})
                 values({','.join('?' for _ in material_columns)})
-                on conflict(order_id, material_type, color, thickness, unit, edge, source_type, source_path)
+                on conflict(order_id, product_code, source_type, source_path)
                 do update set
                     quantity = material_items.quantity + excluded.quantity,
                     source_fingerprint = excluded.source_fingerprint,
@@ -9679,17 +9814,18 @@ def confirm_server_material_allocations(
             """
             now = _now()
             for row in material_rows:
-                source_key = _server_material_identity_key(
-                    str(row[8] or ""), row[2], row[3], row[4], row[6], row[7]
+                source_key = server_material_identity_key(
+                    row["source_path"], row["product_code"]
                 )
                 for allocation in allocations_by_material[source_key]:
                     production.connection.execute(
                         material_sql,
                         (
-                            str(allocation[1]).upper(), str(row[2] or ""), str(row[3] or ""),
-                            str(row[4] or ""), float(allocation[2] or 0), str(row[6] or ""),
-                            str(row[7] or ""), "aihouse", str(row[8] or ""),
-                            str(row[9] or ""), now,
+                            str(allocation["order_id"]).upper(),
+                            str(row["product_code"] or "").strip().upper(),
+                            float(allocation["quantity"] or 0), "aihouse",
+                            str(row["source_path"] or ""),
+                            str(row["source_fingerprint"] or ""), now,
                         ),
                     )
 
@@ -9828,31 +9964,24 @@ def confirm_server_material_allocations(
             for order_id in affected_orders:
                 expected = defaultdict(float)
                 for row in material_rows:
-                    source_key = _server_material_identity_key(
-                        str(row[8] or ""), row[2], row[3], row[4], row[6], row[7]
+                    source_key = server_material_identity_key(
+                        row["source_path"], row["product_code"]
                     )
                     for allocation in allocations_by_material[source_key]:
-                        if str(allocation[1]).upper() != order_id:
+                        if str(allocation["order_id"]).upper() != order_id:
                             continue
-                        expected[
-                            (
-                                str(row[2] or ""), str(row[3] or ""),
-                                str(row[4] or ""), str(row[6] or ""), str(row[7] or ""),
-                            )
-                        ] += float(allocation[2] or 0)
+                        expected[str(row["product_code"] or "").strip().upper()] += float(
+                            allocation["quantity"] or 0
+                        )
                 actual = {
-                    (
-                        str(row[0] or ""), str(row[1] or ""),
-                        str(row[2] or ""), str(row[3] or ""), str(row[4] or ""),
-                    ): float(row[5] or 0)
+                    str(row[0] or "").strip().upper(): float(row[1] or 0)
                     for row in production.connection.execute(
                         """
-                        select material_type, color, thickness, unit, edge,
-                               sum(quantity)
+                        select product_code, sum(quantity)
                         from material_items
                         where order_id = ? and source_type = 'aihouse'
                           and source_path in ({})
-                        group by material_type, color, thickness, unit, edge
+                        group by product_code
                         """.format(",".join("?" for _ in source_paths)),
                         (order_id, *source_paths),
                     ).fetchall()

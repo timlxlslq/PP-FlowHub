@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from traveler_assistant.core import Config, RuleError
 from traveler_assistant.hardware_facts import assert_source_isolation, replace_factory_hardware, hardware_integrity_findings, preserve_confirmed_shipment
+from traveler_assistant.inventory import Product, _replace_product_database
 from traveler_assistant.order_index import OrderIndexStore, reconcile_outbound_statuses
 from traveler_assistant.order_workflow import persist_preview
 
@@ -19,6 +20,10 @@ class HardwareFactsTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.config = Config(state_dir=Path(self.temp.name), operation_log_enabled=False)
         self.config.prepare_storage()
+        _replace_product_database(self.config.workflow_database, [
+            Product("Hardware", "M1001", "Hinge", "", "启用", unit="pcs"),
+            Product("Hardware", "M1093", "Manual Hardware", "", "启用", unit="pcs"),
+        ])
         self.store = OrderIndexStore(self.config.workflow_database)
         self.addCleanup(self.store.close)
         self.c = self.store.connection

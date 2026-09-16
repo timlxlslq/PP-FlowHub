@@ -33,7 +33,9 @@ Python 业务引擎 → Excel / SMB / Playwright / SQLite
 - 只保留一份现行数据契约；商品库首次运行可从既有 XLSX 一次性导入，之后不以 XLSX 作为查询源。具体来源和字段以 [数据模型](pp-flowhub-data-model.md) 为准。
 - 常用命令零 Token；当前 Agent 只接收用户语句和一份精简动作契约，不接收订单文件或业务数据。模型和推理参数属于当前实现配置，不是长期架构契约。
 - Agent 成功识别的表达按完全相同的规范化文本写入 SQLite；下次直接本地路由，不扩展成模糊通用规则。
-- 商品主资料单独保存在 `data/workflow.sqlite3 的 products 表`；每次从库存系统导出 XLSX 后先校验，再事务替换商品表。`data/inventory/current-products.xlsx` 只保留最新一份原始导出备份，运行时查询不依赖 XLSX。
+- 商品主资料单独保存在 `data/workflow.sqlite3` 的 `products` 表；每次从库存系统导出 XLSX 后先校验，再按 SKU 事务 upsert。新目录缺少但已被历史事实引用的 SKU 保留并标记不在当前目录，避免破坏外键和历史读取；新写入会阻断这些 SKU。`data/inventory/current-products.xlsx` 只保留最新一份原始导出备份，运行时查询不依赖 XLSX。
+- `products` 是材料类型、规范颜色、名义厚度、单位和原始商品资料的商品层；订单材料、生产消耗和 Server 分配表只保存 SKU、数量及来源身份，读层通过 JOIN 形成现有界面/Traveler 字段。五金另保留来源名称、编码、规格和单位作为审计证据，但规范库存身份仍是 SKU。
+- 参与五张 SKU 引用表写入/事务的应用连接通过 `connect_database`，或对借用连接显式调用 `enable_foreign_keys`，并在事务开始前启用 SQLite 外键。DDL 中写有 `REFERENCES` 只是结构声明；如果该写连接没有启用 `PRAGMA foreign_keys=ON`，SQLite 不会自动执行约束。只读 `mode=ro`、SQLite backup 和内存克隆等非业务写连接不属于这条写入契约。
 - App 使用单一串行任务队列并显示排队、执行、等待确认、写入和完成状态。排队、读取和等待确认阶段可以取消；文件或库存真实写入开始后不可取消。
 - API Key 当前保存在 Git 忽略的 `.env.local`，不进入源码、SQLite 或日志；正式分发前再迁入 Keychain。
 - 库存系统密码由 SwiftUI 通过 Security Framework 写入 macOS 登录钥匙串，CLI/Python 通过同项目编译的 `keychain-read` 辅助程序读取；不调用 `/usr/bin/security`，不保存明文或兼容回退。
@@ -46,4 +48,4 @@ Python 业务引擎 → Excel / SMB / Playwright / SQLite
 - `traveler_assistant/wecom_service.py` 当前是隔离的 SmartSheet 读取实验，尚未接入 App、Agent 或自动同步；规划中的 SmartSheet 写入不属于当前能力。
 - 外部 CLI 适配必须把非零退出、空输出、无效 JSON 和业务错误码转换成可诊断结果，校验输入并返回干净数据；这是开发要求，不代表所有适配器当前都已完成统一实现。
 - 配置集中管理地址、表格标识和非敏感规则；不把凭据写入源码、SQLite 或日志。Node、Playwright 等版本按当前环境发现和构建验证，不在本架构文档中硬编码版本号。
-- 扫描、预览、确认、刷新和真实写入是不同阶段。Server 扫描可以保存元数据或精确优化证据，不能直接替代材料/五金确认；详细边界见 [业务规则](../business-rules.md) 和 [发布验收](../release-testing.md)。
+- 扫描、预览、确认、刷新和真实写入是不同阶段。Server 扫描只在本次内存结果中展示未确认优化文件，不保存其证据或 XML 基线、不推进优化状态；材料确认事务才保存材料、对应工厂单优化状态和预览版本的 XML 基线；详细边界见 [业务规则](../business-rules.md) 和 [发布验收](../release-testing.md)。

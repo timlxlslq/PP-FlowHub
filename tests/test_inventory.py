@@ -12,6 +12,7 @@ from unittest.mock import patch
 from openpyxl import Workbook, load_workbook
 
 from traveler_assistant.core import Config, RuleError
+from traveler_assistant.database import connect_database
 from traveler_assistant.inventory import (
     InventoryMappings,
     InventoryOperationJournal,
@@ -196,23 +197,54 @@ def make_priced_catalog(path: Path):
     workbook.save(path)
 
 
+def seed_sku_products(connection) -> None:
+    """Install the finite catalog facts used by database-backed fixtures."""
+    rows = [
+        ("Plywood", "M0004", "3/4 Finished UV2S", "18mm", "启用", "张", "plywood", "", "18"),
+        ("Edge band", "M0020", "Woodline 4 Edge Banding", "22mm", "启用", "m", "edge", "Woodline 4", ""),
+        ("Panel", "M-CUSTOM", "Customer Panel", "19.1mm", "启用", "张", "panel", "Customer Panel", "19.1"),
+        ("Panel", "M-BLANCO", "Blanco HG", "19.1mm", "启用", "张", "panel", "Blanco HG", "19.1"),
+        ("Hardware", "M1001", "Unihopper Hinge", "", "启用", "件", "", "", ""),
+        ("Hardware", "M1003", "L-Rail", "", "启用", "件", "", "", ""),
+        ("Hardware", "M1013", "Adjustable shelf holder", "", "启用", "件", "", "", ""),
+        ("Hardware", "M-LED", "LED", "", "启用", "件", "", "", ""),
+    ]
+    connection.executemany(
+        """insert or ignore into products(
+               category, code, name, spec, status, unit,
+               normalized_code, normalized_name, normalized_spec,
+               normalized_category, normalized_remark,
+               material_kind, material_color, material_thickness, catalog_present
+           ) values(?,?,?,?,?,?,replace(lower(?),'-',''),replace(lower(?),' ',''),
+                    replace(lower(?),'.',''),lower(?),'',?,?,?,1)""",
+        [
+            (
+                category, code, name, spec, status, unit,
+                code, name, spec, category, kind, color, thickness,
+            )
+            for category, code, name, spec, status, unit, kind, color, thickness in rows
+        ],
+    )
+
+
 class InventoryTests(unittest.TestCase):
     def test_database_outbound_blocks_multiple_base_server_material_sources(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = Config(state_dir=root / "state")
             config.prepare_storage()
-            connection = sqlite3.connect(config.workflow_database)
+            connection = connect_database(config.workflow_database)
+            seed_sku_products(connection)
             for path in (
                 root / "server" / "Optimized Orders" / "PP0072" / "pp0072 materials.xlsx",
                 root / "fixtures" / "Optimized Orders" / "PP0072" / "pp0072 materials.xlsx",
             ):
                 connection.execute(
                     """insert into material_items(
-                        order_id, material_type, color, thickness, quantity, unit,
-                        source_type, source_path, updated_at
-                    ) values(?,?,?,?,?,?,?,?,?)""",
-                    ("PP0072", "plywood", "", "18.0", 22, "pcs", "aihouse", str(path), "now"),
+                        order_id, product_code, quantity, source_type, source_path,
+                        source_fingerprint, updated_at
+                    ) values(?,?,?,?,?,?,?)""",
+                    ("PP0072", "M0004", 22, "aihouse", str(path), "fixture-fingerprint", "now"),
                 )
             connection.commit()
             connection.close()
@@ -257,6 +289,7 @@ class InventoryTests(unittest.TestCase):
             config = Config(state_dir=root / "state")
             config.prepare_storage()
             store = OrderIndexStore(config.workflow_database)
+            seed_sku_products(store.connection)
             store.connection.execute(
                 "insert into orders(order_id, order_type, updated_at) values(?,?,?)",
                 ("CS001", "cutToSize", "now"),
@@ -266,8 +299,8 @@ class InventoryTests(unittest.TestCase):
                 ("F1001", "CS001", "CS001-KITCHEN", 1, "未出库", "now"),
             )
             store.connection.execute(
-                "insert into material_items(order_id, material_type, color, thickness, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?)",
-                ("CS001", "panel", "Customer Panel", "19.1", 4, "张", "aihouse", "now"),
+                "insert into material_items(order_id, product_code, quantity, source_type, updated_at) values(?,?,?,?,?)",
+                ("CS001", "M-CUSTOM", 4, "aihouse", "now"),
             )
             store.commit()
             store.close()
@@ -341,6 +374,7 @@ class InventoryTests(unittest.TestCase):
             config = Config(state_dir=Path(directory) / "state")
             config.prepare_storage()
             store = OrderIndexStore(config.workflow_database)
+            seed_sku_products(store.connection)
             store.connection.execute(
                 "insert into orders(order_id, order_type, updated_at) values(?,?,?)",
                 ("CS005", "cutToSize", "now"),
@@ -350,8 +384,8 @@ class InventoryTests(unittest.TestCase):
                 ("F5005", "CS005", "CS005-KITCHEN", 1, "未出库", "now"),
             )
             store.connection.execute(
-                "insert into material_items(order_id, material_type, color, thickness, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?)",
-                ("CS005", "panel", "Blanco HG", "19.1", 1, "张", "manual", "now"),
+                "insert into material_items(order_id, product_code, quantity, source_type, updated_at) values(?,?,?,?,?)",
+                ("CS005", "M-BLANCO", 1, "manual", "now"),
             )
             store.connection.execute(
                 "insert into hardware_items(order_id, factory_order, scope, product_code, name, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?,?)",
@@ -379,6 +413,7 @@ class InventoryTests(unittest.TestCase):
             (config.state_dir / "inventory").mkdir(parents=True, exist_ok=True)
             make_catalog(config.state_dir / "inventory" / "current-products.xlsx")
             store = OrderIndexStore(config.workflow_database)
+            seed_sku_products(store.connection)
             store.connection.execute(
                 "insert into orders(order_id, order_type, source_folder, updated_at) values(?,?,?,?)",
                 ("CS002", "cutToSize", str(root / "source" / "CS002"), "now"),
@@ -388,12 +423,12 @@ class InventoryTests(unittest.TestCase):
                 ("F2002", "CS002", "CS002-Hardware", 1, "未出库", "now"),
             )
             store.connection.execute(
-                "insert into material_items(order_id, material_type, color, thickness, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?)",
-                ("CS002", "plywood", "", "18", 5, "pcs", "aihouse", "now"),
+                "insert into material_items(order_id, product_code, quantity, source_type, updated_at) values(?,?,?,?,?)",
+                ("CS002", "M0004", 5, "aihouse", "now"),
             )
             store.connection.execute(
-                "insert into material_items(order_id, material_type, color, thickness, quantity, unit, edge, source_type, updated_at) values(?,?,?,?,?,?,?,?,?)",
-                ("CS002", "edge", "Woodline 4", "", 100, "m", "Woodline 4", "aihouse", "now"),
+                "insert into material_items(order_id, product_code, quantity, source_type, updated_at) values(?,?,?,?,?)",
+                ("CS002", "M0020", 100, "aihouse", "now"),
             )
             store.connection.execute(
                 "insert into hardware_items(order_id, factory_order, scope, product_code, name, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?,?)",
@@ -409,15 +444,16 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(preview.outbound_items[0].document_remark, "CS002-Hardware")
             self.assertEqual(preview.scope_decisions[0]["requirement"], "customer_supplied")
             facts = sqlite3.connect(config.workflow_database).execute(
-                "select quantity from material_items where order_id='CS002' order by material_type"
+                "select quantity from material_items where order_id='CS002' order by product_code"
             ).fetchall()
-            self.assertEqual([row[0] for row in facts], [100.0, 5.0])
+            self.assertEqual([row[0] for row in facts], [5.0, 100.0])
 
     def test_database_outbound_blocks_mismatched_factory_name_order_prefix(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Config(state_dir=Path(directory) / "state")
             config.prepare_storage()
             store = OrderIndexStore(config.workflow_database)
+            seed_sku_products(store.connection)
             store.connection.execute(
                 "insert into orders(order_id, order_type, updated_at) values(?,?,?)",
                 ("PP0072", "owned", "now"),
@@ -493,6 +529,7 @@ class InventoryTests(unittest.TestCase):
                 '{"manual": {}, "ignored": {}}', encoding="utf-8"
             )
             store = OrderIndexStore(config.workflow_database)
+            seed_sku_products(store.connection)
             store.connection.execute(
                 "insert into orders(order_id, order_type, source_folder, updated_at) values(?,?,?,?)",
                 ("PP9999", "owned", str(root / "source" / "PP9999"), "2026-08-15T10:00:00"),
@@ -502,12 +539,12 @@ class InventoryTests(unittest.TestCase):
                 ("F9999", "PP9999", "PP9999-KITCHEN", 1, "未出库", "2026-08-15T10:00:00"),
             )
             store.connection.execute(
-                "insert into material_items(order_id, material_type, color, thickness, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?)",
-                ("PP9999", "plywood", "", "18", 2, "pcs", "database", "2026-08-15T10:00:00"),
+                "insert into material_items(order_id, product_code, quantity, source_type, updated_at) values(?,?,?,?,?)",
+                ("PP9999", "M0004", 2, "database", "2026-08-15T10:00:00"),
             )
             store.connection.execute(
-                "insert into material_items(order_id, material_type, color, thickness, quantity, unit, edge, source_type, updated_at) values(?,?,?,?,?,?,?,?,?)",
-                ("PP9999", "edge", "Woodline 4", "", 12.5, "m", "Woodline 4", "database", "2026-08-15T10:00:00"),
+                "insert into material_items(order_id, product_code, quantity, source_type, updated_at) values(?,?,?,?,?)",
+                ("PP9999", "M0020", 12.5, "database", "2026-08-15T10:00:00"),
             )
             store.connection.execute(
                 "insert into hardware_items(order_id, factory_order, scope, product_code, name, spec, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?,?,?)",
@@ -629,6 +666,7 @@ class InventoryTests(unittest.TestCase):
                 '{"manual": {}, "ignored": {}}', encoding="utf-8"
             )
             store = OrderIndexStore(config.workflow_database)
+            seed_sku_products(store.connection)
             store.connection.execute(
                 "insert into orders(order_id, order_type, source_folder, updated_at) values(?,?,?,?)",
                 ("PP9999", "owned", str(root / "source" / "PP9999"), "2026-08-15T10:00:00"),
@@ -638,8 +676,8 @@ class InventoryTests(unittest.TestCase):
                 ("F9999", "PP9999", "PP9999-KITCHEN", 1, "已出库", "2026-08-15T10:00:00"),
             )
             store.connection.execute(
-                "insert into material_items(order_id, material_type, color, thickness, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?)",
-                ("PP9999", "plywood", "", "18", 2, "pcs", "database", "2026-08-15T10:00:00"),
+                "insert into material_items(order_id, product_code, quantity, source_type, updated_at) values(?,?,?,?,?)",
+                ("PP9999", "M0004", 2, "database", "2026-08-15T10:00:00"),
             )
             store.connection.execute(
                 "insert into hardware_items(order_id, factory_order, scope, product_code, name, spec, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?,?,?)",
@@ -1637,7 +1675,8 @@ class InventoryTests(unittest.TestCase):
             workbook.active.append(["Hardware", "M1003", "L-Rail", "", "启用", "件"])
             workbook.save(catalog_path)
 
-            connection = sqlite3.connect(config.workflow_database)
+            connection = connect_database(config.workflow_database)
+            seed_sku_products(connection)
             connection.executemany(
                 """insert into hardware_items(
                     order_id, factory_order, product_code, source_code, name,
@@ -1655,9 +1694,11 @@ class InventoryTests(unittest.TestCase):
 
             self.assertEqual(result["rails_collapsed"], 1)
             self.assertEqual(result["rail_rows_removed"], 1)
-            rows = sqlite3.connect(config.workflow_database).execute(
+            connection = sqlite3.connect(config.workflow_database)
+            rows = connection.execute(
                 "select name, product_code, quantity from hardware_items"
             ).fetchall()
+            connection.close()
             self.assertEqual(rows, [("Lower Left Rail", "M1003", 1.0)])
 
     def test_ignoring_hardware_removes_existing_database_facts(self):
@@ -1665,15 +1706,17 @@ class InventoryTests(unittest.TestCase):
             root = Path(directory)
             config = Config(state_dir=root / "state")
             config.prepare_storage()
-            connection = sqlite3.connect(config.workflow_database)
+            connection = connect_database(config.workflow_database)
+            seed_sku_products(connection)
             connection.executemany(
                 """insert into hardware_items(
-                    order_id, factory_order, product_code, name, quantity, source_type, updated_at
-                ) values(?,?,?,?,?,?,?)""",
+                    order_id, factory_order, product_code, source_code, name,
+                    quantity, source_type, updated_at
+                ) values(?,?,?,?,?,?,?,?)""",
                 [
-                    ("PP0099", "F0099", "WJ-CBT", "Adjustable shelf holder", 2, "aicnc", "now"),
-                    ("PP0099", "F0099", "71T950A", "TestFullHinge", 4, "aicnc", "now"),
-                    ("PP0099", "F0099", "WJ-CBD", "LED", 5, "aicnc", "now"),
+                    ("PP0099", "F0099", "M1013", "WJ-CBT", "Adjustable shelf holder", 2, "aicnc", "now"),
+                    ("PP0099", "F0099", "M1001", "71T950A", "TestFullHinge", 4, "aicnc", "now"),
+                    ("PP0099", "F0099", "M-LED", "WJ-CBD", "LED", 5, "aicnc", "now"),
                 ],
             )
             connection.commit()
@@ -1775,6 +1818,7 @@ class InventoryTests(unittest.TestCase):
             config = Config(state_dir=root / "state")
             config.prepare_storage()
             store = OrderIndexStore(config.workflow_database)
+            seed_sku_products(store.connection)
             store.upsert_order("CS004", validation_status="正常")
             for factory_order, factory_name in (
                 ("F-KITCHEN", "CS004-KITCHEN"),
@@ -1791,8 +1835,8 @@ class InventoryTests(unittest.TestCase):
                     outbound_status="未出库",
                 )
             store.connection.execute(
-                "insert into material_items(order_id, material_type, color, thickness, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?)",
-                ("CS004", "plywood", "", "18", 2, "张", "database", "now"),
+                "insert into material_items(order_id, product_code, quantity, source_type, updated_at) values(?,?,?,?,?)",
+                ("CS004", "M0004", 2, "database", "now"),
             )
             store.commit()
             store.close()
@@ -1800,7 +1844,7 @@ class InventoryTests(unittest.TestCase):
             source_item = TravelerItem(1, "板材与封边", "18mm--Plywood", 2, "CS004")
             outbound_item = OutboundItem(
                 traveler_name="18mm--Plywood",
-                product_code="M0001",
+                product_code="M0004",
                 product_name="18mm Plywood",
                 quantity=2,
                 section="板材与封边",
@@ -1838,10 +1882,12 @@ class InventoryTests(unittest.TestCase):
                 "saved": True,
                 "documentNumber": "QTCK-001",
             }])
-            links = sqlite3.connect(config.workflow_database).execute(
+            connection = sqlite3.connect(config.workflow_database)
+            links = connection.execute(
                 "select factory_order from outbound_document_factories "
                 "where document_number='QTCK-001' order by factory_order"
             ).fetchall()
+            connection.close()
             self.assertEqual(links, [("F-KITCHEN",)])
 
             # The second factory reuses the unchanged order-level material
@@ -1863,7 +1909,9 @@ class InventoryTests(unittest.TestCase):
                 "where document_number='QTCK-001' order by factory_order"
             ).fetchall()
             self.assertEqual(links, [("F-KITCHEN",), ("F-VANITY",)])
+            connection.close()
             self.assertEqual(reconcile_outbound_statuses(config), 2)
+            connection = sqlite3.connect(config.workflow_database)
             statuses = connection.execute(
                 "select factory_order, outbound_status, outbound_document "
                 "from factory_orders where order_id='CS004' order by factory_order"
@@ -1902,6 +1950,7 @@ class InventoryTests(unittest.TestCase):
             config = Config(state_dir=root / "state", backup_root=root / "backups")
             config.prepare_storage()
             store = OrderIndexStore(config.workflow_database)
+            seed_sku_products(store.connection)
             store.upsert_order("PP0063-2", validation_status="正常")
             store.upsert_factory(
                 "F-PRODUCTION",
@@ -1919,7 +1968,7 @@ class InventoryTests(unittest.TestCase):
             source_item = TravelerItem(1, "板材与封边", "18mm--Plywood", 2, "PP0063-2")
             outbound_item = OutboundItem(
                 traveler_name="18mm--Plywood",
-                product_code="M0001",
+                product_code="M0004",
                 product_name="18mm Plywood",
                 quantity=2,
                 section="板材与封边",
@@ -1947,7 +1996,7 @@ class InventoryTests(unittest.TestCase):
                 "batch_number": "MP-PRODUCTION-001",
                 "order_id": "PP0063-2",
                 "selected_factory_orders": ["F-PRODUCTION"],
-                "materials": [{"material_type": "plywood", "color": "", "thickness": "18", "edge": "", "unit": "张", "quantity": 2}],
+                "materials": [{"product_code": "M0004", "material_type": "plywood", "color": "", "thickness": "18", "edge": "", "unit": "张", "quantity": 2}],
             }
             sync = InventorySyncStore(
                 config.workflow_database,
@@ -1990,6 +2039,7 @@ class InventoryTests(unittest.TestCase):
             config = Config(state_dir=root / "state", backup_root=root / "backups")
             config.prepare_storage()
             store = OrderIndexStore(config.workflow_database)
+            seed_sku_products(store.connection)
             store.upsert_order("PP0063-2", validation_status="正常")
             store.upsert_factory(
                 "F-PRODUCTION",
@@ -2007,7 +2057,7 @@ class InventoryTests(unittest.TestCase):
             source_item = TravelerItem(1, "板材与封边", "18mm--Plywood", 2, "PP0063-2")
             outbound_item = OutboundItem(
                 traveler_name="18mm--Plywood",
-                product_code="M0001",
+                product_code="M0004",
                 product_name="18mm Plywood",
                 quantity=2,
                 section="板材与封边",
@@ -2035,7 +2085,7 @@ class InventoryTests(unittest.TestCase):
                 "batch_number": "MP-PRODUCTION-001",
                 "order_id": "PP0063-2",
                 "selected_factory_orders": ["F-PRODUCTION"],
-                "materials": [{"material_type": "plywood", "color": "", "thickness": "18", "edge": "", "unit": "张", "quantity": 2}],
+                "materials": [{"product_code": "M0004", "material_type": "plywood", "color": "", "thickness": "18", "edge": "", "unit": "张", "quantity": 2}],
             }
             browser_result = SimpleNamespace(returncode=0, stdout=json.dumps({
                 "remark": "PP0063-2", "saved": True, "documentNumber": "QTCK-PRODUCTION"
@@ -2077,6 +2127,7 @@ class InventoryTests(unittest.TestCase):
             config = Config(state_dir=root / "state")
             config.prepare_storage()
             store = OrderIndexStore(config.workflow_database)
+            seed_sku_products(store.connection)
             store.upsert_order("PP0057", validation_status="正常")
             for factory_order, factory_name in (
                 ("F-PRODUCTION-KITCHEN", "PP0057-KITCHEN"),
@@ -2098,7 +2149,7 @@ class InventoryTests(unittest.TestCase):
             source_item = TravelerItem(1, "板材与封边", "18mm--Plywood", 2, "PP0057")
             outbound_item = OutboundItem(
                 traveler_name="18mm--Plywood",
-                product_code="M0001",
+                product_code="M0004",
                 product_name="18mm Plywood",
                 quantity=2,
                 section="板材与封边",
@@ -2126,7 +2177,7 @@ class InventoryTests(unittest.TestCase):
                 "batch_number": "MP-PRODUCTION-SPLIT-001",
                 "order_id": "PP0057",
                 "selected_factory_orders": ["F-PRODUCTION-KITCHEN", "F-PRODUCTION-LAUNDRY"],
-                "materials": [{"material_type": "plywood", "color": "", "thickness": "18", "edge": "", "unit": "张", "quantity": 2}],
+                "materials": [{"product_code": "M0004", "material_type": "plywood", "color": "", "thickness": "18", "edge": "", "unit": "张", "quantity": 2}],
             }
             sync = InventorySyncStore(
                 config.workflow_database,

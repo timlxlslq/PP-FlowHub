@@ -14,6 +14,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 
 from traveler_assistant.core import Config, RuleError, parse_fittings_groups
+from traveler_assistant.database import connect_database
 from traveler_assistant.inventory import InventoryMappings, parse_traveler, set_ignored_mapping
 from traveler_assistant.order_workflow import (
     _choose_fittings,
@@ -40,6 +41,40 @@ from traveler_assistant.order_workflow import (
 )
 from unittest.mock import patch
 from traveler_assistant.test_data import create_local_test_source
+
+
+def seed_products(connection, rows):
+    """Insert real catalog parents for SKU-backed test facts."""
+    connection.executemany(
+        """insert into products(
+               category,code,name,spec,status,unit,normalized_code,
+               normalized_name,normalized_spec,normalized_category,
+               normalized_remark,material_kind,material_color,
+               material_thickness,catalog_present
+           ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+           on conflict(code) do update set
+               category=excluded.category,name=excluded.name,spec=excluded.spec,
+               status=excluded.status,unit=excluded.unit,
+               normalized_code=excluded.normalized_code,
+               normalized_name=excluded.normalized_name,
+               normalized_spec=excluded.normalized_spec,
+               normalized_category=excluded.normalized_category,
+               material_kind=excluded.material_kind,
+               material_color=excluded.material_color,
+               material_thickness=excluded.material_thickness,
+               catalog_present=1""",
+        [
+            (
+                category, code, name, spec, "启用", unit,
+                code.replace("-", "").upper(),
+                "".join(name.split()).upper(),
+                "".join(spec.split()).upper(),
+                "".join(category.split()).upper(),
+                "", kind, color, thickness,
+            )
+            for code, category, name, spec, unit, kind, color, thickness in rows
+        ],
+    )
 
 
 def make_materials(path: Path, order_id: str = "PP9999", fractional: bool = False, edge: float = 12.5):
@@ -236,6 +271,12 @@ class OrderWorkflowTests(unittest.TestCase):
             from traveler_assistant.order_index import OrderIndexStore
 
             store = OrderIndexStore(config.workflow_database)
+            seed_products(store.connection, [
+                ("M0004", "Plywood", "Plywood", "18mm", "pcs", "plywood", "", "18"),
+                ("M-PANEL", "Panel", "Test Oak", "19.1mm", "pcs", "panel", "Test Oak", "19.1"),
+                ("M-EDGE", "Edge band", "Test Oak Edge Banding", "", "m", "edge", "Test Oak", ""),
+                ("71T950A", "Hardware", "Hinge", "Full", "pcs/个", "", "", ""),
+            ])
             store.connection.execute(
                 "insert into orders(order_id, order_type, source_folder, updated_at) values(?,?,?,?)",
                 ("PP9999", "owned", "/server/PP9999", "2026-08-15T10:00:00"),
@@ -245,16 +286,16 @@ class OrderWorkflowTests(unittest.TestCase):
                 ("F9999", "PP9999", "PP9999-KITCHEN", "已确认", 1, "2026-08-15T10:00:00"),
             )
             store.connection.execute(
-                "insert into material_items(order_id, material_type, color, thickness, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?)",
-                ("PP9999", "plywood", "", "18", 4, "pcs", "aihouse", "2026-08-15T10:00:00"),
+                "insert into material_items(order_id, product_code, quantity, source_type, updated_at) values(?,?,?,?,?)",
+                ("PP9999", "M0004", 4, "aihouse", "2026-08-15T10:00:00"),
             )
             store.connection.execute(
-                "insert into material_items(order_id, material_type, color, thickness, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?)",
-                ("PP9999", "panel", "Test Oak", "19.1", 3, "pcs", "aihouse", "2026-08-15T10:00:00"),
+                "insert into material_items(order_id, product_code, quantity, source_type, updated_at) values(?,?,?,?,?)",
+                ("PP9999", "M-PANEL", 3, "aihouse", "2026-08-15T10:00:00"),
             )
             store.connection.execute(
-                "insert into material_items(order_id, material_type, color, thickness, quantity, unit, edge, source_type, updated_at) values(?,?,?,?,?,?,?,?,?)",
-                ("PP9999", "edge", "Test Oak", "", 12.5, "m", "Test Oak", "aihouse", "2026-08-15T10:00:00"),
+                "insert into material_items(order_id, product_code, quantity, source_type, updated_at) values(?,?,?,?,?)",
+                ("PP9999", "M-EDGE", 12.5, "aihouse", "2026-08-15T10:00:00"),
             )
             store.connection.execute(
                 "insert into hardware_items(order_id, factory_order, scope, product_code, name, spec, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?,?,?)",
@@ -304,6 +345,18 @@ class OrderWorkflowTests(unittest.TestCase):
             from traveler_assistant.order_index import OrderIndexStore
 
             store = OrderIndexStore(config.workflow_database)
+            hardware = [
+                ("M1001", "Hinge"),
+                ("M1002", "H-Rail"),
+                ("M1003", "L-Rail"),
+                ("M1013", "Shelf Holder"),
+                ("M1014", "15寸垃圾桶(TB18用)"),
+                ("M1093", "BLS36"),
+            ]
+            seed_products(store.connection, [
+                ("M0004", "Plywood", "Plywood", "18mm", "pcs", "plywood", "", "18"),
+                *[(code, "Hardware", name, "", "pcs/个", "", "", "") for code, name in hardware],
+            ])
             store.connection.execute(
                 "insert into orders(order_id, order_type, source_folder, updated_at) values(?,?,?,?)",
                 ("PP0070", "owned", "/server/PP0070", "2026-08-25T10:00:00"),
@@ -313,17 +366,9 @@ class OrderWorkflowTests(unittest.TestCase):
                 ("F0070", "PP0070", "PP0070-KITCHEN", "已确认", 1, "2026-08-25T10:00:00"),
             )
             store.connection.execute(
-                "insert into material_items(order_id, material_type, color, thickness, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?)",
-                ("PP0070", "plywood", "", "18", 1, "pcs", "aicnc", "2026-08-25T10:00:00"),
+                "insert into material_items(order_id, product_code, quantity, source_type, updated_at) values(?,?,?,?,?)",
+                ("PP0070", "M0004", 1, "aicnc", "2026-08-25T10:00:00"),
             )
-            hardware = [
-                ("M1001", "Hinge"),
-                ("M1002", "H-Rail"),
-                ("M1003", "L-Rail"),
-                ("M1013", "Shelf Holder"),
-                ("M1014", "15寸垃圾桶(TB18用)"),
-                ("M1093", "BLS36"),
-            ]
             store.connection.executemany(
                 """
                 insert into hardware_items(
@@ -374,6 +419,18 @@ class OrderWorkflowTests(unittest.TestCase):
             from traveler_assistant.order_index import OrderIndexStore
 
             store = OrderIndexStore(config.workflow_database)
+            hardware = [
+                ("M1001", "Hinge", "pcs/个"),
+                ("M1002", "H-Rail", "set/套"),
+                ("M1003", "L-Rail", "set/套"),
+                ("M1013", "Shelf Holder", "pcs/个"),
+                ("M1014", "15寸垃圾桶(TB18用)", "pcs/个"),
+                ("M1093", "BLS36", "pcs/个"),
+            ]
+            seed_products(store.connection, [
+                ("M0004", "Plywood", "Plywood", "18mm", "pcs", "plywood", "", "18"),
+                *[(code, "Hardware", name, "", unit, "", "", "") for code, name, unit in hardware],
+            ])
             store.connection.execute(
                 "insert into orders(order_id, order_type, source_folder, updated_at) values(?,?,?,?)",
                 ("PP0070", "owned", "/server/PP0070", "2026-08-25T10:00:00"),
@@ -383,8 +440,8 @@ class OrderWorkflowTests(unittest.TestCase):
                 ("F0070", "PP0070", "PP0070-KITCHEN", "已确认", 1, "2026-08-25T10:00:00"),
             )
             store.connection.execute(
-                "insert into material_items(order_id, material_type, color, thickness, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?)",
-                ("PP0070", "plywood", "", "18", 1, "pcs", "aicnc", "2026-08-25T10:00:00"),
+                "insert into material_items(order_id, product_code, quantity, source_type, updated_at) values(?,?,?,?,?)",
+                ("PP0070", "M0004", 1, "aicnc", "2026-08-25T10:00:00"),
             )
             store.connection.executemany(
                 """
@@ -1561,7 +1618,7 @@ class OrderWorkflowTests(unittest.TestCase):
 
             preview = preview_order(config, order)
             ignored = preview.factories[0].fittings[0]
-            connection = sqlite3.connect(config.workflow_database)
+            connection = connect_database(config.workflow_database)
             try:
                 self.assertGreater(connection.execute("select count(*) from hardware_items").fetchone()[0], 0)
             finally:
@@ -1569,7 +1626,7 @@ class OrderWorkflowTests(unittest.TestCase):
 
             set_ignored(config, ignored.name, True)
             preview_order(config, order)
-            connection = sqlite3.connect(config.workflow_database)
+            connection = connect_database(config.workflow_database)
             try:
                 self.assertEqual(
                     connection.execute(
@@ -1633,7 +1690,7 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(updated, Path(""))
             self.assertEqual(first_backup, Path(""))
             self.assertEqual(first["result"], "added")
-            connection = sqlite3.connect(config.workflow_database)
+            connection = connect_database(config.workflow_database)
             try:
                 connection.execute(
                     """
