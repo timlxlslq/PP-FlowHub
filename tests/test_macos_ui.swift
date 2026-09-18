@@ -60,6 +60,16 @@ private struct PageLayoutHarness: View {
     }
 }
 
+private struct DashboardActivityIsolationHarness: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        OrderDashboardActivityView(input: OrderDashboardActivityInput(model: model))
+            .equatable()
+            .frame(width: 1080)
+    }
+}
+
 @main
 private struct MacOSUIRegressionTests {
     static func main() {
@@ -71,7 +81,9 @@ private struct MacOSUIRegressionTests {
         testMaterialDisplayNames()
         testOrderDetailMaterialRows()
         testOrderDashboardRules()
+        testDashboardExpansionIsolation()
         testDashboardActivityIsScopedToAppSession()
+        testOrderCostMaterialAvailability()
         testDashboardSessionMessagesAndAimesProgress()
         testDashboardStartupProgressAndHistory()
         testDashboardAimesStatusResolution()
@@ -81,6 +93,9 @@ private struct MacOSUIRegressionTests {
         testPendingInventoryMappingResumeContract()
         testSelectedServerPreviewFailure()
         testHardwareSourceSelectionFlow()
+        testServerHardwareMappingRefresh()
+        testManualHardwareEditorContract()
+        testServerNoChangeAcknowledgement()
         testFolderPreviewMappingRecovery()
         testPendingMappingCallbacks()
         testPendingMappingMergesFolderIssues()
@@ -340,6 +355,9 @@ private struct MacOSUIRegressionTests {
         require(dashboardStatusIsInProgress("正在后台扫描 Server 变化…"), "进行中的 Server 状态未被识别")
         require(!dashboardStatusIsInProgress("✅ Server 扫描完成"), "已完成的 Server 状态被误判为进行中")
         require(orderDashboardIsCompleted("已出货"), "已出货订单没有被识别为已完成")
+        require(orderDashboardIsCompleted("已中止"), "已中止订单仍允许后续操作")
+        require(!orderDashboardStageMatchesFilter("已中止", statusFilter: "未完成订单"), "中止订单仍出现在未完成列表")
+        require(orderDashboardStageMatchesFilter("已中止", statusFilter: "已中止") && orderDashboardStageMatchesFilter("已中止", statusFilter: "全部订单"), "中止订单无法查回")
         require(!orderDashboardIsCompleted("部分出货"), "部分出货订单被错误识别为已完成")
         require(dashboardMessageHoverDelay == 1.0, "消息悬停详情必须停留超过一秒后才显示")
         require(dashboardMessageHoverCloseGrace == 0.8, "消息悬停离开后应保持 0.8 秒")
@@ -404,8 +422,10 @@ private struct MacOSUIRegressionTests {
         require(orderDashboardShortageCount(stockRows) == 1, "库存比对弹窗未正确统计不足项目")
         require(orderDashboardStatus(previewValidated: true, hasError: false, isExistingTraveler: true) == "已优化", "订单中心已校验状态错误")
         require(orderDashboardStatus(previewValidated: false, hasError: true, isExistingTraveler: false) == "数据异常", "订单中心异常状态错误")
-        require(orderDashboardStatuses.count == 9, "订单状态列表数量发生意外变化")
-        require(orderDashboardStatuses.first == "已设计" && orderDashboardStatuses.last == "数据异常", "订单状态列表顺序错误")
+        require(
+            orderDashboardStatuses == ["已拆单待优化", "部分优化", "已优化", "部分出货", "已出货", "已中止"],
+            "订单筛选项必须保持现行顺序，不能重新加入已设计、待人工处理、待确认或数据异常"
+        )
         require(orderDashboardMetricColumnCount == 8, "订单指标卡必须固定为一行 8 列")
         require(orderDashboardMetricColumns.count == orderDashboardMetricColumnCount, "订单指标卡列配置数量错误")
         require(
@@ -492,7 +512,7 @@ private struct MacOSUIRegressionTests {
             dashboardSource.contains("orderInstallationInstallerSuggestions")
                 && dashboardSource.contains("Menu {")
                 && dashboardSource.contains("TextField(\"安装人/安装小组\"")
-                && !dashboardSource.contains("Image(systemName: \"chevron.down\")"),
+                && !(dashboardSource.components(separatedBy: "private struct OrderAnnotationsSheet").last?.components(separatedBy: "struct OrderDashboardDetailCard").first?.contains("Image(systemName: \"chevron.down\")") ?? true),
             "安装人输入框必须支持历史下拉选择和直接输入新名称"
         )
         require(
@@ -1104,6 +1124,30 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    private static func testOrderCostMaterialAvailability() {
+        let model = AppModel()
+        model.selectedOrderId = "PP0100"
+        require(!model.canCalculateOrderCost, "无材料订单不能计算成本")
+        model.calculateSelectedOrderCost()
+        require(!model.orderRunning && !model.showCostSheet, "无材料时不得发起成本请求")
+        model.orderMaterials = [OrderMaterialPreview(kind: "panel", thickness: 19.1, color: "White", quantity: 0)]
+        require(!model.canCalculateOrderCost, "零数量材料不能启用成本")
+        model.orderMaterials = [OrderMaterialPreview(kind: "panel", thickness: 19.1, color: "White", quantity: 1)]
+        require(model.canCalculateOrderCost, "材料载入后应立即启用成本")
+        model.orderRunning = true
+        require(!model.canCalculateOrderCost, "读取中不能计算成本")
+        model.orderRunning = false
+        model.orderDetailWaiting = true
+        require(!model.canCalculateOrderCost, "等待新订单详情时不能使用旧材料计算成本")
+        model.orderDetailWaiting = false
+        model.orderMaterials = [OrderMaterialPreview(kind: "edge", thickness: 0, color: "White", quantity: 10)]
+        require(model.canCalculateOrderCost, "只有封边材料的订单也可以计算成本")
+        model.orderMaterials = []
+        require(!model.canCalculateOrderCost, "切换到无材料订单后应重新禁用成本")
+        model.selectedOrderId = ""
+        require(!model.canCalculateOrderCost, "未选择订单时不能计算成本")
+    }
+
     private static func testDashboardSessionMessagesAndAimesProgress() {
         let model = AppModel()
         require(model.dashboardSessionMessages.isEmpty, "新的 App 会话消息记录必须从空开始")
@@ -1295,6 +1339,18 @@ private struct MacOSUIRegressionTests {
     }
 
     private static func testDashboardStartupProgressAndHistory() {
+        let deferred = AppModel()
+        deferred.dashboardSyncStatus = "请在待处理中心预览并逐单确认写入"
+        deferred.dashboardServerStatus = "⚠️ Server 发现 2 项待逐单确认变化"
+        deferred.showPendingCenterPrompt = true
+        require(!OrderDashboardActivityInput(model: deferred).operationRunning, "等待人工确认不是后台执行")
+        deferred.showPendingCenterPrompt = false // Same action as 稍后处理.
+        require(!OrderDashboardActivityInput(model: deferred).operationRunning, "稍后处理后订单中心不得显示执行动画")
+        require(!deferred.orderRunning && !dashboardStatusIsInProgress(deferred.dashboardSyncStatus), "助手不得把待处理中心提醒误判为动态操作")
+        require(deferred.dashboardSyncStatus == "请在待处理中心预览并逐单确认写入", "关闭弹窗应保留待处理提醒")
+        require(dashboardStatusIsInProgress("正在读取待处理中心…"), "提到待处理中心的真实操作仍应显示执行中")
+        require(dashboardStatusIsInProgress("订单处理中…"), "真实处理中状态仍应显示执行中")
+
         let model = AppModel()
         var commands: [[String]] = []
         var observedStatuses: [String] = []
@@ -1701,6 +1757,122 @@ private struct MacOSUIRegressionTests {
 
     }
 
+    private static func testManualHardwareEditorContract() {
+        let object: [String: Any] = [
+            "version": "v1", "factories": [["factory_order": "F1", "factory_name": "PP9999-KITCHEN", "editable": true]],
+            "items": [["id": 4, "factory_order": "F1", "product_code": "M2000", "name": "拉手", "spec": "黑色", "quantity": 2, "unit": "个"]]
+        ]
+        let snapshot = ManualHardwareSnapshot.decode(object)
+        require(snapshot?.items.first?.factoryOrder == "F1" && snapshot?.items.first?.productCode == "M2000",
+                "人工五金必须解析真实 snake_case 响应并保留工厂单归属")
+        require(ManualHardwareSnapshot.decode(["items": []]) == nil, "缺少基线的响应不能作为可保存草稿")
+        let model = AppModel()
+        var commands: [[String]] = []
+        model.pendingOrderRunner = { args, _, complete in
+            commands.append(args)
+            complete(object)
+        }
+        var loaded = false
+        model.loadManualHardware(orderID: "PP9999") { loaded = $0?["version"] as? String == "v1" }
+        require(loaded && commands.last == ["manual-hardware", "--order-id", "PP9999"], "列表必须读取当前订单")
+        model.searchManualHardware("拉手") { _ in }
+        require(commands.last == ["search-hardware-products", "--query", "拉手"], "商品名称必须传给检索入口")
+        var saved = true
+        model.saveManualHardware(orderID: "PP9999", payload: ["version": "v1", "additions": [], "deletions": []]) { saved = $0 }
+        require(!saved && !model.orderError.isEmpty, "没有 saved 标识不能误报保存成功或刷新订单")
+        model.pendingOrderRunner = { _, fail, _ in fail() }
+        loaded = true
+        model.loadManualHardware(orderID: "PP9999") { loaded = $0 != nil }
+        require(!loaded, "列表失败必须返回 UI 错误态")
+    }
+
+    private static func testServerNoChangeAcknowledgement() {
+        let model = AppModel()
+        let folder = "/Volumes/server/Optimized Orders/PP0064"
+        var payload: [String: Any] = ["write_records": [:], "source_folders": [folder],
+            "can_acknowledge_no_changes": true,
+            "orders": [["order_id": "PP0064", "validation_status": "正常"]]]
+        model.serverWritePreview = ServerWritePreview(object: ["server_write_preview": payload])
+        model.showServerWriteConfirmation = true
+        var commands: [[String]] = []
+        var success: (([String: Any]) -> Void)?
+        var failure: (() -> Void)?
+        model.pendingOrderRunner = { args, fail, complete in
+            commands.append(args); failure = fail; success = complete
+        }
+        model.acknowledgeServerPreview()
+        require(commands.last == ["acknowledge-server-preview-memory", "--confirm-write"], "无变化操作必须走专用基线入口")
+        model.acknowledgeServerPreview()
+        require(commands.count == 1, "运行时不得重复提交")
+        failure?()
+        require(model.showServerWriteConfirmation && model.serverWriteConfirmationNoticeIsError, "失败必须保留预览供重试")
+        model.acknowledgeServerPreview()
+        success?([:])
+        require(model.showServerWriteConfirmation, "返回缺少成功标记不能关闭")
+        model.serverWritePreviewNeedsRefresh = true
+        let count = commands.count
+        model.acknowledgeServerPreview()
+        require(commands.count == count, "过期预览不得确认")
+        model.serverWritePreviewNeedsRefresh = false
+        model.acknowledgeServerPreview()
+        success?(["server_no_changes_confirmed": true])
+        require(!model.showServerWriteConfirmation && model.serverWritePreview == nil, "成功应关闭并释放预览")
+        require(commands.last == ["list-index"], "成功应刷新订单列表和待处理项")
+        require(model.dashboardActivity.first?.title == "Server 无变化确认完成", "监控更新应独立记录")
+        for key in ["material_changes", "hardware_changes", "factories"] {
+            payload["orders"] = [["order_id": "PP0064", "validation_status": "正常", key: [["factory_order": "F64", "product_code": "M0004", "material_type": "panel", "name": "Hinge", "quantity": 1]]]]
+            require(ServerWritePreview(object: ["server_write_preview": payload])?.canAcknowledgeNoChanges == false, "有差异时不得确认无变化")
+        }
+    }
+
+    private static func testServerHardwareMappingRefresh() {
+        let model = AppModel()
+        let folder = "/Volumes/server/Optimized Orders/PP0008"
+        let requirement: [String: Any] = ["name": "Hinge", "order_ids": ["PP0008"]]
+        let initial: [String: Any] = ["write_records": [:], "source_folders": [folder],
+            "hardware_source_choices": ["F8": "chosen-report"],
+            "hardware_mapping_requirements": [requirement],
+            "orders": [["order_id": "PP0008", "validation_status": "正常"]]]
+        model.serverWritePreview = ServerWritePreview(object: ["server_write_preview": initial])
+        model.serverHardwareMappingRequirements = model.serverWritePreview!.hardwareMappingRequirements
+        var commands: [[String]] = []
+        var success: (([String: Any]) -> Void)?
+        var failure: (() -> Void)?
+        model.pendingInventoryRunner = { _, _, complete in complete([:]) }
+        model.pendingOrderRunner = { args, fail, complete in
+            commands.append(args); failure = fail; success = complete
+        }
+        model.saveServerHardwareMapping(name: " Hinge ", productCode: " m123 ")
+        require(model.serverWritePreviewNeedsRefresh && model.orderRunning, "映射后必须等待新预览")
+        require(model.serverHardwareMappingRequirements.count == 1, "刷新成功前不能只移除映射要求")
+        require(commands.last?.contains(folder) == true && commands.last?.contains("{\"F8\":\"chosen-report\"}") == true, "刷新应保留原文件夹和所选五金来源")
+        failure?()
+        require(model.serverWritePreviewNeedsRefresh && model.serverWriteConfirmationNoticeIsError, "刷新失败必须阻止旧预览写入")
+        let count = commands.count
+        model.confirmServerMaterialPreview()
+        require(commands.count == count, "失败后的确认不得提交业务写入")
+        model.refreshServerHardwarePreview()
+        success?([:])
+        require(model.serverWritePreviewNeedsRefresh, "无效返回不能解锁确认")
+        model.saveServerHardwareMapping(name: "Hinge", productCode: "m123")
+        var updated = initial
+        updated["hardware_mapping_requirements"] = [] as [[String: Any]]
+        updated["write_records"] = ["hardware_items": [["product_code": "M123"]]]
+        updated["orders"] = [["order_id": "PP0008", "validation_status": "正常", "factories": [
+            ["factory_order": "F8", "hardware": [["name": "Hinge", "product_code": "M123", "quantity": 4]]]
+        ]]]
+        success?(["server_write_preview": updated])
+        require(!model.serverWritePreviewNeedsRefresh && model.serverHardwareMappingRequirements.isEmpty, "成功回读应解锁并更新映射要求")
+        require(model.serverWritePreview?.orders.first?.factories.first?.hardware.first?.productCode == "M123", "映射后的五金必须出现在预览明细")
+        require(model.serverWritePreview?.payload["write_records"] as? [String: [[String: String]]] == ["hardware_items": [["product_code": "M123"]]], "确认必须使用新预览数据")
+        require(model.serverWriteConfirmationNotice.contains("Hinge → M123"), "成功提示必须插入实际名称和 SKU")
+        model.saveServerHardwareIgnoredMapping(name: "Hinge", reason: "")
+        updated["orders"] = [["order_id": "PP0008", "validation_status": "正常"]]
+        success?(["server_write_preview": updated])
+        require(model.serverWritePreview?.orders.first?.factories.isEmpty == true && model.serverWriteConfirmationNotice.contains("Hinge"), "忽略后也必须回读刷新明细")
+        require(commands.allSatisfy { $0.first == "preview-server-changes" }, "映射刷新只能运行只读预览")
+    }
+
     private static func testFolderPreviewMappingRecovery() {
         let model = AppModel()
         let folder = URL(fileURLWithPath: "/Volumes/server/Optimized Orders/PP0008")
@@ -2061,6 +2233,17 @@ private struct MacOSUIRegressionTests {
     }
 
     private static func testAssistantOrderTimelineContract() {
+        // A partially optimized order can already have produced factory orders.
+        let beforeProduction = [27, 3, 0, 0].map {
+            assistantProgressSegmentState(completedCount: $0, totalCount: 27)
+        }
+        let afterProduction = [27, 3, 3, 0].map {
+            assistantProgressSegmentState(completedCount: $0, totalCount: 27)
+        }
+        require(beforeProduction == [.completed, .active, .pending, .pending], "生产前各阶段应独立显示")
+        require(afterProduction == [.completed, .active, .active, .pending], "部分优化不能阻止生产连接线更新")
+        require(assistantProgressSegmentState(completedCount: 27, totalCount: 27) == .completed, "全部完成应显示实线")
+        require(assistantProgressSegmentState(completedCount: 0, totalCount: 0) == .pending, "无工厂单不能显示完成")
         let assistantSource = try! String(
             contentsOfFile: "macos/AssistantView.swift",
             encoding: .utf8
@@ -2078,13 +2261,13 @@ private struct MacOSUIRegressionTests {
                 && assistantSource.contains("GeometryReader")
                 && assistantSource.contains("completedCount: Int")
                 && assistantSource.contains("totalCount: Int")
-                && assistantSource.contains("let allStagesComplete = stages.allSatisfy")
-                && assistantSource.contains("let firstIncompleteIndex = stages.firstIndex")
+                && assistantSource.contains("let segmentState = assistantProgressSegmentState(")
+                && assistantSource.contains("let state = assistantProgressSegmentState(")
                 && assistantSource.contains("let segmentState")
                 && assistantSource.contains("leadingStubLength")
                 && assistantSource.contains("segmentMidpoint")
-                && assistantSource.contains("index < firstIncompleteIndex")
-                && assistantSource.contains("let iconColor = completed ? AssistantDashboardTypography.stageEmerald : Color.secondary.opacity(0.62)")
+                && !assistantSource.contains("firstIncompleteIndex")
+                && assistantSource.contains("let iconColor = completed || current ? AssistantDashboardTypography.stageEmerald : Color.secondary.opacity(0.62)")
                 && assistantSource.contains("GlassEffectContainer(spacing: 20)")
                 && assistantSource.contains(".regular.tint(AssistantDashboardTypography.stageEmerald.opacity(0.28))")
                 && assistantSource.contains(".regular.tint(AppPalette.separator.opacity(0.18))")
@@ -2700,6 +2883,82 @@ private struct MacOSUIRegressionTests {
         let boundary = probe.convert(probe.bounds, to: hosting).maxY
         window.close()
         return boundary
+    }
+
+    private static func testDashboardExpansionIsolation() {
+        // Nonexistent, Unicode and escaped-looking paths must remain lexical strings.
+        let root = "/Volumes/unavailable-server/PP0064 中文"
+        require(displayPathName(root + "/Report/A #100%.xlsx") == "A #100%.xlsx", "显示路径不得 URL 解码或检查文件")
+        require(displayPathName(root + "/") == "PP0064 中文", "目录尾斜杠不应丢失名称")
+        require(displayPathName("") == "", "空显示路径应保持为空")
+        require(displayParentPath(root + "/Report/file.xml") == root + "/Report", "父路径应保持原始目录")
+        let change = ServerChangePreview(id: "c", changeType: "modified", kind: "board",
+            orderId: "PP0064", sourceFolder: "", path: root + "/Report/file.xml",
+            message: "修改", manualOnly: false, eventTime: "2026-09-18")
+        let groups = serverFolderChangeGroups([change])
+        require(groups.count == 1 && groups[0].folderPath == root + "/Report"
+                && groups[0].folderName == "Report", "缺失 sourceFolder 时仍能纯字符串分组")
+
+        let model = AppModel()
+        model.dashboardServerStatus = "✅ Server 扫描完成"
+        let initial = OrderDashboardActivityInput(model: model)
+        model.selectedOrderId = "PP0064"
+        model.orderRunning = true
+        model.orderMaterials = [OrderMaterialPreview(kind: "panel", thickness: 19.1, color: "Silver Pear", quantity: 1)]
+        require(initial == OrderDashboardActivityInput(model: model), "详情加载/材料/选中订单不得改变消息区输入")
+        require(!initial.operationRunning, "普通详情读取不能冒充顶部后台操作")
+
+        let hosting = NSHostingView(rootView: DashboardActivityIsolationHarness(model: model))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 300),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        window.orderFrontRegardless()
+        hosting.layoutSubtreeIfNeeded()
+        pumpRunLoop(for: 0.2)
+        let before = OrderDashboardRenderProbe.messageBodyCount
+        require(before > 0, "消息区测试必须实际挂载并计算 body")
+        model.selectedOrderId = "PP0008"
+        model.orderRunning = false
+        model.orderMaterials = []
+        pumpRunLoop(for: 0.2)
+        require(OrderDashboardRenderProbe.messageBodyCount == before,
+                "与消息无关的模型发布触发了顶部消息 body 重算")
+        model.dashboardServerStatus = "正在扫描 Server…"
+        pumpRunLoop(for: 0.2)
+        require(OrderDashboardRenderProbe.messageBodyCount > before,
+                "真实操作进度必须触发消息区更新")
+        require(OrderDashboardActivityInput(model: model).operationRunning, "Server 进度应保持运行状态")
+        let progressCount = OrderDashboardRenderProbe.messageBodyCount
+        model.dashboardServerStatus = "❌ Server 不可用"
+        pumpRunLoop(for: 0.2)
+        require(OrderDashboardRenderProbe.messageBodyCount > progressCount,
+                "失败结果必须触发消息区更新")
+        require(!OrderDashboardActivityInput(model: model).operationRunning, "失败后不能继续显示运行状态")
+        window.close()
+
+        // Real AppKit receiver: no inner hosting tree or size constraints.
+        let receiverHost = NSHostingView(rootView:
+            OrderDashboardClickContainer(onSingleClick: {}, onDoubleClick: {}) {
+                Color.clear.frame(width: 240, height: 60)
+            })
+        receiverHost.frame = NSRect(x: 0, y: 0, width: 240, height: 60)
+        receiverHost.layoutSubtreeIfNeeded()
+        func descendants(_ view: NSView) -> [NSView] {
+            view.subviews.flatMap { [$0] + descendants($0) }
+        }
+        guard let receiver = descendants(receiverHost).first(where: { $0.gestureRecognizers.count == 2 }) else {
+            fail("缺少订单点击接收层")
+        }
+        require(receiver.subviews.isEmpty && receiver.constraints.isEmpty,
+                "点击层不得嵌套 HostingView 或创建内容尺寸约束")
+        require(receiver.intrinsicContentSize.width == NSView.noIntrinsicMetric
+                && receiver.intrinsicContentSize.height == NSView.noIntrinsicMetric,
+                "点击层不能决定父视图尺寸")
+        let coordinator = OrderDashboardClickReceiver.Coordinator(onSingleClick: {}, onDoubleClick: {})
+        let single = receiver.gestureRecognizers.compactMap { $0 as? NSClickGestureRecognizer }.first { $0.numberOfClicksRequired == 1 }!
+        let double = receiver.gestureRecognizers.compactMap { $0 as? NSClickGestureRecognizer }.first { $0.numberOfClicksRequired == 2 }!
+        require(coordinator.gestureRecognizer(single, shouldRequireFailureOf: double), "单击必须等待双击失败，避免误展开")
     }
 
     private static func testOperationLogScrollsAfterAppending() {

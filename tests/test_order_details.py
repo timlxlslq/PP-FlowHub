@@ -10,7 +10,7 @@ from traveler_assistant.order_index import OrderIndexStore
 
 
 class OrderDetailsTests(unittest.TestCase):
-    def test_hardware_detail_projects_display_name_without_changing_raw_fact(self):
+    def test_hardware_detail_uses_catalog_not_mapping_display_alias(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = Config(state_dir=root / "state")
@@ -26,17 +26,12 @@ class OrderDetailsTests(unittest.TestCase):
                 ("PP0002", "owned", "", "now"),
             )
             connection.execute(
-                """insert into factory_orders(
-                       factory_order, order_id, factory_name, optimized, outbound_status, updated_at
-                   ) values(?,?,?,?,?,?)""",
+                "insert into factory_orders(factory_order,order_id,factory_name,updated_at,stage) select v.factory_order,v.order_id,v.factory_name,v.updated_at,case when v.outbound_status='已出库' then '已出货' when v.optimized then '已优化' else '已拆单' end from (select ? as factory_order,? as order_id,? as factory_name,? as optimized,? as outbound_status,? as updated_at) v",
                 ("F0002", "PP0002", "工厂单", 0, "", "now"),
             )
             connection.execute(
-                """insert into hardware_items(
-                       order_id, factory_order, scope, product_code, source_code, name,
-                       spec, quantity, unit, source_type, updated_at
-                   ) values(?,?,?,?,?,?,?,?,?,?,?)""",
-                ("PP0002", "F0002", "factory_order", "M1001", "71T950A", "TestFullHinge", "", 2, "pcs", "aicnc", "now"),
+                'insert into hardware_items(order_id,factory_order,scope,product_code,quantity,source_type,updated_at) values(?,?,?,?,?,?,?)',
+                ('PP0002', 'F0002', 'factory_order', 'M1001', 2, 'aicnc', 'now'),
             )
             connection.commit()
             connection.close()
@@ -45,10 +40,10 @@ class OrderDetailsTests(unittest.TestCase):
 
             save_manual_mapping(config, "Hinge", "M1001", "柜门铰链")
             hardware = order_detail(config, "PP0002")["hardware"]
-            self.assertEqual(hardware[0]["name"], "TestFullHinge")
-            self.assertEqual(hardware[0]["source_code"], "71T950A")
+            self.assertEqual(hardware[0]["name"], "Unihopper Hinge")
+            self.assertNotIn("source_code", hardware[0])
             self.assertEqual(hardware[0]["product_code"], "M1001")
-            self.assertEqual(hardware[0]["display_name"], "柜门铰链")
+            self.assertEqual(hardware[0]["display_name"], "Unihopper Hinge")
     def test_panel_projection_uses_one_color_image_identity_across_thicknesses(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Config(state_dir=Path(directory) / "state")

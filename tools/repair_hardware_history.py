@@ -47,11 +47,13 @@ def plan_repair(connection, reference):
             if other and quantities(other) != quantities(desired):
                 raise ValueError(f'{number} 测试来源与正式来源数量不同，不能自动清理')
         else:
-            desired = records(reference, "select * from hardware_items where factory_order=? and source_type='aicnc' and active=1 order by id", (number,))
+            desired = [row for row in records(reference,
+                "select * from hardware_items where factory_order=? and source_type='aicnc' order by id", (number,))
+                if row.get('active', 1) == 1]  # Historical backups may still have the removed column.
             current_auto = [row for row in before if row['source_type'] == 'aicnc']
             if current_auto and quantities(current_auto) != quantities(desired):
                 raise ValueError(f'{number} 当前自动五金已有其他变化，停止恢复')
-        if not desired or any(not row['active'] for row in desired):
+        if not desired or any(not row.get('active', 1) for row in desired):
             raise ValueError(f'{number} 缺少已确认的有效来源')
         manual = [row for row in before if row['source_type'] != 'aicnc']
         documents = records(connection, """select d.*,f.created_at as factory_issued_at from outbound_documents d

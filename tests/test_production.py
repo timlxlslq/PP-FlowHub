@@ -10,6 +10,7 @@ from traveler_assistant.order_index import OrderIndexStore
 from traveler_assistant.production import (
     cumulative_production_materials,
     material_key,
+    production_material_code,
     prepare_production,
     production_preview,
     record_completed_production,
@@ -17,6 +18,14 @@ from traveler_assistant.production import (
 
 
 class ProductionTransactionTests(unittest.TestCase):
+    def test_app_material_identity_and_conflicting_sku(self):
+        self.assertEqual(production_material_code({"key": "M0019"}), "M0019")
+        self.assertEqual(production_material_code({"product_code": "M0019"}), "M0019")
+        from traveler_assistant.core import RuleError
+        for row in ({}, {"key": "M0019", "product_code": "M0020"}):
+            with self.assertRaises(RuleError):
+                production_material_code(row)
+
     @staticmethod
     def _seed_products(connection):
         connection.executemany(
@@ -46,10 +55,7 @@ class ProductionTransactionTests(unittest.TestCase):
                 ("PP010", "owned", "now"),
             )
             connection.execute(
-                """insert into factory_orders(
-                       factory_order, order_id, factory_name, optimized,
-                       outbound_status, updated_at
-                   ) values(?,?,?,?,?,?)""",
+                "insert into factory_orders(factory_order,order_id,factory_name,updated_at,stage) select v.factory_order,v.order_id,v.factory_name,v.updated_at,case when v.outbound_status='已出库' then '已出货' when v.optimized then '已优化' else '已拆单' end from (select ? as factory_order,? as order_id,? as factory_name,? as optimized,? as outbound_status,? as updated_at) v",
                 ("F2010", "PP010", "PP010-KITCHEN", 1, "未查询", "now"),
             )
             connection.executemany(
@@ -84,10 +90,7 @@ class ProductionTransactionTests(unittest.TestCase):
                 ("CS010", "cutToSize", "now"),
             )
             connection.executemany(
-                """insert into factory_orders(
-                       factory_order, order_id, factory_name, optimized,
-                       outbound_status, updated_at
-                   ) values(?,?,?,?,?,?)""",
+                "insert into factory_orders(factory_order,order_id,factory_name,updated_at,stage) select v.factory_order,v.order_id,v.factory_name,v.updated_at,case when v.outbound_status='已出库' then '已出货' when v.optimized then '已优化' else '已拆单' end from (select ? as factory_order,? as order_id,? as factory_name,? as optimized,? as outbound_status,? as updated_at) v",
                 [
                     ("F1010", "CS010", "CS010-KITCHEN", 1, "已出库", "now"),
                     ("F1011", "CS010", "CS010-vanity", 1, "未查询", "now"),
@@ -104,14 +107,14 @@ class ProductionTransactionTests(unittest.TestCase):
                 ],
             )
             connection.execute(
-                """insert into manual_production_batches(
-                       batch_number, order_id, production_time, source, status, created_at, updated_at
-                   ) values(?,?,?,?,?,?,?)""",
-                ("LEGACY-F1010", "CS010", "", "legacy-outbound-migration", "completed", "now", "now"),
+                """insert into production_records(
+                       production_time, source, status, created_at, updated_at
+                   ) values(?,?,?,?,?)""",
+                ("", "legacy-outbound-migration", "completed", "now", "now"),
             )
             batch_id = connection.execute("select last_insert_rowid()").fetchone()[0]
             connection.execute(
-                "insert into manual_production_batch_factories(batch_id, order_id, factory_order) values(?,?,?)",
+                "update factory_orders set production_record_id=? where order_id=? and factory_order=?",
                 (batch_id, "CS010", "F1010"),
             )
             connection.execute(
@@ -165,13 +168,13 @@ class ProductionTransactionTests(unittest.TestCase):
 
             connection = connect_database(config.workflow_database)
             connection.execute(
-                """insert into manual_production_batch_materials(
+                """insert into production_materials(
                        batch_id, order_id, product_code, quantity
                    ) values(?,?,?,?)""",
                 (batch_id, "CS010", "M0019", 4),
             )
             connection.execute(
-                """insert into manual_production_batch_materials(
+                """insert into production_materials(
                        batch_id, order_id, product_code, quantity
                    ) values(?,?,?,?)""",
                 (batch_id, "CS010", "M0020", 102),
@@ -197,10 +200,7 @@ class ProductionTransactionTests(unittest.TestCase):
                 ("CS010", "cutToSize", "now"),
             )
             connection.execute(
-                """insert into factory_orders(
-                       factory_order, order_id, factory_name, optimized,
-                       outbound_status, updated_at
-                   ) values(?,?,?,?,?,?)""",
+                "insert into factory_orders(factory_order,order_id,factory_name,updated_at,stage) select v.factory_order,v.order_id,v.factory_name,v.updated_at,case when v.outbound_status='已出库' then '已出货' when v.optimized then '已优化' else '已拆单' end from (select ? as factory_order,? as order_id,? as factory_name,? as optimized,? as outbound_status,? as updated_at) v",
                 ("F1010", "CS010", "CS010-KITCHEN", 1, "未出库", "now"),
             )
             connection.execute(
@@ -231,7 +231,7 @@ class ProductionTransactionTests(unittest.TestCase):
 
             connection = sqlite3.connect(config.workflow_database)
             self.assertEqual(
-                connection.execute("select count(*) from manual_production_batches").fetchone()[0],
+                connection.execute("select count(*) from production_records").fetchone()[0],
                 0,
             )
             connection.close()
@@ -242,7 +242,9 @@ class ProductionTransactionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "workflow.sqlite3"
             ensure_schema(database)
-            connection = connect_database(database)
+            store = OrderIndexStore(database)
+            connection = store.connection
+            connection.execute("insert into factory_orders(factory_order,order_id,stage,updated_at) values('F1010','CS010','已优化','now')")
             self._seed_products(connection)
             result = record_completed_production(
                 connection,
@@ -265,8 +267,8 @@ class ProductionTransactionTests(unittest.TestCase):
             self.assertEqual(result["status"], "completed")
             self.assertEqual(
                 connection.execute(
-                    "select status from manual_production_batches where batch_number=?",
-                    ("MP-TEST-001",),
+                    "select status from production_records where batch_id=?",
+                    (result["production_record_id"],),
                 ).fetchone()[0],
                 "completed",
             )

@@ -10,21 +10,25 @@ AIHouse 是设计源，AIMES 是拆单排产源，AICNC 报表是生产源，金
 
 正式业务数据库：`~/Documents/pp-flowhub/data/workflow.sqlite3`。
 
-主要表按职责分组：订单索引与同步证据、`production_batches`/`batch_evidence` 批次、`material_items` 材料、`hardware_items` 五金、`outbound_documents` 出库单据、`products` 商品主资料、`backup_records` 备份记录。`products` 保存 SKU、原始名称/规格/单位、商品成本 `cost_price`，以及工作流使用的 `material_kind`、`material_color`、`material_thickness`；库存商品资料没有预计采购价时，`cost_price` 为 `NULL`。原始商品规格不改写：例如 `M0002`、`M0003` 的外部规格仍可为 5.2、15，而工作流名义厚度分别保存为 5.4、14.5。
+主要表按职责分组：订单索引与同步证据、`production_records` 实际生产记录、`material_items` 材料、`hardware_items` 五金、`outbound_documents` 出库单据、`products` 商品主资料、`backup_records` 备份记录。`products` 保存 SKU、原始名称/规格/单位、商品成本 `cost_price`，以及工作流使用的 `material_kind`、`material_color`、`material_thickness`；库存商品资料没有预计采购价时，`cost_price` 为 `NULL`。原始商品规格不改写：例如 `M0002`、`M0003` 的外部规格仍可为 5.2、15，而工作流名义厚度分别保存为 5.4、14.5。
 
-订单材料、已完成生产材料和 Server 材料分配分别保存在 `material_items`、`manual_production_batch_materials`、`server_material_allocations`。三张表只保存 SKU、数量及各自必要的订单/批次/来源身份，不重复保存材料类型、颜色、厚度、单位或 `edge`；详情、生产、库存、成本和 Traveler 在读取时按 `product_code` 连接 `products` 投影这些属性。生产累计消耗也按 SKU 汇总，商品单位文字变化不能使已完成数量重新变成可用数量。
+订单材料、已完成生产材料和 Server 材料分配分别保存在 `material_items`、`production_materials`、`server_material_allocations`。三张表只保存 SKU、数量及各自必要的订单/批次/来源身份，不重复保存材料类型、颜色、厚度、单位或 `edge`；详情、生产、库存、成本和 Traveler 在读取时按 `product_code` 连接 `products` 投影这些属性。生产累计消耗也按 SKU 汇总，商品单位文字变化不能使已完成数量重新变成可用数量。
 
-`material_items`、`manual_production_batch_materials`、`server_material_allocations`、`hardware_items` 和 `inventory_resolution_rules` 的 `product_code` 都声明到 `products(code)` 的外键；前四张事实表的新行必须有 SKU，映射规则必须有 SKU，忽略规则则必须为 `NULL`。SQLite 外键是每条连接的运行时开关，参与这五张表写入/事务的应用连接必须在事务开始前启用 `PRAGMA foreign_keys=ON`；已经进入事务后再执行不会补上本次约束。
+`material_items`、`production_materials`、`server_material_allocations`、`hardware_items` 和 `inventory_resolution_rules` 的 `product_code` 都声明到 `products(code)` 的外键；前四张事实表的新行必须有 SKU，映射规则必须有 SKU，忽略规则则必须为 `NULL`。SQLite 外键是每条连接的运行时开关，参与这五张表写入/事务的应用连接必须在事务开始前启用 `PRAGMA foreign_keys=ON`；已经进入事务后再执行不会补上本次约束。
 
-AICNC 五金和人工五金在同一张表中，用 `source_type` 区分；`hardware_items.product_code` 是规范库存 SKU，`name`、`source_code`、`spec` 和 `unit` 继续保留来源证据。AICNC 重同步只替换 AICNC 来源，不会覆盖 `manual`。
+AICNC 五金和人工五金在同一张表中，用 `source_type` 区分；`hardware_items.product_code` 是规范库存 SKU；名称、规格、单位连接 `products` 读取，不再复制来源代码与属性。AICNC 重同步只替换 AICNC 来源，不会覆盖 `manual`。
 
 原始 Excel、XML、CSV 不复制进数据库，数据库保存路径、指纹、解析结果和同步时间。设置、待办、操作审计仍使用 JSON/JSONL，因为它们不是订单业务事实。
 
 ## 优化状态与文件基线
 
-`material_items` 中已校验并确认写入的有效材料是完成优化的前提；`factory_orders.optimized` 只标记本次已确认材料覆盖的工厂单，订单状态按有效工厂单汇总。仅有 `optimization_artifacts` 不能把订单推进为已优化。
+`material_items` 中已校验并确认写入的有效材料是完成优化的前提；`factory_orders.stage` 只将本次已确认材料覆盖且尚未生产/出货的工厂单推进为已优化，订单状态按有效工厂单汇总。仅有 `optimization_artifacts` 不能把订单推进为已优化。
+
+`orders.stage = 已中止` 是二次确认的人工终态，优先于工厂单进度聚合；普通 upsert、列表重算及临时投影清理均保留此决定。中止只更新订单状态和更新时间，已有工厂单、材料、生产与出库事实不改动。命令为 `abort-order --order-id … --confirm-write`，无新增 schema 字段。
 
 普通 Server 扫描不写 `optimization_artifacts`、工厂单优化时间或 `server_scan_xml_state`；磁盘扫描快照也不保留优化 XML 条目。内存预览可暂存这些记录，取消后不落入正式库。确认事务同时写材料、所选工厂单状态与其优化元数据；文件夹仍有未完成确认的工厂单时，不推进整个文件夹的 XML 基线。失败整体回滚。
+
+对已有有效材料确认、材料/五金/工厂单均无差异的预览，专用 `acknowledge-server-preview-memory` 事务只替换 `server_scan_xml_state`，不写优化证据或业务表。事务内比较预览时的本地业务版本并检查文件夹确认条件；本地事实变化则拒绝，失败整体回滚。
 
 XML 基线来自用户确认的预览版本，不在确认时重新读取最新文件来覆盖；这样预览后发生的修改仍会被下次扫描发现。已存在的历史扫描日志保留用于审计，不作为确认材料的证据。独立人工文件夹仍按下述人工登记规则维护观察基线。
 
@@ -49,3 +53,27 @@ XML 基线来自用户确认的预览版本，不在确认时重新读取最新�
 ## Traveler
 
 Traveler 只按需从数据库和当前源文件生成到系统临时目录，用于查看或打印，使用后不写入订单目录。生产事实仍来自 AIMES、AICNC 和金蝶；历史详情依赖中央数据库保存的解析结果。
+
+## 五金直接删除与来源字段（2026-09-17）
+
+`hardware_items` 只保存当前五金行，不再有 `active` 字段。人工五金删除在确认保存的同一事务中执行 `DELETE`，新增或约束失败时整体回滚；迁移清理旧人工失效行并移除字段、更新索引，保留有效行的 ID、数量和其余字段。发现失效的自动来源时拒绝自动迁移，避免猜测其业务含义。工厂单自身的 AIMES/出库状态仍独立保留，已出库或失效工厂单禁止编辑人工五金。
+
+SKU（`product_code`）是唯一商品身份。人工和自动五金均移除 `source_code/name/spec/unit`；保留数量、订单/工厂单、来源类型、文件定位、备注和时间。所有新写入在替换前校验有效商品 SKU，未映射或无效商品整体回滚；不从已确认事实反向恢复或重新映射报表。商品名称与规格读取当前资料，已被五金引用的商品单位由目录更新校验和 SQLite trigger 保护，避免改变数量含义。
+
+迁移逐行保留已有 SKU、数量、ID 和归属，绝不再次执行报表换算。自动来源指纹按订单、工厂单和 SKU 汇总数量；迁移在同一事务中重算已有来源版本指纹，其他来源版本字段和出库单据不变。正式升级先做 SQLite Online Backup，在副本核对保留字段、其他业务表、完整性和外键；失败整体回滚。
+
+## 生产与状态精简（2026-09-18）
+
+正式订单移除 `validation_status`、`validation_message`、`material_status`。导入校验在本次连接的 `TEMP preview_validation` 中保留，连接关闭即消失，预览 payload 携带结果；确认仍检查结果、SKU、数量和归属。TEMP 对象不是正式 schema 或新的业务表；列表材料说明从明细计算。订单 `stage` 由同一汇总逻辑从有效工厂单计算，不能被一次导入失败覆盖。
+
+工厂单仅用 `stage` 保存主流程：已拆单、已优化、已生产、已出货。保留 AIMES 有效性、归属、文件证据、时间及单据，因它们不是同一进度。API 的 `optimized`、`outbound_status` 是旧界面所需的读层投影，不再是持久列；历史已出货可跳过缺失的早期证据，不补造优化时间或材料。
+
+`production_records(batch_id, production_time, source, status, created_at, updated_at)` 不绑定单一订单、不保存 MP 编号。`factory_orders.production_record_id` 外键直接关联记录，一个工厂单最多一次；原 `manual_production_batch_factories` 移除。`production_materials` 主键为 `(batch_id, order_id, product_code)`，可保存跨订单同 SKU，不能将订单材料强行分摊给各工厂单。现有 App 的生产选择入口仍以当前订单为上下文，跨订单共享记录的存储/事务合同已支持，不代表新增了跨订单批量库存操作界面。
+
+`production_batches`、`batch_evidence`、`factory_orders.production_batch_id`、`source_files.batch_number` 移除；文件路径、指纹、优化元数据和分配表仍保留。旧唯一来源批次冲突已不适用。
+
+迁移保留生产记录 ID、历史空时间、来源、状态、材料数量及工厂单归属；重复关联或孤儿身份拒绝迁移并回滚。历史 `CS002/M0041` 的 manual 板材事实保留，不因当前仅允许人工五金而删除。首次升级在 `data/schema-migration-backups/` 创建 SQLite Online Backup 并校验完整性，成功后才开始结构迁移事务；原业务表及删除字段可从该备份追溯。
+
+## 订单筛选与内部初始值（2026-09-18）
+
+订单中心不再提供已设计、待人工处理、待确认、数据异常四个筛选项。菜单选项不作为数据库枚举约束；`orders.stage` 仍保留未关联工厂单时的内部初始值及既有迁移，列表按有效工厂单汇总显示。当前库只读核对四类订单均为零，本次不改 schema、不更新或删除订单。归属确认、临时任务及校验结果各自保留。

@@ -4,6 +4,16 @@
 
 本文回答一个固定问题：**用户在 App 里做了一件事后，代码从哪里开始、传入什么、下一步调用谁、最终读写什么？**
 
+### 2026-09-18：展开订单为何不应拖慢消息区
+
+订单中心由 `OrderDashboardView` 组合工具栏、`OrderDashboardActivityView` 和 `OrderDashboardListView`。展开订单、选中工厂单及订单弹窗状态归列表所有；详情仍经 `loadOrderDetailFromDatabase` → `runOrder(detail)` 读取本地数据库。消息视图不观察整个 `AppModel`，只接收 `OrderDashboardActivityInput` 值输入，并通过 `.equatable()` 在消息数据未变化时跳过 body 重算。该输入是临时传值，不是业务缓存；新消息、进度、失败和计时起点仍会改变输入。消息自己的悬停、宽度和计时更新仍正常工作。
+
+`@State` 是视图自己的状态，`@ObservedObject` 会接收对象发布的变化。因此仅把一个长 body 拆成若干计算属性不能隔离更新；仅拆 View 但都观察大模型，也不能阻止无关字段通知。这里将局部状态下移，并为顶部建立明确的数据边界。SwiftUI 的 body 重算、布局和屏幕绘制是不同阶段，测试只对实际测到的阶段作结论。
+
+另一个隐蔽问题是 `URL(fileURLWithPath:)` 可能为判断目录而查询文件系统。原来的消息文本和待处理分组仅需要文件名，却在主线程触发 Server 路径的 `lstat`。现在显示名称/父路径使用 `displayPathName`、`displayParentPath` 的字符串处理；真正打开、读取文件的动作仍使用文件 API。`OrderDashboardClickContainer` 保留 SwiftUI 内容，以不含子视图和尺寸约束的 `OrderDashboardClickReceiver` 接收单击/双击，避免在点击层嵌套 `NSHostingView`。
+
+回归检查实际挂载消息视图，比较无关材料/选中订单变化前后的 body 计数，并验证真实进度和失败更新；安装版还需检查 PP0064 展开、收起、滚动、单/双击及系统布局异常。单纯编译通过不能证明现场卡顿或崩溃已经消失。
+
 文档依据 2026-08-30 当前源码整理。函数级全集请配合以下自动生成文档：
 
 - `05-file-map.md`：每个文件的中文职责。
@@ -237,6 +247,8 @@ order_workflow.main(command="sync-aimes")
 
 输入：`force`、`if_needed`、AIMES 用户名、Keychain 密码、批量上限和当前缓存。
 
+2026-09-17 核验范围：Python 先排除已关联 `completed` 生产批次的工厂单（按订单号和工厂单号共同匹配），浏览器再排除最近 50 条已读到的工厂单，仅对剩余未生产工厂单逐单查询。`NOT EXISTS` 表示“没有对应的已完成生产记录”；生产判断与看板相同，不用已出货文案或 Server 文件推断。删除结果落库前再次使用相同筛选，已生产记录保留本地事实。所有工厂单均已生产时仍读最近 50 条，以发现新增任务。
+
 输出：`orders`、`aimes` 状态、warnings、ignored/assigned 列表、stage durations 和 operation trace。
 
 关键边界：`sync_aimes_index()` 只刷新 AIMES 身份，不扫描 Server。格式异常行保存在 `aimes_review_rows`，并由读层投影为待人工确认的警告；它跳过有效业务写入。失败时可以返回缓存，但缓存不能表述成刚刚在线验证成功。
@@ -266,7 +278,7 @@ scanDashboardServer()
 
 #### 现场案例：已优化但材料为空（2026-09-15，PP0086）
 
-- 修复前 `order_index.py` 的优化证据扫描会依据 `optimization_artifacts` 更新 `factory_orders.optimized`；看板再汇总该字段。因此，看到“已优化”不能证明 `material_items` 和 `hardware_items` 已确认写入。
+- 修复前 `order_index.py` 的优化证据扫描会依据 `optimization_artifacts` 更新 `factory_orders.stage`；看板再汇总该字段。因此，看到“已优化”不能证明 `material_items` 和 `hardware_items` 已确认写入。
 - 本次修复前，PP0086 的两个工厂单都有优化 XML 证据，但材料和五金均为 0 条。现有日志有两次 Server 预览完成记录；预览中的写表日志也不能单独证明正式落库，须核对目标连接和中央数据库。
 - 修复采用备份 → 单文件夹内存预览 → 检查归属、材料校验和五金映射 → `confirm-server-material-preview-memory --confirm-write` → 数据库及安装 App 详情回读。结果为 5 条材料、6 条五金，未新增人工生产批次或出库单。
 - 不应仅把 `optimized` 改为 0 来补材料：保留的 XML 证据可能在下次扫描恢复该标记。材料缺失应走预览和确认写入流程。
@@ -295,7 +307,7 @@ processPendingServerChanges()
 
 已确认边界：正式数据库不会被预览污染。预览对象只保存在当前 App 内存；重新启动 App 后应重新预览。
 
-五金变化展示：`_server_preview_payload()` 从正式数据库的 `hardware_items` 查询工厂单是否已有 `active=1` 记录，返回 `has_existing_hardware`。Swift 的 `ServerWriteOrderPreview.existingHardwareChanges` 只展示这些工厂单的变化；首次写入仍展示上方五金明细。原始 `hardware_changes` 和 `write_records` 保持完整，因为“是否显示对比”和“是否需要写入”是不同判断，不能为隐藏界面差异而清空写入依据。
+五金变化展示：`_server_preview_payload()` 从正式数据库的 `hardware_items` 查询工厂单是否已有五金记录，返回 `has_existing_hardware`。Swift 的 `ServerWriteOrderPreview.existingHardwareChanges` 只展示这些工厂单的变化；首次写入仍展示上方五金明细。原始 `hardware_changes` 和 `write_records` 保持完整，因为“是否显示对比”和“是否需要写入”是不同判断，不能为隐藏界面差异而清空写入依据。
 
 ### 7.3 确认一个工厂单
 
@@ -324,7 +336,7 @@ confirmServerWrite(...)
 
 参数：stdin 内存预览、`--confirm-write`，以及零个或多个 `--skip-hardware-order <order_id>`。
 
-下一跳：`confirm_server_material_preview_memory()` → `_confirm_memory_preview()`。来源材料先解析为唯一、当前可写的商品 SKU，并把已确认的材料类型、颜色和名义厚度绑定到商品层；Server 分配以“来源路径 + SKU”作为来源材料身份，事务中的 `material_items` 再按“订单 + SKU + 来源类型 + 来源路径”聚合，只写 `product_code`、数量和来源身份。对应工厂单五金继续保留规范 SKU 与原始名称/编码/规格/单位。来料加工订单可在本次确认中显式跳过五金。确认之后修改名称映射不会重绑已有订单材料。
+下一跳：`confirm_server_material_preview_memory()` → `_confirm_memory_preview()`。来源材料先解析为唯一、当前可写的商品 SKU，并把已确认的材料类型、颜色和名义厚度绑定到商品层；Server 分配以“来源路径 + SKU”作为来源材料身份，事务中的 `material_items` 再按“订单 + SKU + 来源类型 + 来源路径”聚合，只写 `product_code`、数量和来源身份。对应工厂单五金只保存规范 SKU、已换算数量和必要归属，商品资料在读取时关联。来料加工订单可在本次确认中显式跳过五金。确认之后修改名称映射不会重绑已有订单材料。
 
 ### 7.5 登记临时或补单文件夹已人工处理
 
@@ -426,13 +438,13 @@ export=true  → order cost-export --order-id
 
 CLI 参数：`order production-preview --order-id <id> --factory-orders-json '[...]'`。
 
-下一跳：`production.production_preview(config,order_id,factory_orders)` → `_selected_factory_rows()`、`_order_material_rows()`、`cumulative_production_materials()` → 返回每个 SKU 的总量、已消耗量和剩余量，再从 `products` 投影显示属性。`manual_production_batch_materials` 按 `product_code` 保存和累计历史消耗，因此商品单位、显示名或颜色文字后来变化都不会把已完成数量漏掉。
+下一跳：`production.production_preview(config,order_id,factory_orders)` → `_selected_factory_rows()`、`_order_material_rows()`、`cumulative_production_materials()` → 返回每个 SKU 的总量、已消耗量和剩余量，再从 `products` 投影显示属性。`production_materials` 按 `product_code` 保存和累计历史消耗，因此商品单位、显示名或颜色文字后来变化都不会把已完成数量漏掉。
 
 ### 10.2 准备生产批次
 
 入口：`prepareProduction(orderID,factoryOrders,materials,onResult)`。
 
-输入：工厂单数组；材料数组只传 `{key,quantity}`。下一跳：`order prepare-production` → `production.prepare_production()` → 校验工厂单、数量、剩余量并创建 prepared batch，返回 `batch_number`。
+输入：工厂单数组；材料数组只传 `{key,quantity}`。下一跳：`order prepare-production` → `production.prepare_production()` → 校验工厂单、数量、剩余量并返回内存草稿和 `request_id`，此时不写入生产记录。
 
 准备成功不等于库存已扣，也不等于生产已完成。
 
@@ -458,6 +470,8 @@ startDirectProduction(...)
 ```
 
 外部保存成功和本地生产记录成功是两个证据。若外部结果不确定，Journal 标记 `verification_required`，后续重试必须先查历史，避免重复出库。
+
+App 的生产材料 `key` 就是已确认商品 SKU。Python 的 `production_material_code()` 在累计校验和完成写入时统一读取 `key` / `product_code`，两者同时存在但不同则报错。不能只在库存累计预览中补全 SKU，却把原始草稿的空 `product_code` 写入生产表。恢复时保留原 Journal 载荷与指纹，使用已确认单据补交本地事务；不按显示名称重新匹配，也不重新扣库存。
 
 ## 11. 出货流程
 
@@ -686,7 +700,6 @@ Traveler 使用已确认 SKU 对应的商品业务属性，不重新依据当前
 | `close-chrome` | 无 | `close_inventory_chrome()` | 关闭专用 Chrome |
 | `preflight` | 无 | `run_jdy("preflight")` | 外部只读/登录检查 |
 | `stock-check` | traveler/hardware 选项 | `check_stock()` | 外部只读库存 |
-| `repair-hardware` | 无 | `repair_hardware_inventory_codes()` | 修复中央 SKU 事实 |
 | `find-outbound` | `--order-name` | `run_jdy("findOutbound")` | 查询外部历史 |
 | `reconcile-folder` | `--folder` | `reconcile_folder_status()` | 对账并更新本地状态 |
 | `search-products` | `--query` | `search_inventory_products()` | 只读商品库 |
@@ -753,3 +766,94 @@ PYTHONDONTWRITEBYTECODE=1 python3 tools/generate_code_reference.py
 - 返回合同；
 - 失败或不确定结果的恢复方式；
 - 对应测试。
+
+### Server 确认页内的五金映射刷新
+
+`saveServerHardwareMapping` / `saveServerHardwareIgnoredMapping` 保存规则后，调用 `refreshServerHardwarePreview`，以当前预览的文件夹和 `hardware_source_choices` 再运行 `preview-server-changes`。成功返回后同时替换展示模型与确认 payload，不能只删除待映射提示。刷新中或失败时由 `serverWritePreviewNeedsRefresh` 阻止确认，失败可重试；五金来源冲突需重新打开文件夹预览处理。来料加工订单的跳过选择留在原 Sheet 中。此步骤只重建预览，正式材料和五金仍由用户最终确认写入。
+
+Swift 回归 `testServerHardwareMappingRefresh` 覆盖映射后明细与 payload 更新、来源保留、失败/无效返回阻止确认、重试和忽略后的刷新。
+
+### 已确认材料与 Server 来源变化
+
+订单材料 `material_items` 是需求事实，生产批次材料是消耗事实，出库单是库存操作证据。生产完成应计算需求减消耗，不删除需求；订单材料按订单与 SKU 保存，不按每个工厂单各存一份。
+
+Server 文件夹变化或材料文件消失只更新发现信息，不能据此清空需求或历史分配。`_reconcile_authoritative_server_material_sources` 仅在当前文件夹已有完整且逐 SKU 数量一致的材料集时清理旧路径重复事实，删除范围限定同一订单。不同数量必须经材料预览与确认处理。回归见 `test_order_index.py` 的 material_scope 测试及 `test_confirmed_material_optimization.py` 的文件缺失测试。
+
+### material 封边的公式结果与显示数量
+
+Excel 将公式计算结果和数字格式分别保存。例如 Color Table 的封边公式结果为 `319.64`，整数格式 `0` 显示为 `320`。`parse_order_materials` 以汇总单元格的显示数量作为业务数量：有公式缓存时读取缓存并应用 `_display_number`；没有缓存时先按颜色合计原始明细，再应用汇总格格式，不能逐房间取整后相加。`Total Qty` 的封边校验也使用该格显示数量；真实合计不一致仍阻止写入。`General` 或保留小数的格式不强制取整数。
+
+读取只在内存计算，不保存 Excel，不更新正式材料。Server 确认页比较的是已确认数据库数量与本次解析结果；预览修正后仍需用户确认才能写入。回归覆盖公式缓存有/无、汇总后取整、整数/小数格式、真实不一致，以及源文件字节不变。
+
+### 订单中心表头与操作时间对齐
+
+表头的 `offset` 只移动文字显示位置，不改变表头和数据行共享的列宽；本次所有标题在原位置左移 5pt。消息列表的滚动条可能占用横向空间，`onGeometryChange` 读取列表内容的实际宽度，顶部当前操作/最近结果使用同一宽度及 12pt 内边距，使右侧时间对齐，并随窗口宽度变化更新。
+
+### Server 材料确认页的列表布局
+
+`ServerWriteConfirmationSheet` 将材料类型与颜色／规格分列，变化标签与数量变化共用固定列宽，表头和数据行采用相同间距。表头的 `offset(x: 10)` / `offset(x: -5)` 只微调材料类型和数量变化标题，不影响数据列。颜色与封边描述完全相同时仅在显示层去重，原始字段与确认 payload 不变。
+
+五金按订单与工厂单组合标识保存展开状态，默认展开，可单独折叠；商品名称、SKU、数量、商品单位各占一列，空单位显示“—”。首次写入仍只显示五金明细，已有事实的比较继续由 `existingHardwareChanges` 提供。布局不修改 SKU 校验、来料加工订单跳过选择、刷新失败阻断和最终确认写入入口。
+
+## Server 预览的“确认无变化”（2026-09-16）
+
+调用链：`ServerWriteConfirmationSheet` → `AppModel.acknowledgeServerPreview()` → `acknowledge-server-preview-memory` → `acknowledge_server_preview_memory()`。前端根据完整预览显示按钮；后端重新检查差异、校验、五金来源和已确认材料，不能只信任界面的按钮状态。
+
+这里的“监控基线”是下次扫描用于比较的 XML 文件版本，不是材料或优化完成的业务事实。它保存预览时的版本，不重新读取点击时的新文件，因此预览后文件变化不会被悄悄忽略。事务只更新 `server_scan_xml_state`；预览时记录本地业务数据的指纹，确认时在同一写事务中比较，发现旧预览便要求重读。成功后关闭预览并刷新待处理列表，失败则留在原界面。
+
+## 订单中心：人工五金编辑
+
+入口在订单展开后的「计算成本」右侧。「人工五金」打开 `ManualHardwareSheet`，通过 `manual-hardware --order-id` 读取本订单人工记录和工厂单；`search-hardware-products --query` 复用商品目录的 SKU/名称检索。列表按工厂单分组，不提供备注输入。
+
+新增和删除先保存在 SwiftUI 的弹窗状态中，不调用写库。删除可撤销，关闭含更改的弹窗需确认放弃。点击「保存更改」后，App 把版本、待新增记录和待删除 ID 作为 JSON 发送到 `save-manual-hardware --confirm-write`。`traveler_assistant/manual_hardware.py` 在同一个 SQLite 事务内校验工厂单归属、启用商品、正整数数量、全局忽略规则和编辑基线，再保存全部更改；任何错误整体回滚。
+
+`version` 是已读人工记录和工厂单状态的摘要，用来发现并发变化和阻止同一草稿重复新增，并非新的持久缓存。每条新增必须绑定本订单有效且未出库的工厂单；删除只允许当前订单的有效 manual 记录，保存时直接删除对应行。自动五金不变，不写 Traveler 或外部库存。保存后重新读取订单列表和详情。
+
+学习点：界面草稿解决“取消编辑”，数据库事务解决“保存一半”，版本校验解决“编辑期间别人已修改”；三者分别负责不同的错误边界。回归见 `tests/test_manual_hardware.py` 和 `testManualHardwareEditorContract()`。
+
+### 订单安排表单与按钮布局（2026-09-17）
+
+订单中心“订单安排”仍进入 `OrderAnnotationsSheet` → `OrderAnnotationsEditor`。方案一只调整 SwiftUI：上方订单说明，下方按“安排类型 / 开始日期 / 安装人”对齐的两行；日期用中性输入外观，月历与历史安装人菜单沿用原实现。未填写时点击“选择日期”创建本地草稿并打开月历，清除只移除草稿，点击保存才进入原 `saveOrderAnnotations` 调用链。实际安装仍只保存开始日期；没有新增字段或修改 SQLite 保存协议。
+
+按钮外部 `.frame(minWidth:)` 只扩大布局占位，不一定扩大按钮可见背景。要让不同字数的按钮边缘等距，应把统一宽度放到 `Button` 的 `label` 内，再用 `HStack(spacing: 8)` 排列。详情工具栏与工厂单表格间距从 12 改为 7，减少 5 个 SwiftUI 逻辑点；Retina 截图像素会随显示缩放变化。
+
+安装版验收补充：`ForEach(rows) { $day in ... }` 中的 `$day` 是指向数组元素的绑定。清除动作如果先从数组删除元素，再读取 `day.id`，会触发数组越界；应在修改数组前把 `day.id` 复制到局部常量，先处理弹窗状态，再按该标识删除。此问题已由 2026-09-17 安装版崩溃堆栈中的 `Array._checkSubscript` / `Binding.subscript.getter` 直接确认；修复后的真实点击须重新安装验证。
+
+### 助手看板：分批推进的阶段连接线（2026-09-17）
+
+`dashboardOrders` → `AssistantView.assistantProgressRail` → `assistantProgressSegmentState`。拆单、优化、生产、出货分别使用自己的完成数量与工厂单总数：零完成或总数为零显示灰色，部分完成显示绿色流动虚线，全部完成显示绿色实线；节点图标复用相同判断，部分完成和全部完成均标绿。减少动态效果开启时，部分完成的虚线保持静止。
+
+不要用“第一个未全部完成的阶段”锁住后续阶段：例如 PP0064 的 27 个工厂单中，3 个已优化且已生产，优化和生产应同时显示部分完成。这个函数只把已有数量转换为显示状态，不修改订单汇总阶段、生产或库存事实。回归比较生产数量从 0 变成 3 前后的阶段数组，确保前一阶段未完成不会阻止后一阶段更新。
+
+## 订单中止（2026-09-18）
+
+订单详情“中止” → SwiftUI 二次确认 → `AppModel.abortOrder` → `order-service` 的 `abort-order --confirm-write` → `order_index.abort_order` → SQLite `orders.stage = 已中止`。取消确认不会调用后台。
+
+普通进度由工厂单汇总，中止是人工终态：`upsert_order` 和 `summaries` 都保留它，否则下一次刷新就会丢失。生产选择校验及库存出库入口再次检查中止状态，防止旧预览绕过按钮禁用。历史事实的对账保存不受此限制，避免外部已经成功的单据丢失。隔离回归见 `tests/test_order_abort.py`。
+
+订单动作按钮宽度补记：生产、出货、中止统一使用 67 pt 的标签宽度（原生产标签为 72 pt，减 5），同用 regular controlSize 与 glassProminent 样式，使按钮包含系统内边距后的实际宽度一致。不要只给整个 Button 设置 minWidth：那是最小布局宽度，不保证可见按钮等宽。本次按用户要求不运行测试。
+
+订单动作按钮再次微调：三个标签由 67 pt 改为 57 pt，按钮 HStack 的 spacing 保持 8，不调整其他按钮宽度。
+
+订单状态筛选只读核对：当前 `OrderIndexStore.summaries` 不产生“待确认”或“数据异常”订单 stage；Swift 直接读取 stage，未用 validation_status 替换。`orderDashboardStatus` 仍能返回数据异常，但产品调用链未使用，仅回归测试引用。“待人工处理”仍在 temporary 分支，正常 list-index 先清理/转正旧临时订单投影，临时任务走 temporary_orders 与待处理中心。三个筛选项属于待清理的旧显示逻辑；归属确认和校验功能本身仍有用。本次只回答状态用途，没有删除选项或调整业务逻辑。
+
+状态筛选清理已实施：从 `orderDashboardStatuses` 移除已设计、待人工处理、待确认、数据异常，并同步 Swift 筛选断言。仅收窄用户可选菜单，不改变 summaries、后台初始值、归属确认、异常校验或真实数据库。菜单集合与数据库业务状态集合不是同一个概念。按用户此前要求未执行测试。
+
+成本按钮材料门槛：`canCalculateOrderCost` 从当前详情的正数量材料和读取状态派生，同时用于按钮禁用及计算入口守卫。切换订单在请求排队之前清空材料；详情响应校验订单身份，避免旧材料串到新订单。无需新增缓存或数据库字段。三个动作标签宽度由 57 pt 再减 20 到 37 pt，操作间距仍为 8。用户本次恢复正常测试，执行完整发布门禁。
+
+### 待处理中心提醒与执行状态（2026-09-18）
+
+`scanDashboardServer` 完成后留下“请在待处理中心预览并逐单确认写入”；“稍后处理”只关闭弹窗，不启动后台任务。订单中心的 `OrderDashboardActivityInput.operationRunning` 与助手的 `currentAssistantOperation` 都使用 `dashboardStatusIsInProgress`。该判断在匹配“正在 / 处理中”前剔除界面名称“待处理中心”，避免名称中的“处理中”触发虚假动画；“正在读取待处理中心”仍算真实执行状态。无需清空提醒或修改待处理业务事实。Swift 回归覆盖弹窗显示/关闭、助手共用条件以及真实执行提示。
+
+本次验证：普通环境 `test-release` 全部通过（Python 401 项、跳过 1；Swift UI、AIMES 离线、PP0067 workbook 通过），串行 `build-app` 成功。首次沙箱运行被 SwiftUI 宏插件限制阻断，非源码编译缺陷。旧安装版实测两页均误显示进行中；新安装版尚未验收：后台无有效签名 identity，Computer Use 明确禁止操作 Terminal，未尝试绕过或降级签名。未签名产物保留于 `/tmp/pp-flowhub-build/PP FlowHub.app`，需普通 Terminal 执行项目 `scripts/install-app` 后复测启动弹窗 → 稍后处理 → 切换助手（无同步图标或忙指示器）。
+
+
+### 材料确认预览与主界面密度（2026-09-18）
+
+`TopNavigationBar` 中材料确认 sheet 从 820 收至 720 pt，保持 650 pt 高度；`ServerWriteConfirmationSheet` 五金编码、数量、单位列统一为 100/56/40 pt，表头和内容采用相同列宽及 10 pt 间距，名称列弹性布局并允许换行。材料变化表同步收紧固定列，为颜色规格保留空间。删除界面设计说明按钮、状态与弹窗后，待处理按钮成为右侧末项。
+
+历史消息行的最小高度从 74 改为 59 pt，三行视口从 222 改为 177 pt；订单列表自动获得释放的 45 pt。SwiftUI 使用逻辑点（pt），Retina 屏幕上的物理像素由系统缩放。较长的阶段耗时消息仍可自然换行，避免裁掉文字。此调整不改变消息来源、预览确认和 SKU 校验逻辑。
+
+发布验证：完整 `test-release` 在普通执行环境通过（Python 401 项，跳过 1；Swift UI、AIMES 离线、PP0067 workbook 均通过）。一次串行构建成功；Computer Use 禁止操作 Terminal，但普通执行环境能访问有效 Apple Development identity，直接执行现有 `scripts/install-app` 成功完成签名、helper 验证及正式替换。安装版 0.4.1 (5) 的 SHA-256 为 `c2c0055e79b35018455ff3c91e26ce248bd58559dd10cc25e4b686c21727fbb6`。退出旧进程重开后，主界面已确认说明按钮消失、待处理入口移到右侧，三行历史消息和更多订单同时可见。
+
+现场预览验收限制：安装版选择 PP0064 只读预览后，等待超过 127 秒仍停在读取材料/核对工厂单阶段；尚未取得新预览截图，列间距、长名称和底部按钮的视觉验收未完成，详见根目录 design-qa.md。未执行 SKU 映射、忽略或最终业务写入。

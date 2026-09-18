@@ -44,6 +44,15 @@ def assert_source_isolation(database, sources, *, test_mode=False):
             raise RuleError('test_database_required', '测试来源不能写入正式数据库，请使用独立的测试 state-dir。')
 
 
+def hardware_fingerprint(rows):
+    """Only canonical SKU quantities define current automatic hardware facts."""
+    totals = Counter()
+    for row in rows:
+        totals[(str(row['order_id']), str(row['factory_order']), str(row['product_code']))] += float(row['quantity'])
+    values = [(*key, quantity) for key, quantity in sorted(totals.items())]
+    return hashlib.sha256(json.dumps(values, ensure_ascii=False).encode()).hexdigest()
+
+
 def replace_factory_hardware(connection, factory_order, rows, *, source_path='', observed_at='', reason='Server 五金同步', allow_empty=False):
     """完整校验后按工厂单替换自动五金；调用方负责外层事务提交。"""
     factory_order = str(factory_order).strip().upper()
@@ -52,7 +61,7 @@ def replace_factory_hardware(connection, factory_order, rows, *, source_path='',
         raise ValueError('五金替换缺少工厂单号')
     if not rows and not allow_empty:
         return False
-    columns = ('order_id', 'factory_order', 'scope', 'product_code', 'source_code', 'name', 'spec', 'quantity', 'unit', 'source_type', 'source_path', 'active', 'remarks', 'updated_at')
+    columns = ('order_id', 'factory_order', 'scope', 'product_code', 'quantity', 'source_type', 'source_path', 'remarks', 'updated_at')
     now = observed_at or datetime.now().astimezone().isoformat(timespec='seconds')
     normalized = []
     for row in rows:
@@ -63,8 +72,8 @@ def replace_factory_hardware(connection, factory_order, rows, *, source_path='',
         quantity = float(row.get('quantity', 0))
         if not math.isfinite(quantity) or quantity < 0 or not row.get('order_id'):
             raise ValueError('五金替换包含无效数量或订单')
-        normalized.append({**dict.fromkeys(columns, ''), **row, 'factory_order': factory_order,
-            'scope': 'factory_order', 'source_type': 'aicnc', 'active': 1,
+        normalized.append({**dict.fromkeys(columns, ''), **{key: value for key, value in row.items() if key in columns}, 'factory_order': factory_order,
+            'scope': 'factory_order', 'source_type': 'aicnc',
             'source_path': row.get('source_path') or str(source_path), 'quantity': quantity, 'updated_at': now})
     if len({str(row['order_id']).strip().upper() for row in normalized}) > 1:
         raise ValueError('同一工厂单的五金不能分属多个订单')
@@ -74,11 +83,18 @@ def replace_factory_hardware(connection, factory_order, rows, *, source_path='',
     cursor = connection.execute("select * from hardware_items where factory_order=? and source_type='aicnc' order by id", (factory_order,))
     names = [col[0] for col in cursor.description]
     before = [dict(zip(names, row)) for row in cursor.fetchall()]
-    business = ('order_id', 'factory_order', 'product_code', 'source_code', 'name', 'spec', 'quantity', 'unit', 'active')
-    signature = lambda items: Counter(tuple(row.get(key, '') for key in business) for row in items)
+    # Validate every SKU before deleting any old rows. Catalog labels may
+    # change; neither mapping rules nor source names may rebind saved facts.
+    from .core import RuleError
+    for row in normalized:
+        product = connection.execute(
+            "select code,name,status,catalog_present from products where code=?",
+            (row['product_code'],)).fetchone()
+        if product is None or not product[1] or not product[3] or product[2] not in ('', '启用'):
+            raise RuleError('hardware_product_invalid', f"五金必须映射到启用商品 SKU：{row['product_code']}")
+    fingerprint = hardware_fingerprint(normalized)
     version = connection.execute('select fingerprint from hardware_source_versions where factory_order=?', (factory_order,)).fetchone()
-    fingerprint = hashlib.sha256(json.dumps(sorted(signature(normalized).elements()), ensure_ascii=False).encode()).hexdigest()
-    if signature(before) == signature(normalized) and version and version[0] == fingerprint:
+    if hardware_fingerprint(before) == fingerprint and version and version[0] == fingerprint:
         return False
     # SAVEPOINT prevents a caught insertion error from committing an earlier deletion.
     if not connection.in_transaction:
@@ -119,7 +135,7 @@ def audit_factory_hardware(connection, factory_order, now=None):
     if not documents:
         return
     current = Counter()
-    for code, quantity in connection.execute('select product_code,quantity from hardware_items where factory_order=? and active=1', (factory_order,)):
+    for code, quantity in connection.execute('select product_code,quantity from hardware_items where factory_order=?', (factory_order,)):
         current[str(code).strip().upper()] += float(quantity)
     totals = []
     for number, content in documents:
@@ -144,8 +160,8 @@ def hardware_integrity_findings(connection):
     has_versions = bool(connection.execute("select 1 from sqlite_master where name='hardware_source_versions'").fetchone())
     for factory, order in connection.execute("select factory_order,order_id from factory_orders where aimes_status='active'"):
         by_path = {}
-        for path, code, source_code, name, spec, qty, unit in connection.execute("select source_path,product_code,source_code,name,spec,quantity,unit from hardware_items where factory_order=? and source_type='aicnc' and active=1", (factory,)):
-            by_path.setdefault(path, []).append((code, source_code, name, spec, qty, unit))
+        for path, code, qty in connection.execute("select source_path,product_code,quantity from hardware_items where factory_order=? and source_type='aicnc'", (factory,)):
+            by_path.setdefault(path, []).append((code, qty))
         paths = list(by_path)
         repeated = any(Counter(by_path[a]) == Counter(by_path[b]) for i, a in enumerate(paths) for b in paths[i+1:])
         if repeated:
@@ -188,7 +204,7 @@ def preserve_confirmed_shipment(connection, factory_order):
         order by d.document_number""", (factory_order,)).fetchall()
     if not rows:
         return
-    connection.execute("""update factory_orders set outbound_status='已出库',outbound_document=?,
+    connection.execute("""update factory_orders set stage='已出货',outbound_document=?,
         outbound_mode='inventory',outbound_completed_at=coalesce(nullif(outbound_completed_at,''),?)
         where factory_order=?""",
         ('、'.join(row[0] for row in rows), max(row[1] for row in rows), factory_order))

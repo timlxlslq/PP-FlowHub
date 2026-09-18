@@ -1,13 +1,13 @@
 """Manual production facts and order-level material consumption.
 
-These tables deliberately do not reuse ``production_batches``.  That table is
-the evidence imported from AIMES/CNC reports; this module records the user's
-actual production and the material quantities consumed by that production.
+Records describe confirmed production, never source-folder batch labels.
+Factory orders link directly to a single production record.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import uuid
 from datetime import datetime
@@ -35,6 +35,15 @@ def material_key(row: dict) -> str:
     return product_code
 
 
+def production_material_code(row: dict) -> str:
+    """The App submits the confirmed SKU as key; journals retain that payload."""
+    key = _normal(row.get("key")).upper()
+    code = _normal(row.get("product_code")).upper()
+    if key and code and key != code:
+        raise RuleError("production_material_sku", "生产材料 key 与商品 SKU 不一致")
+    return material_key({"product_code": code or key})
+
+
 def _material_row(row: sqlite3.Row | dict) -> dict:
     result = {name: _normal(row[name]) for name in (
         "product_code", "material_type", "color", "thickness", "edge", "unit"
@@ -51,13 +60,23 @@ def _connect(config: Config) -> sqlite3.Connection:
     return connection
 
 
+def assert_order_active(connection: sqlite3.Connection, order_id: str) -> None:
+    # Legacy standalone inventory databases may not contain the order index.
+    if not connection.execute("select 1 from sqlite_master where type='table' and name='orders'").fetchone():
+        return
+    row = connection.execute("select stage from orders where order_id=?", (_normal(order_id).upper(),)).fetchone()
+    if row is not None and row[0] == "已中止":
+        raise RuleError("order_aborted", "订单已中止，不能继续生产或出库")
+
+
 def _selected_factory_rows(connection: sqlite3.Connection, order_id: str, factory_orders: Iterable[str]) -> list[sqlite3.Row]:
+    assert_order_active(connection, order_id)
     selected = sorted({_normal(value).upper() for value in factory_orders if _normal(value)})
     if not selected:
         raise RuleError("production_selection", "生产必须至少选择一个工厂单")
     placeholders = ",".join("?" for _ in selected)
     rows = connection.execute(
-        f"""select factory_order, factory_name, order_id, ownership_status, optimized, outbound_status
+        f"""select factory_order, factory_name, order_id, ownership_status, (stage<>'已拆单') as optimized, case when stage='已出货' then '已出库' else '未出库' end as outbound_status
             from factory_orders
             where order_id=? and aimes_status='active' and factory_order in ({placeholders})
             order by factory_order""",
@@ -73,8 +92,8 @@ def _selected_factory_rows(connection: sqlite3.Connection, order_id: str, factor
 def _consumed(connection: sqlite3.Connection, order_id: str) -> dict[str, float]:
     rows = connection.execute(
         """select product_code, coalesce(sum(quantity), 0) quantity
-           from manual_production_batch_materials m
-           join manual_production_batches b on b.batch_id=m.batch_id
+           from production_materials m
+           join production_records b on b.batch_id=m.batch_id
            where m.order_id=? and b.status='completed'
            group by product_code""",
         (order_id,),
@@ -105,7 +124,7 @@ def _historical_material_product_codes(
     """Resolve current material facts to inventory SKUs for legacy documents.
 
     New production writes already store material quantities in
-    ``manual_production_batch_materials``.  Older inventory documents retain
+    ``production_materials``.  Older inventory documents retain
     SKU/quantity in the audit JSON, so compare their saved SKU directly with
     the currently confirmed order-material SKU; never rematch by attributes.
     """
@@ -170,12 +189,12 @@ def _legacy_inventory_consumed(
         for factory_order in set(links):
             legacy = connection.execute(
                 """select b.batch_id
-                   from manual_production_batch_factories f
-                   join manual_production_batches b on b.batch_id=f.batch_id
+                   from factory_orders f
+                   join production_records b on b.batch_id=f.production_record_id
                    where f.order_id=? and f.factory_order=?
                      and b.status='completed' and b.source='legacy-outbound-migration'
                      and not exists (
-                         select 1 from manual_production_batch_materials m
+                         select 1 from production_materials m
                          where m.batch_id=b.batch_id
                      ) limit 1""",
                 (order_id, factory_order),
@@ -230,7 +249,7 @@ def cumulative_production_materials(
 
         for raw in current_materials:
             item = dict(raw)
-            key = _normal(item.get("key")) or material_key(item)
+            key = production_material_code(item)
             if key not in by_key:
                 raise RuleError(
                     "production_material_unknown",
@@ -278,9 +297,9 @@ def production_preview(config: Config, order_id: str, factory_orders: Iterable[s
         not_optimized = [row["factory_order"] for row in factories if not bool(row["optimized"])]
         if not_optimized:
             raise RuleError("production_not_optimized", "以下工厂单尚未优化，不能生产：" + "、".join(not_optimized), factory_orders=not_optimized)
-        already_produced = [row["factory_order"] for row in factories if connection.execute(
-            """select 1 from manual_production_batch_factories f
-               join manual_production_batches b on b.batch_id=f.batch_id
+        already_produced = [row["factory_order"] for row in factories if row["outbound_status"] == "已出库" or connection.execute(
+            """select 1 from factory_orders f
+               join production_records b on b.batch_id=f.production_record_id
                where f.order_id=? and f.factory_order=? and b.status='completed' limit 1""",
             (normalized, row["factory_order"]),
         ).fetchone()]
@@ -343,7 +362,7 @@ def prepare_production(config: Config, order_id: str, factory_orders: Iterable[s
         raise RuleError("production_material_empty", "请至少选择一项本次实际消耗的板材或封边数量")
     for key, quantity in requested.items():
         remaining = available[key]["remaining_quantity"]
-        if quantity < 0 or quantity > remaining + 1e-9:
+        if not math.isfinite(quantity) or quantity < 0 or quantity > remaining + 1e-9:
             raise RuleError("production_material_quantity", f"材料 {key} 的生产数量超过剩余可用数量：{remaining:g}")
     selected_materials = []
     for key, quantity in requested.items():
@@ -361,88 +380,61 @@ def prepare_production(config: Config, order_id: str, factory_orders: Iterable[s
             "key": key,
         })
     now = _now()
-    batch_number = f"MP-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
+    request_id = uuid.uuid4().hex
     return {
         **preview,
-        "batch_number": batch_number,
+        "request_id": request_id,
         "production_time": now,
         "status": "draft",
         "materials": selected_materials,
     }
 
 
-def record_completed_production(
-    connection: sqlite3.Connection,
-    draft: dict,
-) -> dict:
-    """Record a successfully completed production in an existing transaction."""
-    order_id = _normal(draft.get("order_id")).upper()
-    batch_number = _normal(draft.get("batch_number"))
-    factory_orders = [
-        _normal(value).upper()
-        for value in draft.get("selected_factory_orders", [])
-        if _normal(value)
-    ]
-    if not order_id or not batch_number or not factory_orders:
-        raise RuleError("production_record", "生产完成记录缺少订单、批次或工厂单")
+def record_completed_production(connection: sqlite3.Connection, draft: dict) -> dict:
+    """Save one confirmed production; each factory can be linked only once.
 
-    existing = connection.execute(
-        "select 1 from manual_production_batches where batch_number=?",
-        (batch_number,),
-    ).fetchone()
-    if existing is not None:
-        raise RuleError("production_duplicate", f"生产批次已经记录：{batch_number}")
-
-    now = _normal(draft.get("production_time")) or _now()
-    cursor = connection.execute(
-        """insert into manual_production_batches(
-               batch_number, order_id, production_time, source, status, created_at, updated_at
-           ) values(?,?,?,?,?,?,?)""",
-        (batch_number, order_id, now, "manual", "completed", now, _now()),
-    )
-    batch_id = cursor.lastrowid
-    for factory_order in sorted(set(factory_orders)):
-        connection.execute(
-            "insert into manual_production_batch_factories(batch_id, order_id, factory_order) values(?,?,?)",
-            (batch_id, order_id, factory_order),
-        )
-    for item in draft.get("materials", []):
-        quantity = float(item.get("quantity", 0) or 0)
-        if quantity <= 0:
-            continue
-        connection.execute(
-            """insert into manual_production_batch_materials(
-                   batch_id, order_id, product_code, quantity
-               ) values(?,?,?,?)""",
-            (
-                batch_id,
-                order_id,
-                _normal(item.get("product_code")).upper(),
-                quantity,
-            ),
-        )
-    return {
-        "ok": True,
-        "batch_number": batch_number,
-        "order_id": order_id,
-        "factory_orders": sorted(set(factory_orders)),
-        "status": "completed",
-    }
-
-
-def complete_production_batch(config: Config, batch_number: str) -> dict:
-    connection = _connect(config)
-    try:
-        row = connection.execute("select * from manual_production_batches where batch_number=?", (_normal(batch_number),)).fetchone()
-        if row is None:
-            raise RuleError("production_batch_unknown", f"找不到生产批次：{batch_number}")
-        if row["status"] == "prepared":
-            connection.execute("update manual_production_batches set status='completed', updated_at=? where batch_id=?", (_now(), row["batch_id"]))
-            connection.commit()
-        factories = [r[0] for r in connection.execute("select factory_order from manual_production_batch_factories where batch_id=? order by factory_order", (row["batch_id"],)).fetchall()]
-        return {"ok": True, "batch_number": row["batch_number"], "order_id": row["order_id"], "factory_orders": factories, "status": "completed"}
-    finally:
-        connection.close()
+    The caller owns the transaction, including the inventory operation journal.
+    Materials carry order ownership, so the record itself has no order_id.
+    """
+    order_id = _normal(draft.get('order_id')).upper()
+    factories = sorted({_normal(v).upper() for v in draft.get('selected_factory_orders', []) if _normal(v)})
+    if not factories:
+        raise RuleError('production_record', '生产完成记录缺少工厂单')
+    owners = {}
+    for factory in factories:
+        row = connection.execute('select order_id,production_record_id,stage,aimes_status from factory_orders where factory_order=?',(factory,)).fetchone()
+        if row is None or not row[0] or (order_id and row[0] != order_id):
+            raise RuleError('production_factory_unknown', f'工厂单归属不一致：{factory}')
+        if row[1] is not None or row[2] in ('已生产','已出货'):
+            raise RuleError('production_duplicate', f'工厂单已经记录生产：{factory}')
+        if row[2] != '已优化' or row[3] != 'active':
+            raise RuleError('production_not_optimized', f'工厂单尚未优化或已失效：{factory}')
+        owners[factory] = row[0]
+    materials = []
+    for item in draft.get('materials', []):
+        owner = _normal(item.get('order_id') or order_id).upper()
+        if owner not in owners.values():
+            raise RuleError('production_record', '生产材料缺少明确的参与订单归属')
+        quantity = float(item.get('quantity', 0) or 0)
+        if not math.isfinite(quantity) or quantity < 0:
+            raise RuleError('production_material_quantity', '生产材料数量必须为有限非负数')
+        if quantity:
+            materials.append((owner, production_material_code(item), quantity))
+    now = _now()
+    cursor = connection.execute('''insert into production_records(production_time,source,status,created_at,updated_at)
+        values(?,?,'completed',?,?)''',(_normal(draft.get('production_time')) or now,'manual',now,now))
+    record_id = cursor.lastrowid
+    for factory in factories:
+        changed = connection.execute('''update factory_orders set production_record_id=?, stage='已生产'
+            where factory_order=? and production_record_id is null''',(record_id,factory)).rowcount
+        if changed != 1:
+            raise RuleError('production_duplicate', f'工厂单已经记录生产：{factory}')
+    for owner, code, quantity in materials:
+        connection.execute('''insert into production_materials(batch_id,order_id,product_code,quantity)
+            values(?,?,?,?) on conflict(batch_id,order_id,product_code)
+            do update set quantity=production_materials.quantity+excluded.quantity''',(record_id,owner,code,quantity))
+    return {'ok':True,'production_record_id':record_id,'order_ids':sorted(set(owners.values())),
+            'factory_orders':factories,'status':'completed'}
 
 
 def migrate_legacy_production_state(config: Config) -> dict:
@@ -451,9 +443,9 @@ def migrate_legacy_production_state(config: Config) -> dict:
     migrated = []
     try:
         rows = connection.execute(
-            """select factory_order, order_id, outbound_status, outbound_document
+            """select factory_order, order_id, (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status, outbound_document
                from factory_orders where aimes_status='active' and order_id<>''
-                 and (outbound_status in ('已出库','需要更新') or trim(coalesce(outbound_document,''))<>'')"""
+                 and ((case when stage='已出货' then '已出库' else '未出库' end) in ('已出库','需要更新') or trim(coalesce(outbound_document,''))<>'')"""
         ).fetchall()
         for row in rows:
             if row["outbound_status"] == "需要更新" and _normal(row["outbound_document"]):
@@ -463,25 +455,24 @@ def migrate_legacy_production_state(config: Config) -> dict:
                 # the existing document is retained as historical hardware
                 # shipment evidence and the factory is treated as shipped.
                 connection.execute(
-                    "update factory_orders set outbound_status='已出库', updated_at=? where factory_order=? and order_id=?",
+                    "update factory_orders set stage='已出货', updated_at=? where factory_order=? and order_id=?",
                     (_now(), row["factory_order"], row["order_id"]),
                 )
             exists = connection.execute(
-                """select 1 from manual_production_batch_factories f join manual_production_batches b on b.batch_id=f.batch_id
+                """select 1 from factory_orders f join production_records b on b.batch_id=f.production_record_id
                    where f.order_id=? and f.factory_order=? and b.status='completed' limit 1""",
                 (row["order_id"], row["factory_order"]),
             ).fetchone()
             if exists:
                 continue
             now = _now()
-            batch_number = f"LEGACY-{row['factory_order']}-{uuid.uuid4().hex[:6].upper()}"
             cursor = connection.execute(
-                """insert into manual_production_batches(batch_number, order_id, production_time, source, status, created_at, updated_at)
-                   values(?,?,?,?,?,?,?)""",
-                (batch_number, row["order_id"], "", "legacy-outbound-migration", "completed", now, now),
+                """insert into production_records(production_time, source, status, created_at, updated_at)
+                   values(?,?,?,?,?)""",
+                ("", "legacy-outbound-migration", "completed", now, now),
             )
             connection.execute(
-                "insert into manual_production_batch_factories(batch_id, order_id, factory_order) values(?,?,?)",
+                "update factory_orders set production_record_id=? where order_id=? and factory_order=?",
                 (cursor.lastrowid, row["order_id"], row["factory_order"]),
             )
             migrated.append(row["factory_order"])
@@ -502,7 +493,7 @@ def assert_shipment_allowed(config: Config, order_id: str, factory_orders: Itera
                 blocked.append(f"{row['factory_order']}（已经出货）")
                 continue
             if not connection.execute(
-                """select 1 from manual_production_batch_factories f join manual_production_batches b on b.batch_id=f.batch_id
+                """select 1 from factory_orders f join production_records b on b.batch_id=f.production_record_id
                    where f.order_id=? and f.factory_order=? and b.status='completed' limit 1""",
                 (normalized, row["factory_order"]),
             ).fetchone():

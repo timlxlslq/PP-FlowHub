@@ -57,7 +57,7 @@ _PLYWOOD_NOMINAL_THICKNESS = {
     "M0003": "14.5",
     "M0004": "18",
 }
-_SCHEMA_READY_MARKER = "ensure_schema_material_sku_v1"
+_SCHEMA_READY_MARKER = "ensure_schema_production_simplification_v1"
 
 
 def _product_key(value: object) -> str:
@@ -366,6 +366,75 @@ def _execute_schema_statements(
         raise sqlite3.OperationalError("incomplete schema statement")
 
 
+def _simplify_production_schema(connection: sqlite3.Connection) -> None:
+    """Upgrade confirmed production facts atomically; never infer new quantities."""
+    connection.execute('''create table if not exists production_records(
+        batch_id integer primary key,
+        production_time text not null default '',
+        source text not null default 'manual',
+        status text not null default 'completed',
+        created_at text not null,
+        updated_at text not null
+    )''')
+    connection.execute('''create table if not exists production_materials(
+        batch_id integer not null references production_records(batch_id),
+        order_id text not null,
+        product_code text not null check(trim(product_code)<>''),
+        quantity real not null check(quantity>=0),
+        primary key(batch_id,order_id,product_code),
+        foreign key(product_code) references products(code) on update cascade on delete restrict
+    )''')
+    links = connection.execute('select batch_id,order_id,factory_order from manual_production_batch_factories').fetchall()
+    if len({r[2] for r in links}) != len(links):
+        raise ValueError('生产迁移失败：一个工厂单存在多次生产记录，需先核对')
+    factory_exists = connection.execute("select 1 from sqlite_master where type='table' and name='factory_orders'").fetchone()
+    if links and not factory_exists:
+        raise ValueError('生产迁移失败：缺少工厂单表')
+    if factory_exists:
+        columns = {r[1] for r in connection.execute('pragma table_info(factory_orders)')}
+        if 'production_record_id' not in columns:
+            connection.execute('alter table factory_orders add column production_record_id integer references production_records(batch_id)')
+        for batch_id, order_id, factory in links:
+            row = connection.execute('select order_id,production_record_id from factory_orders where factory_order=?',(factory,)).fetchone()
+            if row is None or row[0] != order_id or row[1] not in (None,batch_id):
+                raise ValueError(f'生产迁移失败：工厂单关联不一致 {factory}')
+        if 'production_batch_id' in columns:
+            connection.execute('alter table factory_orders drop column production_batch_id')
+    connection.execute('''insert into production_records(batch_id,production_time,source,status,created_at,updated_at)
+        select batch_id,production_time,source,status,created_at,updated_at from manual_production_batches''')
+    connection.execute('''insert into production_materials(batch_id,order_id,product_code,quantity)
+        select batch_id,order_id,product_code,quantity from manual_production_batch_materials''')
+    for batch_id, order_id, factory in links:
+        connection.execute('update factory_orders set production_record_id=? where factory_order=? and order_id=?',(batch_id,factory,order_id))
+    if factory_exists:
+        columns = {r[1] for r in connection.execute('pragma table_info(factory_orders)')}
+        if 'stage' not in columns:
+            connection.execute("alter table factory_orders add column stage text not null default '已拆单' check(stage in ('已拆单','已优化','已生产','已出货'))")
+            shipped = "outbound_status" if "outbound_status" in columns else "'未出库'"
+            optimized = "optimized" if "optimized" in columns else "0"
+            connection.execute(f"""update factory_orders set stage=case
+                when {shipped}='已出库' then '已出货'
+                when exists(select 1 from production_records r where r.batch_id=production_record_id and r.status='completed') then '已生产'
+                when {optimized}=1 then '已优化' else '已拆单' end""")
+        for column in ('optimized','outbound_status'):
+            if column in columns:
+                connection.execute(f'alter table factory_orders drop column {column}')
+    for table in ('manual_production_batch_factories','manual_production_batch_materials','manual_production_batches','batch_evidence','production_batches'):
+        connection.execute(f'drop table if exists {table}')
+    connection.execute('create index if not exists idx_production_material_order on production_materials(order_id,product_code)')
+    if connection.execute("select 1 from sqlite_master where type='table' and name='orders'").fetchone():
+        columns = {r[1] for r in connection.execute('pragma table_info(orders)')}
+        for column in ('material_status','validation_status','validation_message'):
+            if column in columns:
+                connection.execute(f'alter table orders drop column {column}')
+
+    if connection.execute("select 1 from sqlite_master where type='table' and name='source_files'").fetchone():
+        if 'batch_number' in {r[1] for r in connection.execute('pragma table_info(source_files)')}:
+            connection.execute('alter table source_files drop column batch_number')
+    if connection.execute("select 1 from sqlite_master where type='table' and name='active_issues'").fetchone():
+        connection.execute("delete from active_issues where kind='batch_conflict'")
+
+
 def ensure_schema(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = connect_database(path)
@@ -421,6 +490,20 @@ def ensure_schema(path: Path) -> None:
                 )
             connection.commit()
             return
+        # Keep a recoverable pre-upgrade snapshot outside the rolling daily
+        # backup policy.  No business rows are changed before this succeeds.
+        if connection.execute("select 1 from sqlite_master where type='table' and name='manual_production_batches'").fetchone():
+            backup_directory = path.parent / "schema-migration-backups"
+            backup_directory.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            backup_path = backup_directory / f"{path.stem}-before-production-v1-{stamp}.sqlite3"
+            backup = sqlite3.connect(backup_path)
+            try:
+                connection.backup(backup)
+                if backup.execute("pragma integrity_check").fetchone() != ("ok",):
+                    raise ValueError("结构迁移前备份完整性检查失败")
+            finally:
+                backup.close()
         connection.execute("begin immediate")
         _execute_schema_statements(
             connection,
@@ -458,17 +541,6 @@ def ensure_schema(path: Path) -> None:
                 value_json text not null,
                 updated_at text not null,
                 primary key(cache_name, cache_key)
-            );
-            create table if not exists production_batches(
-                batch_id integer primary key,
-                batch_number text not null unique,
-                production_date text not null default '',
-                source text not null default '',
-                status text not null default 'active',
-                first_seen text not null default '',
-                last_seen text not null default '',
-                created_at text not null,
-                updated_at text not null
             );
             create table if not exists products(
                 category text not null default '',
@@ -561,20 +633,15 @@ def ensure_schema(path: Path) -> None:
                 factory_order text not null default '',
                 scope text not null default 'factory_order',
                 product_code text not null check(trim(product_code) <> ''),
-                source_code text not null default '',
-                name text not null default '',
-                spec text not null default '',
                 quantity real not null default 0,
-                unit text not null default '',
                 source_type text not null default 'aicnc',
                 source_path text not null default '',
-                active integer not null default 1,
                 remarks text not null default '',
                 updated_at text not null,
                 foreign key(product_code) references products(code)
                     on update cascade on delete restrict
             );
-            create index if not exists idx_hardware_items_order on hardware_items(order_id, factory_order, active);
+            create index if not exists idx_hardware_items_order on hardware_items(order_id, factory_order);
             create table if not exists outbound_documents(
                 id integer primary key,
                 document_number text not null unique,
@@ -717,10 +784,34 @@ def ensure_schema(path: Path) -> None:
         hardware_columns = {
             row[1] for row in connection.execute("pragma table_info(hardware_items)").fetchall()
         }
-        if "source_code" not in hardware_columns:
+        if "active" in hardware_columns:
+            # One transaction with the schema migration: a failed DROP must
+            # restore the deleted rows too. Only manual tombstones are known.
+            unexpected = connection.execute(
+                "select count(*) from hardware_items where active<>1 and source_type<>'manual'"
+            ).fetchone()[0]
+            if unexpected:
+                raise ValueError("存在失效的自动五金，请先核对来源后再迁移")
+            connection.execute("delete from hardware_items where active<>1")
+            connection.execute("drop index if exists idx_hardware_items_order")
+            connection.execute("alter table hardware_items drop column active")
             connection.execute(
-                "alter table hardware_items add column source_code text not null default ''"
+                "create index idx_hardware_items_order on hardware_items(order_id,factory_order)"
             )
+        retired_hardware_columns = {"source_code", "name", "spec", "unit"} & hardware_columns
+        if retired_hardware_columns:
+            # Quantities in persisted facts are already canonical. Never run
+            # report rail folding or piece-to-pair conversion during migration.
+            for column in sorted(retired_hardware_columns):
+                connection.execute(f"alter table hardware_items drop column {column}")
+            from .hardware_facts import hardware_fingerprint
+            for factory, in connection.execute("select factory_order from hardware_source_versions").fetchall():
+                rows = [dict(zip(("order_id", "factory_order", "product_code", "quantity"), row))
+                        for row in connection.execute(
+                            "select order_id,factory_order,product_code,quantity from hardware_items "
+                            "where factory_order=? and source_type='aicnc'", (factory,)).fetchall()]
+                connection.execute("update hardware_source_versions set fingerprint=? where factory_order=?",
+                                   (hardware_fingerprint(rows), factory))
         inventory_rule_columns = {
             row[1] for row in connection.execute(
                 "pragma table_info(inventory_resolution_rules)"
@@ -1146,14 +1237,9 @@ def ensure_schema(path: Path) -> None:
                        factory_order text not null default '',
                        scope text not null default 'factory_order',
                        product_code text not null check(trim(product_code) <> ''),
-                       source_code text not null default '',
-                       name text not null default '',
-                       spec text not null default '',
                        quantity real not null default 0,
-                       unit text not null default '',
                        source_type text not null default 'aicnc',
                        source_path text not null default '',
-                       active integer not null default 1,
                        remarks text not null default '',
                        updated_at text not null,
                        foreign key(product_code) references products(code)
@@ -1166,8 +1252,15 @@ def ensure_schema(path: Path) -> None:
             )
             connection.execute("drop table hardware_items_legacy")
             connection.execute(
-                "create index idx_hardware_items_order on hardware_items(order_id,factory_order,active)"
+                "create index idx_hardware_items_order on hardware_items(order_id,factory_order)"
             )
+
+        connection.execute("""create trigger if not exists protect_hardware_product_unit
+            before update of unit on products
+            when new.unit <> old.unit and exists (
+                select 1 from hardware_items where product_code=old.code
+            )
+            begin select raise(abort, 'hardware_product_unit_locked'); end""")
 
         if not _has_product_foreign_key(connection, "inventory_resolution_rules"):
             rule_names = [
@@ -1277,6 +1370,7 @@ def ensure_schema(path: Path) -> None:
                     factory_value,
                     updated_at=updated_at or _now(),
                 )
+        _simplify_production_schema(connection)
         integrity_rows = connection.execute("pragma integrity_check").fetchall()
         if integrity_rows != [("ok",)]:
             raise ValueError(

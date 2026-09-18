@@ -7,7 +7,6 @@ from pathlib import Path
 
 from .core import Config
 from .database import connect_database, ensure_schema
-from .inventory import InventoryMappings
 
 
 def order_detail(config: Config, order_id: str) -> dict:
@@ -45,9 +44,9 @@ def order_detail(config: Config, order_id: str) -> dict:
         factories = connection.execute(
             """
             select factory_order, factory_name, sales_order_name, split_time,
-                   report_state, ownership_status, has_hardware, optimized,
-                   outbound_status, outbound_document, outbound_mode,
-                   outbound_fingerprint, production_batch_id
+                   report_state, ownership_status, has_hardware, (stage in ('已优化','已生产','已出货')) as optimized,
+                   (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status, outbound_document, outbound_mode,
+                   outbound_fingerprint
             from factory_orders where order_id=? and aimes_status='active' order by factory_order
             """, (order_id.upper(),)
         ).fetchall()
@@ -70,33 +69,15 @@ def order_detail(config: Config, order_id: str) -> dict:
         ).fetchall()
         material_records = [dict(row) for row in materials]
         hardware_rows = connection.execute(
-            """
-            select factory_order, scope, product_code, source_code, name, spec, quantity,
-                   unit, source_type, active, remarks, updated_at
-            from hardware_items
-            where order_id=? and active=1
-              and exists (
-                  select 1 from factory_orders
-                  where factory_orders.factory_order=hardware_items.factory_order
-                    and factory_orders.order_id=hardware_items.order_id
-                    and factory_orders.aimes_status='active'
-              )
-            order by factory_order, product_code, name
-            """, (order_id.upper(),)
+            """select h.factory_order, h.scope, h.product_code, p.name, p.spec, h.quantity,
+                      p.unit, h.source_type, h.remarks, h.updated_at
+               from hardware_items h join products p on p.code=h.product_code
+               where h.order_id=? and exists (
+                   select 1 from factory_orders f where f.factory_order=h.factory_order
+                     and f.order_id=h.order_id and f.aimes_status='active'
+               ) order by h.factory_order,h.product_code,h.id""", (order_id.upper(),)
         ).fetchall()
-        mappings = InventoryMappings(config.workflow_database)
-        hardware = []
-        for row in hardware_rows:
-            record = dict(row)
-            # This is a read-time projection only.  The raw hardware_items
-            # columns remain the source name, source code and canonical SKU.
-            # Ignore rules decide whether a source row is accepted before it
-            # becomes a fact; changing one later must not hide or rebind a
-            # hardware fact that already carries its confirmed SKU.
-            record["display_name"] = mappings.display_name_for_hardware(
-                str(row[2] or ""), str(row[4] or ""), str(row[3] or "")
-            )
-            hardware.append(record)
+        hardware = [{**dict(row), "display_name": row["name"]} for row in hardware_rows]
         outbound = connection.execute(
             """
             select od.document_number, od.document_type,

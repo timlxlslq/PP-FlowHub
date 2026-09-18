@@ -6,15 +6,12 @@ import AppKit
 import UniformTypeIdentifiers
 
 let orderDashboardStatuses = [
-    "已设计",
     "已拆单待优化",
     "部分优化",
     "已优化",
     "部分出货",
     "已出货",
-    "待人工处理",
-    "待确认",
-    "数据异常",
+    "已中止",
 ]
 
 let orderDashboardMetricColumnCount = 8
@@ -93,7 +90,7 @@ private struct OrderDashboardTableLayout {
 }
 
 let dashboardMessageVisibleRowCount = 3
-let dashboardMessageRowHeight: CGFloat = 74
+let dashboardMessageRowHeight: CGFloat = 59
 let dashboardMessageViewportHeight = CGFloat(dashboardMessageVisibleRowCount) * dashboardMessageRowHeight
 let dashboardMessageHoverDelay: TimeInterval = 1.0
 let dashboardMessageHoverCloseGrace: TimeInterval = 0.8
@@ -565,7 +562,7 @@ func orderDashboardExpandedID(current: String?, tapped: String, forceOpen: Bool 
     return tapped
 }
 
-struct OrderDashboardClickContainer<Content: View>: NSViewRepresentable {
+struct OrderDashboardClickContainer<Content: View>: View {
     let content: Content
     let onSingleClick: () -> Void
     let onDoubleClick: () -> Void
@@ -580,22 +577,25 @@ struct OrderDashboardClickContainer<Content: View>: NSViewRepresentable {
         self.onDoubleClick = onDoubleClick
     }
 
+    var body: some View {
+        content.overlay {
+            OrderDashboardClickReceiver(onSingleClick: onSingleClick, onDoubleClick: onDoubleClick)
+        }
+    }
+}
+
+// This view has no intrinsic content size and never hosts SwiftUI content.
+// Its parent supplies the hit area; gestures cannot feed size constraints back.
+struct OrderDashboardClickReceiver: NSViewRepresentable {
+    let onSingleClick: () -> Void
+    let onDoubleClick: () -> Void
+
     func makeCoordinator() -> Coordinator {
         Coordinator(onSingleClick: onSingleClick, onDoubleClick: onDoubleClick)
     }
 
     func makeNSView(context: Context) -> NSView {
-        let container = NSView()
-        let hosting = NSHostingView(rootView: content)
-        hosting.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(hosting)
-        NSLayoutConstraint.activate([
-            hosting.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            hosting.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            hosting.topAnchor.constraint(equalTo: container.topAnchor),
-            hosting.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-        ])
-
+        let container = NSView(frame: .zero)
         let doubleClick = NSClickGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.doubleClick)
@@ -616,9 +616,6 @@ struct OrderDashboardClickContainer<Content: View>: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.onSingleClick = onSingleClick
         context.coordinator.onDoubleClick = onDoubleClick
-        if let hosting = nsView.subviews.compactMap({ $0 as? NSHostingView<Content> }).first {
-            hosting.rootView = content
-        }
     }
 
     final class Coordinator: NSObject, NSGestureRecognizerDelegate {
@@ -705,7 +702,7 @@ func orderDashboardStageMatchesFilter(_ stage: String, statusFilter: String) -> 
 }
 
 func orderDashboardIsCompleted(_ stage: String) -> Bool {
-    stage == "已出货"
+    stage == "已出货" || stage == "已中止"
 }
 
 func orderDashboardStatusHelp(status: String, validationMessage: String) -> String {
@@ -801,7 +798,7 @@ func shouldPresentPendingCenterAfterAimes(
     presentIfNeeded && (!pendingAimesReviews.isEmpty || !aimesFormatWarnings.isEmpty)
 }
 
-struct DashboardMessage: Identifiable {
+struct DashboardMessage: Identifiable, Equatable {
     let id: String
     let source: String
     let time: String
@@ -862,7 +859,9 @@ func dashboardMessageDetail(_ text: String) -> String {
 
 func dashboardStatusIsInProgress(_ text: String) -> Bool {
     if ["✅", "⚠️", "❌"].contains(where: { text.hasPrefix($0) }) { return false }
-    let detail = dashboardMessageDetail(text)
+    // The screen name contains “处理中”, but is not an active operation.
+    // Remove only that noun so “正在读取待处理中心…” still counts as running.
+    let detail = dashboardMessageDetail(text).replacingOccurrences(of: "待处理中心", with: "")
     return detail.contains("正在") || detail.contains("处理中")
 }
 
@@ -1418,159 +1417,105 @@ private struct DashboardMessageTraceHost<Content: View>: View {
     }
 }
 
+// A transient value snapshot, not a data cache. Equality excludes order selection,
+// materials, hardware and detail loading; real message/progress changes still render.
+struct OrderDashboardActivityInput: Equatable {
+    let pendingServerChanges: [ServerChangePreview]
+    let pendingAimesReviews: [AimesReviewItem]
+    let ignoredAimesFactories: [AimesReviewItem]
+    let assignedAimesFactories: [AimesReviewItem]
+    let dashboardActivity: [InventoryStep]
+    let dashboardSyncStatus: String
+    let dashboardSyncStatusTime: String
+    let dashboardInventoryOperationStatus: String
+    let dashboardInventoryOperationStatusTime: String
+    let dashboardAimesStatus: String
+    let dashboardAimesStatusTime: String
+    let dashboardServerStatus: String
+    let dashboardServerStatusTime: String
+    let dashboardOperationDetails: [String: [String]]
+    let dashboardOperationProgress: [String: [String]]
+    let dashboardOperationDurations: [String: TimeInterval]
+    let dashboardOperationStageDurations: [String: [DashboardOperationDuration]]
+    let dashboardSessionMessages: [DashboardMessage]
+    let inventoryRunning: Bool
+    let dashboardOperationStartUptimes: [String: TimeInterval]
+    let aimesWarningDetails: [String]
+
+    init(model: AppModel) {
+        pendingServerChanges = model.pendingServerChanges
+        pendingAimesReviews = model.pendingAimesReviews
+        ignoredAimesFactories = model.ignoredAimesFactories
+        assignedAimesFactories = model.assignedAimesFactories
+        dashboardActivity = model.dashboardActivity
+        dashboardSyncStatus = model.dashboardSyncStatus
+        dashboardSyncStatusTime = model.dashboardSyncStatusTime
+        dashboardInventoryOperationStatus = model.dashboardInventoryOperationStatus
+        dashboardInventoryOperationStatusTime = model.dashboardInventoryOperationStatusTime
+        dashboardAimesStatus = model.dashboardAimesStatus
+        dashboardAimesStatusTime = model.dashboardAimesStatusTime
+        dashboardServerStatus = model.dashboardServerStatus
+        dashboardServerStatusTime = model.dashboardServerStatusTime
+        dashboardOperationDetails = model.dashboardOperationDetails
+        dashboardOperationProgress = model.dashboardOperationProgress
+        dashboardOperationDurations = model.dashboardOperationDurations
+        dashboardOperationStageDurations = model.dashboardOperationStageDurations
+        dashboardSessionMessages = model.dashboardSessionMessages
+        inventoryRunning = model.inventoryRunning
+        dashboardOperationStartUptimes = model.dashboardOperationStartUptimes
+        aimesWarningDetails = dashboardAimesWarningDetails(model.aimesWarnings)
+    }
+
+    var operationRunning: Bool {
+        inventoryRunning || [dashboardSyncStatus, dashboardInventoryOperationStatus,
+                             dashboardAimesStatus, dashboardServerStatus]
+            .contains(where: dashboardStatusIsInProgress)
+    }
+
+    var dashboardMessageOperationDetails: [String: [String]] {
+        var merged = dashboardOperationDetails
+        for (source, progress) in dashboardOperationProgress {
+            var details = merged[source] ?? []
+            for message in progress where !details.contains(message) { details.append(message) }
+            merged[source] = details
+        }
+        return merged
+    }
+
+    func dashboardElapsedTime(_ source: String) -> TimeInterval? {
+        guard let start = dashboardOperationStartUptimes[source] else { return nil }
+        return max(0, ProcessInfo.processInfo.systemUptime - start)
+    }
+}
+
+#if TESTING
+enum OrderDashboardRenderProbe {
+    static var messageBodyCount = 0
+    static func recordMessageBody() { messageBodyCount += 1 }
+}
+#endif
+
 struct OrderDashboardView: View {
     @ObservedObject var model: AppModel
-    @State private var expandedOrderID: String?
-    @State private var detailOrder: OrderDashboardItem?
-    @State private var orderArrangementOrder: OrderDashboardItem?
-    @State private var selectedFactoryID: String?
-    @State private var selectedFactoryIDs: Set<String> = []
     @State private var searchText = ""
     @State private var statusFilter = "未完成订单"
-    @State private var showFactoryStock = false
-    @State private var showProductionSheet = false
-    @State private var pendingShipment: OrderShipmentRequest?
-    @State private var showOutboundScope = false
     @State private var showServerFolderImporter = false
-    @State private var activeMessageID: String?
-
-    private var filteredOrders: [OrderDashboardItem] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return model.dashboardOrders.filter { item in
-            let factoryText = item.factories.map { "\($0.factoryOrder) \($0.orderName)" }.joined(separator: " ")
-            let matchesQuery = query.isEmpty || item.orderId.lowercased().contains(query) || item.sourceFolder.lowercased().contains(query) || factoryText.lowercased().contains(query)
-            let matchesStatus = orderDashboardStageMatchesFilter(item.stage, statusFilter: statusFilter)
-            return matchesQuery && matchesStatus
-        }
-    }
-
-    private var selectedFactory: OrderFactoryPreview? {
-        model.orderFactories.first { $0.factoryOrder == selectedFactoryID }
-    }
-
-    private var availableHardwareFactoryOrders: Set<String> {
-        Set(
-            model.orderFittings
-                .filter { $0.quantity > 0 }
-                .map { $0.factoryOrder }
-        )
-    }
-
-    @ViewBuilder
-    private func traceHost<Content: View>(
-        for message: DashboardMessage,
-        @ViewBuilder content: @escaping () -> Content
-    ) -> some View {
-        if dashboardMessageSupportsHoverDetail(message) {
-            DashboardMessageTraceHost(
-                message: message,
-                activeMessageID: $activeMessageID,
-                content: content
-            )
-        } else {
-            content()
-        }
-    }
 
     var body: some View {
-        dashboardSections
-            .padding(AppLayout.contentPadding)
-        .appPageFrame()
-        .onAppear {
-            model.startOrderDashboard()
-            openRequestedOrderIfAvailable()
-        }
-        .onChange(of: model.dashboardOrders.map(\.id)) { _, _ in
-            openRequestedOrderIfAvailable()
-        }
-        .sheet(item: $detailOrder) { item in
-            OrderDashboardDetailPage(
-                model: model,
-                order: item
-            )
-            .frame(minWidth: 960, minHeight: 680)
-        }
-        .sheet(item: $orderArrangementOrder) { item in
-            OrderAnnotationsSheet(model: model, order: item)
-        }
-        .sheet(isPresented: $model.showCostSheet) {
-            OrderCostSheet(model: model)
-                .frame(minWidth: 780, idealWidth: 980, minHeight: 560, idealHeight: 720)
-        }
-        .sheet(isPresented: $showFactoryStock) {
-            FactoryStockComparisonSheet(
-                model: model,
-                orderID: model.selectedOrderId
-            )
-            .frame(minWidth: 760, idealWidth: 900, minHeight: 520, idealHeight: 640)
-        }
-        .sheet(isPresented: $showProductionSheet) {
-            ProductionSheet(
-                model: model,
-                orderID: model.selectedOrderId,
-                factoryOrders: selectedFactoryIDs.sorted(),
-                onClose: { showProductionSheet = false }
-            )
-            .frame(width: 620, height: 560)
-        }
-        .sheet(item: $pendingShipment) { request in
-            OrderShipmentConfirmationSheet(
-                model: model,
-                orderID: request.orderID,
-                factoryOrders: request.factoryOrders,
-                onCancel: { pendingShipment = nil },
-                onConfirm: {
-                    pendingShipment = nil
-                    model.startDirectOrderShipment(
-                        orderID: request.orderID,
-                        factoryOrders: request.factoryOrders
-                    )
-                }
-            )
-            .frame(width: 620, height: 560)
-        }
-        .sheet(isPresented: $showOutboundScope) {
-            OutboundScopeSheet(
-                model: model,
-                orderID: model.selectedOrderId,
-                orderType: model.dashboardOrders.first(where: { $0.orderId == model.selectedOrderId })?.orderType ?? "owned",
-                factoryOrders: selectedFactoryIDs.sorted().filter { availableHardwareFactoryOrders.contains($0) },
-                hardwareFactoryOrders: availableHardwareFactoryOrders
-            )
-            .frame(width: 520, height: 430)
-        }
-        .alert(
-            "AIMES 获取失败",
-            isPresented: Binding(
-                get: { !model.aimesFailureAlert.isEmpty },
-                set: { if !$0 { model.aimesFailureAlert = "" } }
-            )
-        ) {
-            Button("知道了") { model.aimesFailureAlert = "" }
-        } message: {
-            Text("本次未能获取最新 AIMES 数据，Server 扫描将继续使用最近一次成功缓存。\n\n\(model.aimesFailureAlert)")
-        }
-        .fileImporter(
-            isPresented: $showServerFolderImporter,
-            allowedContentTypes: [.folder],
-            allowsMultipleSelection: false
-        ) { result in
-            guard case .success(let urls) = result, let folder = urls.first else { return }
-            model.prepareSelectedServerFolder(folder)
-        }
-        .sheet(isPresented: $model.showServerProcessingOptions) {
-            ServerProcessingOptionsSheet(model: model)
-                .frame(width: 520, height: 300)
-        }
-    }
-
-    private var dashboardSections: some View {
         VStack(alignment: .leading, spacing: AppLayout.sectionSpacing) {
             toolbar
-            dashboardActivityLog
-            orderTable
+            OrderDashboardActivityView(input: OrderDashboardActivityInput(model: model))
+                .equatable()
+            OrderDashboardListView(
+                model: model,
+                searchText: $searchText,
+                statusFilter: $statusFilter,
+                showServerFolderImporter: $showServerFolderImporter
+            )
         }
         .frame(maxHeight: .infinity, alignment: .top)
+        .padding(AppLayout.contentPadding)
+        .appPageFrame()
     }
 
     private var toolbar: some View {
@@ -1634,49 +1579,77 @@ struct OrderDashboardView: View {
         }
     }
 
-    private var dashboardActivityLog: some View {
-        let serverGroups = serverFolderChangeGroups(model.pendingServerChanges)
+}
+
+struct OrderDashboardActivityView: View, Equatable {
+    let input: OrderDashboardActivityInput
+    @State private var activeMessageID: String?
+    @State private var dashboardMessageContentWidth: CGFloat?
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.input == rhs.input }
+
+    @ViewBuilder
+    private func traceHost<Content: View>(
+        for message: DashboardMessage,
+        @ViewBuilder content: @escaping () -> Content
+    ) -> some View {
+        if dashboardMessageSupportsHoverDetail(message) {
+            DashboardMessageTraceHost(
+                message: message,
+                activeMessageID: $activeMessageID,
+                content: content
+            )
+        } else {
+            content()
+        }
+    }
+
+    var body: some View {
+#if TESTING
+        let _ = OrderDashboardRenderProbe.recordMessageBody()
+#endif
+        let serverGroups = serverFolderChangeGroups(input.pendingServerChanges)
         let aimesManualPaths = (
-            model.pendingAimesReviews + model.ignoredAimesFactories + model.assignedAimesFactories
+            input.pendingAimesReviews + input.ignoredAimesFactories + input.assignedAimesFactories
         ).map(\.sourcePath)
-        let serverManualPaths = model.pendingServerChanges.map(\.path)
+        let serverManualPaths = input.pendingServerChanges.map(\.path)
         // The sync status row represents the latest warning/error. Attach only
         // that activity's file path; do not aggregate paths from unrelated
         // Server/AIMES operations into the hovered message.
-        let latestActivityPaths = model.dashboardActivity.first {
+        let latestActivityPaths = input.dashboardActivity.first {
             $0.state == "failure" || $0.state == "warning"
         }?.paths ?? []
-        let aimesActionDetails: [String] = dashboardStatusIsInProgress(model.dashboardAimesStatus)
+        let aimesActionDetails: [String] = dashboardStatusIsInProgress(input.dashboardAimesStatus)
             ? []
             : dashboardAimesActionDetails(
-                pending: model.pendingAimesReviews,
-                ignored: model.ignoredAimesFactories,
-                assigned: model.assignedAimesFactories
-            ) + dashboardAimesWarningDetails(model.aimesWarnings)
+                pending: input.pendingAimesReviews,
+                ignored: input.ignoredAimesFactories,
+                assigned: input.assignedAimesFactories
+            ) + input.aimesWarningDetails
         let serverActionDetails: [String] = {
-            if dashboardStatusIsInProgress(model.dashboardServerStatus) {
+            if dashboardStatusIsInProgress(input.dashboardServerStatus) {
                 return []
             }
-            if model.pendingServerChanges.isEmpty {
+            if input.pendingServerChanges.isEmpty {
                 return ["Server 已完成扫描，当前没有新增、修改或删除的订单文件。"]
             }
             return ["待处理 Server 变化 \(serverGroups.count) 个文件夹："] + serverGroups.map {
                 let handling = $0.manualOnly ? "（临时文件夹）" : ""
-                let names = $0.changes.map { URL(fileURLWithPath: $0.path).lastPathComponent }.joined(separator: "、")
+                let names = $0.changes.map { displayPathName($0.path) }.joined(separator: "、")
                 return "\($0.folderName)\(handling)：\(names)"
             }
         }()
         let messages = dashboardMessages(
-            syncStatus: model.dashboardSyncStatus,
-            syncTime: model.dashboardSyncStatusTime,
-            inventoryStatus: model.dashboardInventoryOperationStatus,
-            inventoryTime: model.dashboardInventoryOperationStatusTime,
-            aimesStatus: model.dashboardAimesStatus,
-            aimesTime: model.dashboardAimesStatusTime,
-            serverStatus: model.dashboardServerStatus,
-            serverTime: model.dashboardServerStatusTime,
-            activity: model.dashboardActivity,
-            operationDetailsBySource: model.dashboardMessageOperationDetails,
+            syncStatus: input.dashboardSyncStatus,
+            syncTime: input.dashboardSyncStatusTime,
+            inventoryStatus: input.dashboardInventoryOperationStatus,
+            inventoryTime: input.dashboardInventoryOperationStatusTime,
+            aimesStatus: input.dashboardAimesStatus,
+            aimesTime: input.dashboardAimesStatusTime,
+            serverStatus: input.dashboardServerStatus,
+            serverTime: input.dashboardServerStatusTime,
+            activity: input.dashboardActivity,
+            operationDetailsBySource: input.dashboardMessageOperationDetails,
             manualPathsBySource: [
                 "sync": latestActivityPaths,
                 "aimes": aimesManualPaths,
@@ -1687,13 +1660,11 @@ struct OrderDashboardView: View {
                 "aimes": aimesActionDetails,
                 "server": serverActionDetails,
             ],
-            durationsBySource: model.dashboardOperationDurations,
-            operationDurationsBySource: model.dashboardOperationStageDurations,
-            sessionMessages: model.dashboardSessionMessages
+            durationsBySource: input.dashboardOperationDurations,
+            operationDurationsBySource: input.dashboardOperationStageDurations,
+            sessionMessages: input.dashboardSessionMessages
         )
-        let operationRunning = model.orderRunning
-            || model.inventoryRunning
-            || dashboardStatusIsInProgress(model.dashboardSyncStatus)
+        let operationRunning = input.operationRunning
         let visibleMessages = dashboardVisibleMessages(messages, isRunning: operationRunning)
         let currentOperation = dashboardCurrentOperation(messages: messages, isRunning: operationRunning)
         let scrollKey = dashboardMessageScrollKey(visibleMessages)
@@ -1740,6 +1711,11 @@ struct OrderDashboardView: View {
                                 }
                             }
                         }
+                        .onGeometryChange(for: CGFloat.self) { geometry in
+                            geometry.size.width
+                        } action: { width in
+                            dashboardMessageContentWidth = width
+                        }
                     }
                     .frame(height: dashboardMessageViewportHeight)
                     .onAppear { scrollMessagesToBottom(proxy, messages: messages) }
@@ -1764,7 +1740,7 @@ struct OrderDashboardView: View {
                 Spacer(minLength: 0)
                 if display.isRunning {
                     TimelineView(.periodic(from: .now, by: 1)) { _ in
-                        if let elapsed = model.dashboardElapsedTime(display.message.source) {
+                        if let elapsed = input.dashboardElapsedTime(display.message.source) {
                             Text("已用 \(operationDurationText(elapsed))")
                                 .font(.caption.monospacedDigit()).foregroundColor(.secondary)
                         }
@@ -1775,7 +1751,8 @@ struct OrderDashboardView: View {
                 }
             }
             .padding(.horizontal, 12)
-            .frame(height: 44)
+            .frame(width: dashboardMessageContentWidth, height: 44)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         } else {
             HStack(spacing: 10) {
@@ -1830,6 +1807,139 @@ struct OrderDashboardView: View {
         case "warning": return AppPalette.warning
         case "success": return AppPalette.success
         default: return AppPalette.accent
+        }
+    }
+
+}
+
+struct OrderDashboardListView: View {
+    @ObservedObject var model: AppModel
+    @State private var expandedOrderID: String?
+    @State private var detailOrder: OrderDashboardItem?
+    @State private var orderArrangementOrder: OrderDashboardItem?
+    @State private var selectedFactoryID: String?
+    @State private var selectedFactoryIDs: Set<String> = []
+    @Binding var searchText: String
+    @Binding var statusFilter: String
+    @State private var showFactoryStock = false
+    @State private var showManualHardware = false
+    @State private var showProductionSheet = false
+    @State private var pendingShipment: OrderShipmentRequest?
+    @State private var showOutboundScope = false
+    @Binding var showServerFolderImporter: Bool
+
+    private var filteredOrders: [OrderDashboardItem] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return model.dashboardOrders.filter { item in
+            let factoryText = item.factories.map { "\($0.factoryOrder) \($0.orderName)" }.joined(separator: " ")
+            let matchesQuery = query.isEmpty || item.orderId.lowercased().contains(query) || item.sourceFolder.lowercased().contains(query) || factoryText.lowercased().contains(query)
+            let matchesStatus = orderDashboardStageMatchesFilter(item.stage, statusFilter: statusFilter)
+            return matchesQuery && matchesStatus
+        }
+    }
+
+    private var selectedFactory: OrderFactoryPreview? {
+        model.orderFactories.first { $0.factoryOrder == selectedFactoryID }
+    }
+
+    private var availableHardwareFactoryOrders: Set<String> {
+        Set(
+            model.orderFittings
+                .filter { $0.quantity > 0 }
+                .map { $0.factoryOrder }
+        )
+    }
+
+    var body: some View {
+        orderTable
+        .onAppear {
+            model.startOrderDashboard()
+            openRequestedOrderIfAvailable()
+        }
+        .onChange(of: model.dashboardOrders.map(\.id)) { _, _ in
+            openRequestedOrderIfAvailable()
+        }
+        .sheet(item: $detailOrder) { item in
+            OrderDashboardDetailPage(
+                model: model,
+                order: item
+            )
+            .frame(minWidth: 960, minHeight: 680)
+        }
+        .sheet(item: $orderArrangementOrder) { item in
+            OrderAnnotationsSheet(model: model, order: item)
+        }
+        .sheet(isPresented: $model.showCostSheet) {
+            OrderCostSheet(model: model)
+                .frame(minWidth: 780, idealWidth: 980, minHeight: 560, idealHeight: 720)
+        }
+        .sheet(isPresented: $showFactoryStock) {
+            FactoryStockComparisonSheet(
+                model: model,
+                orderID: model.selectedOrderId
+            )
+            .frame(minWidth: 760, idealWidth: 900, minHeight: 520, idealHeight: 640)
+        }
+        .sheet(isPresented: $showManualHardware) {
+            ManualHardwareSheet(model: model, orderID: model.selectedOrderId)
+        }
+        .sheet(isPresented: $showProductionSheet) {
+            ProductionSheet(
+                model: model,
+                orderID: model.selectedOrderId,
+                factoryOrders: selectedFactoryIDs.sorted(),
+                onClose: { showProductionSheet = false }
+            )
+            .frame(width: 620, height: 560)
+        }
+        .sheet(item: $pendingShipment) { request in
+            OrderShipmentConfirmationSheet(
+                model: model,
+                orderID: request.orderID,
+                factoryOrders: request.factoryOrders,
+                onCancel: { pendingShipment = nil },
+                onConfirm: {
+                    pendingShipment = nil
+                    model.startDirectOrderShipment(
+                        orderID: request.orderID,
+                        factoryOrders: request.factoryOrders
+                    )
+                }
+            )
+            .frame(width: 620, height: 560)
+        }
+        .sheet(isPresented: $showOutboundScope) {
+            OutboundScopeSheet(
+                model: model,
+                orderID: model.selectedOrderId,
+                orderType: model.dashboardOrders.first(where: { $0.orderId == model.selectedOrderId })?.orderType ?? "owned",
+                factoryOrders: selectedFactoryIDs.sorted().filter { availableHardwareFactoryOrders.contains($0) },
+                hardwareFactoryOrders: availableHardwareFactoryOrders
+            )
+            .frame(width: 520, height: 430)
+        }
+        .alert(
+            "AIMES 获取失败",
+            isPresented: Binding(
+                get: { !model.aimesFailureAlert.isEmpty },
+                set: { if !$0 { model.aimesFailureAlert = "" } }
+            )
+        ) {
+            Button("知道了") { model.aimesFailureAlert = "" }
+        } message: {
+            Text("本次未能获取最新 AIMES 数据，Server 扫描将继续使用最近一次成功缓存。\n\n\(model.aimesFailureAlert)")
+        }
+        .fileImporter(
+            isPresented: $showServerFolderImporter,
+            allowedContentTypes: [.folder],
+            allowsMultipleSelection: false
+        ) { result in
+            guard case .success(let urls) = result, let folder = urls.first else { return }
+            model.prepareSelectedServerFolder(folder)
+        }
+        .sheet(isPresented: $model.showServerProcessingOptions) {
+            ServerProcessingOptionsSheet(model: model)
+                .frame(width: 520, height: 300)
         }
     }
 
@@ -1976,7 +2086,6 @@ struct OrderDashboardView: View {
                     tableCell(width: layout.flexibleColumnWidth) {
                         VStack(spacing: 4) {
                             Text(item.materialStatus)
-                            if !item.validationStatus.isEmpty { Text(item.validationStatus).font(.caption2).foregroundColor(.secondary) }
                         }
                     }
                     tableCell(width: layout.flexibleColumnWidth) {
@@ -2077,8 +2186,11 @@ struct OrderDashboardView: View {
                         )
                     },
                     onOpenScope: { showOutboundScope = true },
+                    onOpenManualHardware: { showManualHardware = true },
                     orderType: item.orderType,
-                    isCompletedOrder: orderDashboardIsCompleted(item.stage)
+                    isCompletedOrder: orderDashboardIsCompleted(item.stage),
+                    orderID: item.orderId,
+                    isAborted: item.stage == "已中止"
                 )
                 .padding(.horizontal, 12)
                 .padding(.bottom, 12)
@@ -2114,14 +2226,14 @@ struct OrderDashboardView: View {
               }) else { return }
         model.requestedOrderCenterOrderID = ""
         searchText = item.orderId
-        statusFilter = item.stage == "已出货" ? "已出货" : "未完成订单"
+        statusFilter = orderDashboardIsCompleted(item.stage) ? item.stage : "未完成订单"
         expandedOrderID = nil
     }
 
     private func tableHeader(_ title: String, width: CGFloat) -> some View {
         Text(title)
             .frame(minWidth: width, idealWidth: width, maxWidth: width, alignment: .center)
-            .offset(x: orderDashboardDataHeaderTitles.contains(title) ? orderDashboardDataHeaderOffset : 0)
+            .offset(x: (orderDashboardDataHeaderTitles.contains(title) ? orderDashboardDataHeaderOffset : 0) - 5)
     }
 
     private func tableCell<Content: View>(width: CGFloat, @ViewBuilder content: () -> Content) -> some View {
@@ -2443,8 +2555,12 @@ private struct OrderAnnotationsSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(order.orderId)
-                .font(.title2.weight(.semibold))
+            HStack(spacing: 14) {
+                Text("订单安排").font(.title.weight(.semibold))
+                Rectangle().fill(.secondary.opacity(0.35)).frame(width: 1, height: 22)
+                Text(order.orderId).font(.title2.weight(.medium)).foregroundStyle(.secondary)
+            }
+            .padding(.bottom, 14)
             OrderAnnotationsEditor(model: model, order: order)
         }
         .padding(AppLayout.contentPadding)
@@ -2481,33 +2597,41 @@ private struct OrderAnnotationsEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             ScrollView(.vertical) {
-                AppSurfaceCard(padding: 14) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("订单说明")
-                            .font(.headline)
-                        TextEditor(text: $note)
-                            .font(.body)
-                            .frame(minHeight: 54, maxHeight: 72)
-                            .padding(5)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(AppPalette.separator)
-                            )
-                            .overlay(alignment: .topLeading) {
-                                if note.isEmpty {
-                                    Text("填写客户要求、待确认事项或特殊交付说明")
-                                        .foregroundColor(.secondary)
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 12)
-                                        .allowsHitTesting(false)
-                                }
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("订单说明").font(.headline)
+                    TextEditor(text: $note)
+                        .font(.body)
+                        .scrollContentBackground(.hidden)
+                        .frame(height: 80)
+                        .padding(10)
+                        .background(.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppPalette.separator))
+                        .overlay(alignment: .topLeading) {
+                            if note.isEmpty {
+                                Text("填写客户要求、待确认事项或特殊交付说明")
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 15)
+                                    .padding(.vertical, 18)
+                                    .allowsHitTesting(false)
                             }
-
-                        installationRows(title: "计划安装日期", rows: $plannedDays)
-                        installationRows(title: "实际安装开始日期", rows: $actualDays)
-
+                        }
+                        .accessibilityLabel("订单说明")
+                    Divider().padding(.top, 8)
+                    HStack(spacing: 14) {
+                        Text("安排类型").frame(width: 140, alignment: .leading)
+                        Text("开始日期").frame(width: orderInstallationDateButtonWidth, alignment: .leading)
+                        Text("安装人/安装小组").frame(maxWidth: .infinity, alignment: .leading)
+                        Color.clear.frame(width: 24, height: 1)
                     }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    Divider()
+                    installationRows(title: "计划安装日期", rows: $plannedDays)
+                    Divider()
+                    installationRows(title: "实际安装开始日期", rows: $actualDays)
+                    Divider()
                 }
+                .padding(.vertical, 2)
             }
             .scrollIndicators(.automatic)
             .frame(maxHeight: 420)
@@ -2543,108 +2667,114 @@ private struct OrderAnnotationsEditor: View {
         title: String,
         rows: Binding<[OrderInstallationDraft]>
     ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(title).font(.subheadline.weight(.semibold))
-                Spacer(minLength: 0)
-                if rows.wrappedValue.isEmpty {
-                    Button {
-                        rows.wrappedValue.append(OrderInstallationDraft(date: Date(), installer: ""))
-                    } label: {
-                        Label("选择开始日期", systemImage: "plus")
-                    }
-                    .buttonStyle(.borderless)
-                }
-            }
+        HStack(alignment: .center, spacing: 14) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .frame(width: 140, alignment: .leading)
             if rows.wrappedValue.isEmpty {
-                Text("未填写")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                Button {
+                    let day = OrderInstallationDraft(date: Date(), installer: "")
+                    rows.wrappedValue.append(day)
+                    datePickerRowID = day.id
+                } label: {
+                    Label("选择日期", systemImage: "calendar")
+                        .padding(.horizontal, 9)
+                        .frame(width: orderInstallationDateButtonWidth, height: 36, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .background(.white.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppPalette.separator))
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("\(title)：选择日期")
+                Text("选择日期后填写安装人")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Color.clear.frame(width: 24, height: 1)
             } else {
-                ForEach(rows) { $day in
-                    HStack(spacing: 8) {
-                        Button {
-                            datePickerRowID = datePickerRowID == day.id ? nil : day.id
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "calendar")
-                                    .foregroundColor(AppPalette.accent)
-                                Text(orderInstallationPickerDisplayDate(day.date))
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .padding(.horizontal, 9)
-                            .frame(width: orderInstallationDateButtonWidth, height: 30, alignment: .leading)
-                        }
-                        .buttonStyle(.glass)
-                        .popover(
-                            isPresented: Binding(
-                                get: { datePickerRowID == day.id },
-                                set: { isPresented in
-                                    if !isPresented && datePickerRowID == day.id {
-                                        datePickerRowID = nil
-                                    }
+                VStack(spacing: 10) {
+                    ForEach(rows) { $day in
+                        HStack(spacing: 14) {
+                            Button {
+                                datePickerRowID = datePickerRowID == day.id ? nil : day.id
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "calendar")
+                                        .foregroundColor(.secondary)
+                                    Text(orderInstallationPickerDisplayDate(day.date))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
                                 }
-                            ),
-                            // Present beside the date button; the taller order sheet keeps the
-                            // complete calendar visible instead of clipping it below the form.
-                            arrowEdge: .trailing
-                        ) {
-                            AppGlassDatePickerCalendar(selection: $day.date, compact: true)
-                                .appGlassDatePickerPopoverSurface()
-                        }
-
-                        HStack(spacing: 0) {
-                            TextField("安装人/安装小组", text: $day.installer)
-                                .textFieldStyle(.plain)
-                                .padding(.leading, 8)
-                                .frame(minHeight: 30)
-                            Menu {
-                                let suggestions = orderInstallationInstallerSuggestions(from: model.dashboardOrders)
-                                if suggestions.isEmpty {
-                                    Text("暂无历史安装人")
-                                } else {
-                                    ForEach(suggestions, id: \.self) { installer in
-                                        Button(installer) {
-                                            day.installer = installer
+                                .padding(.horizontal, 9)
+                                .frame(width: orderInstallationDateButtonWidth, height: 36, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                            .background(.white.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppPalette.separator))
+                            .accessibilityLabel("\(title)：\(orderInstallationPickerDisplayDate(day.date))")
+                            .popover(
+                                isPresented: Binding(
+                                    get: { datePickerRowID == day.id },
+                                    set: { isPresented in
+                                        if !isPresented && datePickerRowID == day.id {
+                                            datePickerRowID = nil
                                         }
                                     }
+                                ),
+                                // Present beside the date button; the taller order sheet keeps the
+                                // complete calendar visible instead of clipping it below the form.
+                                arrowEdge: .trailing
+                            ) {
+                                AppGlassDatePickerCalendar(selection: $day.date, compact: true)
+                                    .appGlassDatePickerPopoverSurface()
+                            }
+
+                            HStack(spacing: 0) {
+                                TextField("安装人/安装小组", text: $day.installer)
+                                    .textFieldStyle(.plain)
+                                    .padding(.leading, 8)
+                                    .frame(minHeight: 36)
+                                Menu {
+                                    let suggestions = orderInstallationInstallerSuggestions(from: model.dashboardOrders)
+                                    if suggestions.isEmpty {
+                                        Text("暂无历史安装人")
+                                    } else {
+                                        ForEach(suggestions, id: \.self) { installer in
+                                            Button(installer) {
+                                                day.installer = installer
+                                            }
+                                        }
+                                    }
+                                } label: {
+                                    Text("")
+                                        .frame(width: 28, height: 30)
                                 }
+                                .menuStyle(.borderlessButton)
+                                .accessibilityLabel("选择以前使用过的安装人或安装小组")
+                                .help("选择以前使用过的安装人或安装小组")
+                            }
+                            .background(.white.opacity(0.55), in: RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppPalette.separator))
+                            .frame(maxWidth: .infinity)
+                            Button {
+                                // Capture identity before mutation: $day indexes the original array.
+                                let removedID = day.id
+                                if datePickerRowID == removedID {
+                                    datePickerRowID = nil
+                                }
+                                rows.wrappedValue.removeAll { $0.id == removedID }
                             } label: {
-                                Text("")
-                                    .frame(width: 28, height: 30)
+                                Image(systemName: "trash")
                             }
-                            .menuStyle(.borderlessButton)
-                            .accessibilityLabel("选择以前使用过的安装人或安装小组")
-                            .help("选择以前使用过的安装人或安装小组")
+                            .buttonStyle(.borderless)
+                            .foregroundColor(AppPalette.danger)
+                            .frame(width: 24)
+                            .accessibilityLabel("清除\(title)")
                         }
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(AppPalette.separator)
-                        )
-                        .frame(maxWidth: .infinity)
-                        Button {
-                            rows.wrappedValue.removeAll { $0.id == day.id }
-                            if datePickerRowID == day.id {
-                                datePickerRowID = nil
-                            }
-                        } label: {
-                            Image(systemName: "trash")
-                        }
-                        .buttonStyle(.borderless)
-                        .foregroundColor(AppPalette.danger)
                     }
                 }
-                let summaries = rows.wrappedValue.prefix(1).map {
-                    OrderInstallationDay(
-                        date: orderInstallationDraftValue($0.date),
-                        installer: $0.installer
-                    )
-                }
-                Text("开始：\(orderInstallationDisplayDate(summaries.map(\.date).sorted().first ?? "—"))")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
             }
         }
+        .padding(.vertical, 4)
     }
 
     private func save() {
@@ -2686,15 +2816,25 @@ struct OrderDashboardDetailCard: View {
     let onOpenProduction: () -> Void
     let onOpenOutbound: () -> Void
     let onOpenScope: () -> Void
+    let onOpenManualHardware: () -> Void
     let orderType: String
     let isCompletedOrder: Bool
+    let orderID: String
+    let isAborted: Bool
+    @State private var showAbortConfirmation = false
 
     var body: some View {
         AppSurfaceCard(padding: 14) {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 7) {
                 detailActions
                 factoriesPanel
             }
+        }
+        .alert("是否中止订单 \(orderID)？", isPresented: $showAbortConfirmation) {
+            Button("取消", role: .cancel) {}
+            Button("确认中止", role: .destructive) { model.abortOrder(orderID: orderID) }
+        } message: {
+            Text("中止后订单将标记为“已中止”，不再继续生产或出库。已有材料、生产和出库记录会保留，不会退回库存。")
         }
     }
 
@@ -2706,24 +2846,39 @@ struct OrderDashboardDetailCard: View {
         let outboundActionTitle = orderDashboardOutboundActionTitle(selectedFactoryIDs, statuses: outboundStatuses)
         return HStack(alignment: .center, spacing: 12) {
             HStack(spacing: 8) {
-                Button("查询库存") { onQueryStock() }
-                    .appActionButton(minWidth: 96)
+                Button { onQueryStock() } label: {
+                    Text("查询库存").frame(minWidth: 72)
+                }
+                    .appActionButton(minWidth: 0)
                     .disabled(isCompletedOrder || model.selectedOrderId.isEmpty || model.orderRunning || !model.orderPreviewReady)
-                    .help(isCompletedOrder ? "订单已出货，不能再查询库存" : "查询当前订单库存")
-                Button("计算成本") {
+                    .help(isCompletedOrder ? "订单已结束，不能再查询库存" : "查询当前订单库存")
+                Button {
                     model.calculateSelectedOrderCost()
+                } label: {
+                    Text("计算成本").frame(minWidth: 72)
                 }
-                .appActionButton(minWidth: 96)
-                .disabled(model.selectedOrderId.isEmpty || model.orderRunning)
+                .appActionButton(minWidth: 0)
+                .disabled(model.selectedOrderId != orderID || !model.canCalculateOrderCost)
+                .help(model.canCalculateOrderCost ? "按已保存材料和五金计算成本" : "订单暂无可用材料数据，材料保存后可计算成本")
+                Button { onOpenManualHardware() } label: {
+                    Text("人工五金").frame(minWidth: 72)
+                }
+                    .appActionButton(minWidth: 0)
+                    .disabled(model.selectedOrderId.isEmpty || model.orderRunning || model.inventoryRunning)
+                    .help("查看、新增或删除本订单的人工五金")
                 if orderType != "owned" {
-                    Button("设置出库范围") { onOpenScope() }
-                        .appActionButton(minWidth: 112)
+                    Button { onOpenScope() } label: {
+                        Text("设置出库范围").frame(minWidth: 88)
+                    }
+                        .appActionButton(minWidth: 0)
                         .disabled(isCompletedOrder || model.selectedOrderId.isEmpty || model.orderRunning)
-                        .help(isCompletedOrder ? "订单已出货，不能再设置出库范围" : "设置当前订单出库范围")
+                        .help(isCompletedOrder ? "订单已结束，不能再设置出库范围" : "设置当前订单出库范围")
                 }
-                Button("生产") { onOpenProduction() }
+                Button { onOpenProduction() } label: {
+                    Text("生产").frame(width: 37)
+                }
                     .buttonStyle(.glassProminent)
-                    .appActionButton(minWidth: 96)
+                    .appActionButton(minWidth: 0)
                     .disabled(
                         isCompletedOrder || model.orderRunning || model.inventoryRunning || selectedFactoryIDs.isEmpty ||
                         orderDashboardHasProducedSelection(selectedFactoryIDs, produced: produced) ||
@@ -2732,9 +2887,11 @@ struct OrderDashboardDetailCard: View {
                         }
                     )
                     .help("选择一个或多个已优化且未生产的工厂单，登记本次实际消耗的订单材料")
-                Button(outboundActionTitle) { onOpenOutbound() }
+                Button { onOpenOutbound() } label: {
+                    Text(outboundActionTitle).frame(width: 37)
+                }
                     .buttonStyle(.glassProminent)
-                    .appActionButton(minWidth: 96)
+                    .appActionButton(minWidth: 0)
                     .disabled(
                         isCompletedOrder
                         || model.orderRunning
@@ -2752,9 +2909,16 @@ struct OrderDashboardDetailCard: View {
                     )
                     .help(
                         isCompletedOrder
-                            ? "订单已出货，不能再处理出库"
+                            ? "订单已结束，不能再处理出库"
                             : "只有已生产且未出库的工厂单可以出货；有五金则出库五金，没有五金则只更新出货状态"
                     )
+                Button(role: .destructive) { showAbortConfirmation = true } label: {
+                    Text("中止").frame(width: 37)
+                }
+                    .buttonStyle(.glassProminent)
+                    .appActionButton(minWidth: 0)
+                    .disabled(isAborted || model.orderRunning || model.inventoryRunning || orderID.isEmpty)
+                    .help("中止整个订单，保留已有业务记录")
             }
             .fixedSize(horizontal: true, vertical: false)
             Spacer(minLength: 12)
@@ -3064,8 +3228,8 @@ struct ProductionSheet: View {
             orderID: orderID,
             factoryOrders: factoryOrders,
             materials: model.productionMaterials,
-            onResult: { batchNumber, preparationError in
-                guard let batchNumber, !batchNumber.isEmpty else {
+            onResult: { requestID, preparationError in
+                guard let requestID, !requestID.isEmpty else {
                     operationState = .failure
                     operationMessage = preparationError ?? "生产准备失败；本次未操作库存系统，也未写入本地生产完成记录"
                     return
@@ -3076,7 +3240,7 @@ struct ProductionSheet: View {
                     orderID: orderID,
                     factoryOrders: factoryOrders,
                     materials: model.productionMaterials,
-                    batchNumber: batchNumber
+                    requestID: requestID
                 ) { result in
                     switch result.state {
                     case .success:
@@ -3591,7 +3755,7 @@ struct PendingCenterSheet: View {
                                 .frame(width: 16)
                             VStack(alignment: .leading, spacing: 2) {
                                                     let timeSuffix = change.eventTime.isEmpty ? "" : " · \(changeTimeLabel(change))"
-                                                    Text("\(changeTypeName(change.changeType))：\(URL(fileURLWithPath: change.path).lastPathComponent)\(timeSuffix)")
+                                                    Text("\(changeTypeName(change.changeType))：\(displayPathName(change.path))\(timeSuffix)")
                                                         .font(.caption)
                                                     Text(change.path)
                                     .font(.caption2)
@@ -4198,7 +4362,7 @@ struct ServerChangesSheet: View {
                                                         .foregroundColor(changeColor(change.changeType))
                                                         .frame(width: 16)
                                                     VStack(alignment: .leading, spacing: 2) {
-                                                        Text("\(serverChangeTypeName(change.changeType))：\(URL(fileURLWithPath: change.path).lastPathComponent)")
+                                                        Text("\(serverChangeTypeName(change.changeType))：\(displayPathName(change.path))")
                                                             .font(.caption)
                                                         Text(change.path)
                                                             .font(.caption2)
@@ -4306,8 +4470,7 @@ struct HardwareSourceSelectionSheet: View {
     // The full card is one button, including its rows and padded empty space.
     private func sourceCard(_ candidate: HardwareSourceCandidate, factoryOrder: String) -> some View {
         let selected = model.hardwareSourceChoices[factoryOrder] == candidate.id
-        let reportURL = URL(fileURLWithPath: candidate.path)
-        let folder = reportURL.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
+        let folder = displayPathName(displayParentPath(displayParentPath(candidate.path)))
         return Button {
             model.hardwareSourceChoices[factoryOrder] = candidate.id
         } label: {
@@ -4317,7 +4480,7 @@ struct HardwareSourceSelectionSheet: View {
                         .foregroundStyle(selected ? Color.accentColor : .secondary)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(folder).font(.headline)
-                        Text(reportURL.lastPathComponent).font(.subheadline)
+                        Text(displayPathName(candidate.path)).font(.subheadline)
                         Text(candidate.path)
                             .font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -4357,7 +4520,7 @@ struct HardwareSourceSelectionSheet: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("选择此报表，\(folder)，\(reportURL.lastPathComponent)")
+        .accessibilityLabel("选择此报表，\(folder)，\(displayPathName(candidate.path))")
         .accessibilityValue(selected ? "已选中" : "未选中")
     }
 
@@ -4369,9 +4532,10 @@ struct ServerWriteConfirmationSheet: View {
     @State private var ignoreTarget: PendingInventoryMappingTarget?
     @State private var skippedHardwareOrderIDs: Set<String> = []
     @State private var showWriteConfirmation = false
+    @State private var collapsedFactoryIDs: Set<String> = []
     private var canConfirmWrite: Bool {
         !model.orderRunning && !model.inventoryRunning && !orders.isEmpty &&
-        !model.serverWriteConfirmationFinished && activeHardwareRequirements.isEmpty && invalidOrderValidations.isEmpty
+        !model.serverWriteConfirmationFinished && !model.serverWritePreviewNeedsRefresh && activeHardwareRequirements.isEmpty && invalidOrderValidations.isEmpty
     }
     private var orders: [ServerWriteOrderPreview] { model.serverWritePreview?.orders ?? [] }
     private var activeHardwareRequirements: [ServerHardwareMappingRequirement] {
@@ -4392,9 +4556,14 @@ struct ServerWriteConfirmationSheet: View {
                     AppStatusBadge(text: "写入前确认", kind: .warning)
                     Text("确认 Server 订单材料")
                         .font(.title2.weight(.semibold))
-                    Text("Server 材料已经按房间归属解析到订单；正式数据库尚未写入。板材、封边和已明确归属的工厂单五金在本界面一次确认。")
-                        .font(.callout)
-                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                if activeHardwareRequirements.isEmpty && orders.contains(where: { !$0.hardwareChanges.isEmpty || $0.factories.contains(where: { !$0.hardware.isEmpty }) }) {
+                    Label("SKU 校验已通过", systemImage: "checkmark.circle.fill")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(AppPalette.success)
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(AppPalette.success.opacity(0.08), in: Capsule())
                 }
             }
 
@@ -4427,6 +4596,10 @@ struct ServerWriteConfirmationSheet: View {
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
 
+            if model.serverWritePreviewNeedsRefresh && !model.orderRunning {
+                Button("重试刷新五金预览") { model.refreshServerHardwarePreview() }
+                    .disabled(model.inventoryRunning)
+            }
             hardwareMappingSection
 
             if !invalidOrderValidations.isEmpty {
@@ -4461,34 +4634,21 @@ struct ServerWriteConfirmationSheet: View {
             if orders.isEmpty {
                 ContentUnavailableView("没有可确认的订单材料", systemImage: "exclamationmark.triangle", description: Text("请稍后重新扫描，或检查 Server 材料文件。"))
             } else {
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack(alignment: .firstTextBaseline, spacing: 12) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("本次扫描发现的变化")
-                                .font(.title3.weight(.semibold))
-                            Text("订单材料和工厂单五金写入范围；已出货工厂单自动排除")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                        }
-                        Spacer()
-                        Text("\(orders.count) 个订单")
-                            .font(.subheadline.weight(.medium))
-                            .foregroundColor(AppPalette.accent)
-                    }
-                    Divider().padding(.top, 10)
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(orders) { order in
-                                orderPreviewCard(order)
-                            }
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 14) {
+                        ForEach(orders) { order in
+                            orderPreviewCard(order)
                         }
                     }
-                    .frame(minHeight: 260, maxHeight: 440)
+                    .padding(.trailing, 6)
                 }
+                .frame(maxHeight: .infinity)
             }
 
             HStack {
-                Text(!invalidOrderValidations.isEmpty
+                Text(model.serverWritePreview?.canAcknowledgeNoChanges == true
+                    ? "材料和五金没有待写入变化；确认后更新文件夹监控状态并关闭，以后文件变化仍会提醒。"
+                    : !invalidOrderValidations.isEmpty
                     ? "存在未通过订单校验的预览，修正报表并重新读取后才能确认写入。"
                     : activeHardwareRequirements.isEmpty
                         ? "确认后写入订单级板材/封边；五金按每个来料加工订单的选择写入或跳过，已出货工厂单不再处理。"
@@ -4501,11 +4661,20 @@ struct ServerWriteConfirmationSheet: View {
                 }
                 .appActionButton(minWidth: 92)
                 .disabled(model.orderRunning)
-                Button(model.serverWriteConfirmationFinished ? "已完成写入" : "确认写入订单材料和五金") {
-                    showWriteConfirmation = true
+                if model.serverWritePreview?.canAcknowledgeNoChanges == true && !model.serverWriteConfirmationFinished {
+                    Button("确认无变化") {
+                        model.acknowledgeServerPreview()
+                    }
+                    .buttonStyle(.glassProminent)
+                    .disabled(!canConfirmWrite)
+                    .help("更新本次预览的文件夹监控基线并关闭；以后文件变化仍会提醒")
+                } else {
+                    Button(model.serverWriteConfirmationFinished ? "已完成写入" : "确认写入订单材料和五金") {
+                        showWriteConfirmation = true
+                    }
+                    .buttonStyle(.glassProminent)
+                    .disabled(!canConfirmWrite)
                 }
-                .buttonStyle(.glassProminent)
-                .disabled(!canConfirmWrite)
             }
         }
         .padding(20)
@@ -4546,10 +4715,7 @@ struct ServerWriteConfirmationSheet: View {
     @ViewBuilder
     private var hardwareMappingSection: some View {
         let requirements = activeHardwareRequirements
-        let hasHardware = orders.contains { order in
-            !order.hardwareChanges.isEmpty || order.factories.contains { !$0.hardware.isEmpty }
-        }
-        if hasHardware || !requirements.isEmpty {
+        if !requirements.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline) {
                     Text("工厂单五金 SKU 校验")
@@ -4559,11 +4725,7 @@ struct ServerWriteConfirmationSheet: View {
                         .font(.caption.weight(.semibold))
                         .foregroundColor(requirements.isEmpty ? AppPalette.success : AppPalette.warning)
                 }
-                if requirements.isEmpty {
-                    Text("本次五金均已匹配有效 SKU；确认时会按工厂单分别写入，不会进入订单级材料。")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else {
+                if !requirements.isEmpty {
                     Text("以下五金没有有效 SKU。请选择映射或忽略；完成后仍在本界面继续确认写入。")
                         .font(.caption)
                         .foregroundColor(AppPalette.warning)
@@ -4582,12 +4744,12 @@ struct ServerWriteConfirmationSheet: View {
                                 mappingTarget = PendingInventoryMappingTarget(name: item.name)
                             }
                             .buttonStyle(.glassProminent)
-                            .disabled(model.inventoryRunning)
+                            .disabled(model.inventoryRunning || model.orderRunning)
                             Button("忽略") {
                                 ignoreTarget = PendingInventoryMappingTarget(name: item.name)
                             }
                             .buttonStyle(.glass)
-                            .disabled(model.inventoryRunning)
+                            .disabled(model.inventoryRunning || model.orderRunning)
                         }
                         .padding(.vertical, 6)
                         Divider()
@@ -4608,19 +4770,10 @@ struct ServerWriteConfirmationSheet: View {
     private func orderPreviewCard(_ order: ServerWriteOrderPreview) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text("订单 \(order.orderID)")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                Text("\(order.materialChanges.count) 项材料变化")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundColor(.secondary)
-            }
-
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("订单校验")
-                    .font(.subheadline.weight(.semibold))
+                Text(order.orderID).font(.title3.weight(.semibold))
+                Divider().frame(height: 16)
                 AppStatusBadge(
-                    text: order.validationStatus.isEmpty ? "待校验" : order.validationStatus,
+                    text: order.validationStatus == "正常" ? "订单校验正常" : (order.validationStatus.isEmpty ? "待校验" : order.validationStatus),
                     kind: order.validationStatus == "正常" ? .success : .danger
                 )
                 Spacer()
@@ -4636,61 +4789,79 @@ struct ServerWriteConfirmationSheet: View {
             }
 
             if !order.materialChanges.isEmpty {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("订单材料变化")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("订单材料 · \(order.materialChanges.count) 项")
+                        .font(.headline)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(AppPalette.accent.opacity(0.05))
+                    materialHeaderRow
                     ForEach(sortedServerWriteMaterialChanges(order.materialChanges)) { material in
+                        Divider()
                         materialChangeRow(material)
                     }
                 }
             } else {
                 Text("订单材料数量没有变化")
-                    .font(.body)
-                    .foregroundColor(.secondary)
+                    .font(.body).foregroundColor(.secondary)
             }
 
             if !order.factories.isEmpty {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("新增/变更工厂单")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundColor(.secondary)
-                    ForEach(order.factories) { factory in
-                        VStack(alignment: .leading, spacing: 6) {
+                Text("工厂单五金").font(.headline).padding(.top, 4)
+                ForEach(order.factories) { factory in
+                    let key = order.orderID + "|" + factory.factoryOrder
+                    DisclosureGroup(isExpanded: Binding(
+                        get: { !collapsedFactoryIDs.contains(key) },
+                        set: { expanded in
+                            if expanded { collapsedFactoryIDs.remove(key) }
+                            else { collapsedFactoryIDs.insert(key) }
+                        }
+                    )) {
+                        VStack(spacing: 0) {
                             HStack(spacing: 10) {
-                                Text(factory.factoryOrder).font(.body.weight(.semibold))
-                                    .frame(minWidth: 118, alignment: .leading)
-                                Text(factory.factoryName.isEmpty ? "—" : factory.factoryName)
-                                    .lineLimit(1)
-                                Spacer()
-                                Text(factory.changeType.isEmpty ? "发生变化" : factory.changeType)
-                                    .foregroundColor(AppPalette.warning)
+                                Text("五金名称").frame(maxWidth: .infinity, alignment: .leading)
+                                Text("来源编码").frame(width: 100, alignment: .leading)
+                                Text("数量").frame(width: 56, alignment: .trailing)
+                                Text("单位").frame(width: 40, alignment: .trailing)
                             }
-                            if !factory.hardware.isEmpty {
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text("五金（按 \(factory.factoryOrder) 写入）")
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundColor(.secondary)
-                                    ForEach(factory.hardware) { hardware in
-                                        HStack(spacing: 8) {
-                                            Text(hardware.displayName.isEmpty ? hardware.name : hardware.displayName)
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .lineLimit(1)
-                                            Text(hardware.productCode.isEmpty ? "SKU 已通过名称匹配" : "来源编码 \(hardware.productCode) · SKU 已校验")
-                                                .font(.caption.monospaced())
-                                                .foregroundColor(AppPalette.success)
-                                            Text("× \(formatQuantity(hardware.quantity)) \(hardware.unit)")
-                                                .font(.caption.monospacedDigit())
-                                        }
-                                        .padding(.vertical, 1)
-                                    }
+                            .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                            .padding(.vertical, 10)
+                            ForEach(factory.hardware) { hardware in
+                                Divider()
+                                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                    Text(hardware.displayName.isEmpty ? hardware.name : hardware.displayName)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Text(hardware.productCode.isEmpty ? "—" : hardware.productCode)
+                                        .font(.callout.monospaced())
+                                        .frame(width: 100, alignment: .leading)
+                                    Text(formatQuantity(hardware.quantity))
+                                        .monospacedDigit().frame(width: 56, alignment: .trailing)
+                                    Text(hardware.unit.isEmpty ? "—" : hardware.unit)
+                                        .frame(width: 40, alignment: .trailing)
                                 }
-                                .padding(.leading, 10)
+                                .font(.callout).padding(.vertical, 10)
+                            }
+                            if factory.hardware.isEmpty {
+                                Text("本工厂单无待写入五金")
+                                    .font(.callout).foregroundStyle(.secondary).padding(.vertical, 10)
                             }
                         }
-                        .padding(.vertical, 7)
-                        Divider()
+                        .padding(.horizontal, 12)
+                    } label: {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text(factory.factoryOrder).fontWeight(.semibold)
+                            Text(factory.factoryName.isEmpty ? "—" : factory.factoryName)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 8)
+                            Text("\(factory.hardware.count) 项").foregroundStyle(.secondary)
+                        }
+                        .font(.callout)
+                        .padding(.vertical, 10)
                     }
+                    .padding(.horizontal, 12)
+                    .background(AppPalette.accent.opacity(0.045))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
                 }
             }
 
@@ -4738,8 +4909,9 @@ struct ServerWriteConfirmationSheet: View {
                     .lineLimit(1)
             }
         }
-        .padding(.vertical, 14)
-        .overlay(Divider(), alignment: .bottom)
+        .padding(12)
+        .background(AppPalette.surface.opacity(0.92))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     @ViewBuilder
@@ -4803,22 +4975,42 @@ struct ServerWriteConfirmationSheet: View {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
+    private var materialHeaderRow: some View {
+        HStack(spacing: 10) {
+            Text("材料类型")
+                .frame(width: 110, alignment: .leading).offset(x: 10)
+            Text("颜色 / 规格").frame(maxWidth: .infinity, alignment: .leading)
+            Text("变化").frame(width: 60, alignment: .center)
+            Text("数量变化")
+                .frame(width: 125, alignment: .trailing).offset(x: -5)
+        }
+        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+        .padding(.horizontal, 12).padding(.vertical, 9)
+    }
+
     private func materialChangeRow(_ material: ServerWriteMaterialChange) -> some View {
-        let label = [material.materialType, material.color, material.thickness, material.edge]
-            .filter { !$0.isEmpty }.joined(separator: " · ")
-        return HStack(spacing: 10) {
-            Image(systemName: material.materialType.caseInsensitiveCompare("edge") == .orderedSame ? "line.3.horizontal" : "square.3.layers.3d")
-                .foregroundColor(AppPalette.accent)
-                .frame(width: 24)
-            Text(label)
+        let specification = [material.color, material.thickness, material.edge]
+            .filter { !$0.isEmpty }
+            .reduce(into: [String]()) { values, value in
+                if !values.contains(value) { values.append(value) }
+            }.joined(separator: " · ")
+        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Label(material.materialType, systemImage: material.materialType.caseInsensitiveCompare("edge") == .orderedSame ? "line.3.horizontal" : "square.3.layers.3d")
+                .labelStyle(.titleAndIcon)
                 .font(.body.weight(.medium))
-                .frame(width: 260, alignment: .leading)
-                .lineLimit(2)
-            Text(material.changeType).font(.caption).foregroundColor(material.changeType == "删除" ? AppPalette.danger : AppPalette.warning)
+                .frame(width: 110, alignment: .leading)
+            Text(specification.isEmpty ? "—" : specification)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(material.changeType)
+                .font(.caption)
+                .foregroundColor(material.changeType == "删除" ? AppPalette.danger : AppPalette.warning)
+                .frame(width: 60, alignment: .center)
             Text("\(formatQuantity(material.oldQuantity)) → \(formatQuantity(material.newQuantity)) \(material.unit)")
                 .font(.body.monospacedDigit())
+                .frame(width: 125, alignment: .trailing)
         }
-        .padding(.vertical, 7)
+        .padding(.horizontal, 12).padding(.vertical, 11)
     }
 
     private func hardwareChangeRow(_ hardware: ServerWriteHardwareChange) -> some View {
@@ -5110,4 +5302,329 @@ struct AimesHistorySheet: View {
         .padding(12)
     }
 
+}
+
+// Drafts live only in this sheet until the user saves the whole edit.
+struct ManualHardwareFactory: Decodable, Identifiable {
+    var id: String { factoryOrder }
+    let factoryOrder: String
+    let factoryName: String
+    let editable: Bool
+}
+
+struct ManualHardwareRecord: Decodable, Identifiable {
+    let id: Int
+    let factoryOrder: String
+    let productCode: String
+    let name: String
+    let spec: String
+    let quantity: Double
+    let unit: String
+}
+
+struct ManualHardwareSnapshot: Decodable {
+    let factories: [ManualHardwareFactory]
+    let items: [ManualHardwareRecord]
+    let version: String
+
+    static func decode(_ object: [String: Any]) -> Self? {
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try? decoder.decode(Self.self, from: data)
+    }
+}
+
+struct ManualHardwareProduct: Decodable, Identifiable {
+    var id: String { code }
+    let code: String
+    let name: String
+    let spec: String
+    let unit: String
+}
+
+struct ManualHardwareDraft: Identifiable {
+    let id = UUID()
+    let factoryOrder: String
+    let product: ManualHardwareProduct
+    let quantity: Int
+}
+
+struct ManualHardwareSheet: View {
+    @ObservedObject var model: AppModel
+    let orderID: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var snapshot: ManualHardwareSnapshot?
+    @State private var additions: [ManualHardwareDraft] = []
+    @State private var deletions: Set<Int> = []
+    @State private var factoryOrder = ""
+    @State private var query = ""
+    @State private var products: [ManualHardwareProduct] = []
+    @State private var productCode = ""
+    @State private var quantity = 1
+    @State private var notice = ""
+    @State private var searchNotice = ""
+    @State private var showDiscard = false
+    @State private var showReload = false
+    @State private var needsReload = false
+    private var dirty: Bool { !additions.isEmpty || !deletions.isEmpty }
+    private var busy: Bool { model.orderRunning || model.inventoryRunning }
+    private var editableFactories: [ManualHardwareFactory] { snapshot?.factories.filter(\.editable) ?? [] }
+    private var selectedProduct: ManualHardwareProduct? { products.first { $0.code == productCode } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("人工五金").font(.title2).fontWeight(.semibold)
+                    Text("订单 \(orderID)").foregroundStyle(.secondary)
+                }
+                Spacer()
+                if busy { ProgressView().controlSize(.small) }
+                Button { close() } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.borderless).help("关闭").disabled(busy)
+            }.padding(20)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let snapshot {
+                        if snapshot.items.isEmpty && additions.isEmpty {
+                            Text("本订单尚未添加人工五金").foregroundStyle(.secondary).padding(.vertical, 12)
+                        }
+                        ForEach(snapshot.factories.filter { factory in
+                            snapshot.items.contains { $0.factoryOrder == factory.id } || additions.contains { $0.factoryOrder == factory.id }
+                        }) { factory in
+                            factoryGroup(factory, snapshot: snapshot)
+                        }
+                        // Retain visibility of legacy facts even if their factory no longer exists.
+                        let orphaned = snapshot.items.filter { item in !snapshot.factories.contains { $0.id == item.factoryOrder } }
+                        if !orphaned.isEmpty {
+                            Text("以下记录的工厂单已不存在，暂不能修改").foregroundStyle(.orange)
+                            ForEach(orphaned) { item in
+                                Text("\(item.factoryOrder) · \(item.productCode) · \(item.name) · \(item.quantity.formatted()) \(item.unit)")
+                            }
+                        }
+                        if editableFactories.isEmpty {
+                            Text("本订单没有可编辑的工厂单；已出库或失效工厂单的人工五金仅供查看。")
+                                .foregroundStyle(.secondary)
+                        } else { addForm }
+                    } else if !busy {
+                        HStack {
+                            Text("未能载入人工五金。").foregroundStyle(.secondary)
+                            Button("重试") { load() }.disabled(busy)
+                        }
+                    }
+                    if !notice.isEmpty {
+                        HStack(alignment: .top) {
+                            Text(notice).foregroundStyle(.red).textSelection(.enabled)
+                            if needsReload && snapshot != nil {
+                                Button("重新载入") {
+                                    if dirty { showReload = true } else { load() }
+                                }.disabled(busy)
+                            }
+                        }
+                    }
+                }.padding(20)
+            }
+            Divider()
+            HStack {
+                Image(systemName: "info.circle").foregroundStyle(.secondary)
+                Text(dirty ? "待保存：新增 \(additions.count) 条，删除 \(deletions.count) 条" : "新增和删除将在保存后生效。")
+                    .font(.callout).foregroundStyle(.secondary)
+                Spacer()
+                Button("取消") { close() }.appActionButton(minWidth: 80).disabled(busy)
+                Button("保存更改") { save() }
+                    .buttonStyle(.glassProminent).appActionButton(minWidth: 112)
+                    .disabled(!dirty || busy || snapshot == nil)
+            }.padding(20)
+        }
+        .frame(width: 820, height: 620)
+        .background(AppPalette.background)
+        .interactiveDismissDisabled(dirty || busy)
+        .onAppear { load() }
+        .alert("放弃未保存的更改？", isPresented: $showDiscard) {
+            Button("继续编辑", role: .cancel) {}
+            Button("放弃更改", role: .destructive) { dismiss() }
+        }
+        .alert("重新载入会清除未保存的更改", isPresented: $showReload) {
+            Button("继续编辑", role: .cancel) {}
+            Button("重新载入", role: .destructive) { load() }
+        }
+    }
+
+    private func factoryGroup(_ factory: ManualHardwareFactory, snapshot: ManualHardwareSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Image(systemName: "chevron.down")
+                Text(factory.factoryName.isEmpty ? factory.id : factory.factoryName).fontWeight(.semibold)
+                Text("工厂单号：\(factory.id)").foregroundStyle(.secondary)
+                Spacer()
+                if !factory.editable { Text("仅查看").foregroundStyle(.secondary) }
+            }.padding(14)
+            Divider()
+            HStack {
+                Text("SKU").frame(width: 70, alignment: .leading)
+                Text("五金名称").frame(maxWidth: .infinity, alignment: .leading)
+                Text("规格").frame(width: 125, alignment: .leading)
+                Text("数量 / 单位").frame(width: 90, alignment: .leading)
+                Text("操作").frame(width: 44, alignment: .trailing)
+            }.font(.callout).foregroundStyle(.secondary).padding(.horizontal, 14).padding(.vertical, 10)
+            ForEach(snapshot.items.filter { $0.factoryOrder == factory.id }) { item in
+                Divider()
+                hardwareRow(code: item.productCode, name: item.name, spec: item.spec,
+                            amount: "\(item.quantity.formatted()) \(item.unit)",
+                            pending: deletions.contains(item.id), action: deletions.contains(item.id) ? "撤销" : "删除") {
+                    if deletions.contains(item.id) { deletions.remove(item.id) } else { deletions.insert(item.id) }
+                }.disabled(busy || !factory.editable)
+            }
+            ForEach(additions.filter { $0.factoryOrder == factory.id }) { item in
+                Divider()
+                hardwareRow(code: item.product.code, name: item.product.name + " · 待新增", spec: item.product.spec,
+                            amount: "\(item.quantity) \(item.product.unit)", pending: false, action: "移除") {
+                    additions.removeAll { $0.id == item.id }
+                }.disabled(busy)
+            }
+        }
+        .background(AppPalette.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppPalette.separator))
+    }
+
+    private func hardwareRow(code: String, name: String, spec: String, amount: String,
+                             pending: Bool, action: String, perform: @escaping () -> Void) -> some View {
+        HStack {
+            Text(code).frame(width: 70, alignment: .leading)
+            Text(name).frame(maxWidth: .infinity, alignment: .leading)
+            Text(spec).frame(width: 125, alignment: .leading)
+            Text(amount).frame(width: 90, alignment: .leading)
+            Button(action, action: perform).foregroundStyle(pending ? Color.accentColor : Color.red)
+                .buttonStyle(.borderless).frame(width: 44, alignment: .trailing)
+        }
+        .strikethrough(pending).opacity(pending ? 0.55 : 1).padding(14)
+    }
+
+    private var addForm: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("新增人工五金", systemImage: "plus").font(.headline)
+            HStack {
+                Text("工厂单 *").frame(width: 90, alignment: .leading)
+                Picker("工厂单", selection: $factoryOrder) {
+                    Text("请选择本订单的工厂单").tag("")
+                    ForEach(editableFactories) { factory in
+                        Text("\(factory.factoryName) / \(factory.id)").tag(factory.id)
+                    }
+                }.labelsHidden().pickerStyle(.menu)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            HStack {
+                Text("搜索五金 *").frame(width: 90, alignment: .leading)
+                TextField("输入 SKU 或五金名称", text: $query).textFieldStyle(.roundedBorder)
+                    .onSubmit { search() }
+                    .onKeyPress(.return) { search(); return .handled }
+                    .onChange(of: query) { _, _ in products = []; productCode = ""; searchNotice = "" }
+                Button("搜索") { search() }.disabled(busy || query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if !searchNotice.isEmpty { Text(searchNotice).font(.caption).foregroundStyle(.secondary).padding(.leading, 98) }
+            if !products.isEmpty {
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("SKU").frame(width: 70, alignment: .leading)
+                        Text("五金名称").frame(maxWidth: .infinity, alignment: .leading)
+                        Text("规格").frame(width: 90, alignment: .leading)
+                        Text("单位").frame(width: 60, alignment: .leading)
+                    }.font(.callout).foregroundStyle(.secondary).padding(.leading, 38).padding(10)
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(products) { product in
+                                Divider()
+                                Button { productCode = product.code } label: {
+                                    HStack {
+                                        Image(systemName: productCode == product.code ? "largecircle.fill.circle" : "circle")
+                                            .foregroundStyle(productCode == product.code ? Color.accentColor : Color.secondary)
+                                            .frame(width: 24)
+                                        Text(product.code).frame(width: 70, alignment: .leading)
+                                        Text(product.name).frame(maxWidth: .infinity, alignment: .leading)
+                                        Text(product.spec).frame(width: 90, alignment: .leading)
+                                        Text(product.unit).frame(width: 60, alignment: .leading)
+                                    }.padding(10).contentShape(Rectangle())
+                                }.buttonStyle(.plain)
+                            }
+                        }
+                    }.frame(height: min(CGFloat(products.count) * 44, 180))
+                }
+                .background(AppPalette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppPalette.separator))
+                .padding(.leading, 98)
+            }
+            HStack {
+                Text("数量 *").frame(width: 90, alignment: .leading)
+                TextField("数量", value: $quantity, format: .number).textFieldStyle(.roundedBorder).frame(width: 80)
+                Stepper("数量", value: $quantity, in: 1...Int.max).labelsHidden()
+                Text(selectedProduct?.unit ?? "").foregroundStyle(.secondary)
+                Spacer()
+                Button("添加到列表") {
+                    guard let product = selectedProduct, quantity > 0 else { return }
+                    additions.append(ManualHardwareDraft(factoryOrder: factoryOrder, product: product, quantity: quantity))
+                    productCode = ""; quantity = 1; notice = ""
+                }.buttonStyle(.glassProminent).appActionButton(minWidth: 120)
+                    .disabled(busy || selectedProduct == nil || quantity <= 0 || !editableFactories.contains { $0.id == factoryOrder })
+            }
+        }.padding(16)
+        .background(AppPalette.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppPalette.separator))
+        .disabled(busy)
+    }
+
+    private func load() {
+        guard !busy else { return }
+        notice = ""
+        model.loadManualHardware(orderID: orderID) { object in
+            guard let object, let loaded = ManualHardwareSnapshot.decode(object) else {
+                notice = model.orderError.isEmpty ? "人工五金返回内容无效" : model.orderError
+                return
+            }
+            snapshot = loaded; additions = []; deletions = []; needsReload = false
+            products = []; productCode = ""; searchNotice = ""
+            factoryOrder = loaded.factories.filter(\.editable).count == 1 ? (loaded.factories.first(where: \.editable)?.id ?? "") : ""
+        }
+    }
+
+    private func search() {
+        guard !busy else { return }
+        let requested = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !requested.isEmpty else { return }
+        notice = ""; products = []; productCode = ""
+        model.searchManualHardware(requested) { object in
+            guard requested == query.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+            guard let object, let rows = object["products"],
+                  let data = try? JSONSerialization.data(withJSONObject: rows),
+                  let found = try? JSONDecoder().decode([ManualHardwareProduct].self, from: data) else {
+                notice = model.orderError.isEmpty ? "商品搜索结果无效" : model.orderError
+                return
+            }
+            products = found
+            searchNotice = found.isEmpty ? "没有找到启用商品，请尝试其他 SKU 或名称" : "找到 \(found.count) 个商品，请选择规格和单位匹配的五金"
+        }
+    }
+
+    private func save() {
+        guard let snapshot, dirty, !busy else { return }
+        let payload: [String: Any] = [
+            "version": snapshot.version,
+            "deletions": deletions.sorted(),
+            "additions": additions.map { ["factory_order": $0.factoryOrder, "product_code": $0.product.code, "quantity": $0.quantity] as [String: Any] }
+        ]
+        model.saveManualHardware(orderID: orderID, payload: payload) { success in
+            if success { dismiss() } else {
+                notice = model.orderError
+                needsReload = true
+            }
+        }
+    }
+
+    private func close() {
+        if dirty { showDiscard = true } else { dismiss() }
+    }
 }

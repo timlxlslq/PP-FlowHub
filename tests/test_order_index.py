@@ -206,12 +206,8 @@ class OrderIndexTests(unittest.TestCase):
                  "old", "2026-08-20T10:00:00"),
             )
             current.connection.execute(
-                """insert into hardware_items(
-                    order_id, factory_order, product_code, name, spec, quantity,
-                    unit, source_type, source_path, active, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
-                ("CS004", "F-KITCHEN", "H1", "Hinge", "", 2, "pcs",
-                 "aicnc", "", 1, "2026-08-20T10:00:00"),
+                'insert into hardware_items(order_id,factory_order,product_code,quantity,source_type,source_path,updated_at) values(?,?,?,?,?,?,?)',
+                ('CS004', 'F-KITCHEN', 'H1', 2, 'aicnc', '', '2026-08-20T10:00:00'),
             )
             current.commit()
             current.close()
@@ -243,12 +239,8 @@ class OrderIndexTests(unittest.TestCase):
                 ],
             )
             preview.connection.execute(
-                """insert into hardware_items(
-                    order_id, factory_order, product_code, name, spec, quantity,
-                    unit, source_type, source_path, active, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?)""",
-                ("CS004", "F-VANITY", "H2", "Drawer slide", "", 4, "pcs",
-                 "aicnc", "", 1, "2026-08-20T10:30:00"),
+                'insert into hardware_items(order_id,factory_order,product_code,quantity,source_type,source_path,updated_at) values(?,?,?,?,?,?,?)',
+                ('CS004', 'F-VANITY', 'H2', 4, 'aicnc', '', '2026-08-20T10:30:00'),
             )
             preview.commit()
             preview.close()
@@ -276,28 +268,24 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(
                 [(item["factory_order"], item["name"], item["new_quantity"])
                  for item in order["hardware_changes"]],
-                [("F-VANITY", "Drawer slide", 4.0)],
+                [("F-VANITY", "Fixture Drawer Slide", 4.0)],
             )
             self.assertFalse(order["factories"][0]["has_existing_hardware"])
-            # An existing factory identity or an inactive row is not a current
-            # hardware baseline. An active zero-quantity row is still a baseline.
+            # A persisted zero-quantity row is a baseline; a deleted row is not.
             current = OrderIndexStore(config.workflow_database)
             current.upsert_factory("F-VANITY", order_id="CS004")
             current.connection.execute(
-                """insert into hardware_items(order_id, factory_order, product_code,
-                    name, quantity, active, updated_at)
-                    values('CS004', 'F-VANITY', 'H2', 'Drawer slide', 0, 0, '2026-09-14T13:00:00')"""
+                "insert into hardware_items(order_id,factory_order,product_code,quantity,updated_at) values('CS004','F-VANITY','H2',0,'2026-09-14T13:00:00')"
             )
             current.commit()
-            for active in (0, 1):
-                current.connection.execute(
-                    "update hardware_items set active=? where factory_order='F-VANITY'", (active,)
-                )
-                current.commit()
+            for exists in (True, False):
+                if not exists:
+                    current.connection.execute("delete from hardware_items where factory_order='F-VANITY'")
+                    current.commit()
                 refreshed = _server_preview_payload(
                     config, preview_path, "token", [folder], include_hardware=True
                 )["orders"][0]
-                self.assertEqual(refreshed["factories"][0]["has_existing_hardware"], bool(active))
+                self.assertEqual(refreshed["factories"][0]["has_existing_hardware"], exists)
                 self.assertEqual(len(refreshed["hardware_changes"]), 1)
                 self.assertEqual(len(refreshed["factories"][0]["hardware"]), 1)
             current.close()
@@ -351,7 +339,7 @@ class OrderIndexTests(unittest.TestCase):
                 ownership_status="已确认",
             )
             stale.connection.execute(
-                "update orders set validation_message=? where order_id=?",
+                "update temp.preview_validation set message=? where order_id=?",
                 ("旧的订单校验错误", "PP9999"),
             )
             stale.commit()
@@ -421,7 +409,7 @@ class OrderIndexTests(unittest.TestCase):
                 source_folder=str(other_folder),
             )
             store.connection.execute(
-                "update orders set validation_message=? where order_id=?",
+                "update temp.preview_validation set message=? where order_id=?",
                 ("保留的历史校验结果", "PP8888"),
             )
             store.upsert_factory(
@@ -445,10 +433,10 @@ class OrderIndexTests(unittest.TestCase):
             try:
                 self.assertEqual(
                     store.connection.execute(
-                        "select validation_status, validation_message from orders where order_id=?",
+                        "select status, message from temp.preview_validation where order_id=?",
                         ("PP8888",),
                     ).fetchone(),
-                    ("数据异常", "保留的历史校验结果"),
+                    None,
                 )
             finally:
                 store.close()
@@ -517,14 +505,8 @@ class OrderIndexTests(unittest.TestCase):
                 ),
             )
             current.connection.execute(
-                """insert into hardware_items(
-                    order_id, factory_order, product_code, source_code, name, spec, quantity,
-                    unit, source_type, source_path, active, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    "PP9999", "F100", "M1001", "71T950A", "Hinge", "", 2,
-                    "pcs", "aicnc", str(folder.resolve()), 1, "old",
-                ),
+                'insert into hardware_items(order_id,factory_order,product_code,quantity,source_type,source_path,updated_at) values(?,?,?,?,?,?,?)',
+                ('PP9999', 'F100', 'M1001', 2, 'aicnc', str(folder.resolve()), 'old'),
             )
             current.commit()
             self.assertEqual(
@@ -706,9 +688,9 @@ class OrderIndexTests(unittest.TestCase):
                     6,
                 )
                 hardware = store.connection.execute(
-                    "select order_id, factory_order, product_code, name, quantity from hardware_items"
+                    "select order_id, factory_order, product_code, quantity from hardware_items"
                 ).fetchall()
-                self.assertEqual(hardware, [("PP9999", "F100", "M1001", "Unmapped Hinge", 2.0)])
+                self.assertEqual(hardware, [("PP9999", "F100", "M1001", 2.0)])
                 self.assertNotIn("factory_order", {
                     row[1] for row in store.connection.execute("pragma table_info(material_items)").fetchall()
                 })
@@ -1095,7 +1077,7 @@ class OrderIndexTests(unittest.TestCase):
                 source_folder=str(root / "source" / "PP9999"),
             )
             store.connection.execute(
-                "update orders set validation_message = ? where order_id = ?",
+                "update temp.preview_validation set message = ? where order_id = ?",
                 ("订单存在未完成商品 SKU 处理：LED。", "PP9999"),
             )
             cleared = _clear_stale_mapping_validation_status(
@@ -1105,7 +1087,7 @@ class OrderIndexTests(unittest.TestCase):
                 "2026-08-19T10:00:00",
             )
             row = store.connection.execute(
-                "select validation_status, validation_message from orders where order_id = ?",
+                "select status, message from temp.preview_validation where order_id = ?",
                 ("PP9999",),
             ).fetchone()
             store.close()
@@ -1125,7 +1107,7 @@ class OrderIndexTests(unittest.TestCase):
                 source_folder=str(root / "source" / "PP9999"),
             )
             store.connection.execute(
-                "update orders set validation_message = ? where order_id = ?",
+                "update temp.preview_validation set message = ? where order_id = ?",
                 ("订单存在未完成商品 SKU 处理：LED。", "PP9999"),
             )
             cleared = _clear_stale_mapping_validation_status(
@@ -1135,7 +1117,7 @@ class OrderIndexTests(unittest.TestCase):
                 "2026-08-19T10:00:00",
             )
             row = store.connection.execute(
-                "select validation_status, validation_message from orders where order_id = ?",
+                "select status, message from temp.preview_validation where order_id = ?",
                 ("PP9999",),
             ).fetchone()
             store.close()
@@ -1472,6 +1454,61 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(removed, {"PP0072"})
             self.assertEqual(rows, [(str(current_path), 22.0)])
             self.assertEqual(source_rows, [(str(current_folder),)])
+
+    def test_material_scope_preserves_facts_without_equivalent_replacement(self):
+        for replacement in ([], [("M0004", 21)], [("M0004", 22)],
+                            [("M0004", 22), ("M0003", 6)]):
+            with self.subTest(replacement=replacement), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                config = Config(state_dir=root / "state")
+                config.prepare_storage()
+                store = OrderIndexStore(config.workflow_database)
+                self._seed_sku_products(store.connection)
+                old = str(root / "pp0072" / "materials.xlsx")
+                current = root / "asdsdfs"
+                rows = [("M0004", 22), ("M0003", 5)]
+                for path, values in ((old, rows), (str(current / "materials.xlsx"), replacement)):
+                    store.connection.executemany(
+                        "insert into material_items(order_id,product_code,quantity,source_type,source_path,updated_at) "
+                        "values('PP0072',?,?,'aihouse',?,'before')",
+                        [(code, quantity, path) for code, quantity in values],
+                    )
+                before = store.connection.execute("select * from material_items order by id").fetchall()
+                for _ in range(2):
+                    self.assertEqual(_reconcile_authoritative_server_material_sources(
+                        store, {"PP0072": {str(current)}}), set())
+                    self.assertEqual(store.connection.execute(
+                        "select * from material_items order by id").fetchall(), before)
+                store.close()
+
+    def test_material_scope_cleanup_preserves_other_order_in_shared_workbook(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / "state")
+            config.prepare_storage()
+            store = OrderIndexStore(config.workflow_database)
+            self._seed_sku_products(store.connection)
+            old = str(root / "old" / "materials.xlsx")
+            current = root / "current"
+            for order, path in (("PP0072", old), ("PP0070", old),
+                                ("PP0072", str(current / "materials.xlsx"))):
+                store.connection.execute(
+                    "insert into material_items(order_id,product_code,quantity,source_type,source_path,updated_at) "
+                    "values(?,'M0004',22,'aihouse',?,'before')", (order, path))
+            store.connection.execute(
+                "insert into server_material_allocations(source_path,product_code,order_id,allocated_quantity,created_at,updated_at) "
+                "values(?,'M0004','PP0070',22,'before','before')", (old,))
+            self.assertEqual(_reconcile_authoritative_server_material_sources(
+                store, {"PP0072": {str(current)}}), {"PP0072"})
+            self.assertEqual(store.connection.execute(
+                "select source_path,quantity from material_items where order_id='PP0070'"
+            ).fetchall(), [(old, 22)])
+            self.assertEqual(store.connection.execute(
+                "select allocated_quantity from server_material_allocations where order_id='PP0070'"
+            ).fetchall(), [(22,)])
+            self.assertEqual(_reconcile_authoritative_server_material_sources(
+                store, {"PP0072": {str(current)}}), set())
+            store.close()
 
     def test_prepared_sync_can_resolve_material_mappings_before_fittings_import_path(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1901,14 +1938,8 @@ class OrderIndexTests(unittest.TestCase):
                 changed_at="2026-08-31T10:00:00",
             )
             store.connection.execute(
-                """insert into hardware_items(
-                    order_id, factory_order, product_code, source_code, name, spec,
-                    quantity, unit, source_type, source_path, active, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    "PP9999", "F100", "M1001", "71T950A", "TestFullHinge", "",
-                    2, "Piece", "aicnc", str(fittings), 1, "2026-08-31T10:00:00",
-                ),
+                'insert into hardware_items(order_id,factory_order,product_code,quantity,source_type,source_path,updated_at) values(?,?,?,?,?,?,?)',
+                ('PP9999', 'F100', 'M1001', 2, 'aicnc', str(fittings), '2026-08-31T10:00:00'),
             )
             store.commit()
             store.close()
@@ -2016,7 +2047,7 @@ class OrderIndexTests(unittest.TestCase):
                     """
                     select quantity, source_path
                     from hardware_items
-                    where factory_order='F100' and source_type='aicnc' and active=1
+                    where factory_order='F100' and source_type='aicnc'
                     order by id
                     """
                 ).fetchall()
@@ -2039,7 +2070,7 @@ class OrderIndexTests(unittest.TestCase):
                     """
                     select quantity, source_path
                     from hardware_items
-                    where factory_order='F100' and source_type='aicnc' and active=1
+                    where factory_order='F100' and source_type='aicnc'
                     order by id
                     """
                 ).fetchall()
@@ -2056,7 +2087,7 @@ class OrderIndexTests(unittest.TestCase):
                 sync_order_index(config, full_refresh=True, refresh_outbound_statuses=False, reconcile_outbound=False)
             store = OrderIndexStore(config.workflow_database)
             try:
-                rows = store.connection.execute("select quantity, source_path from hardware_items where factory_order='F100' and source_type='aicnc' and active=1").fetchall()
+                rows = store.connection.execute("select quantity, source_path from hardware_items where factory_order='F100' and source_type='aicnc'").fetchall()
                 self.assertEqual(rows, [(5.0, str(third))])
             finally:
                 store.close()
@@ -2303,11 +2334,11 @@ class OrderIndexTests(unittest.TestCase):
             )
             store.upsert_order("PP0011", source_folder=str(factory_folder))
             store.connection.execute(
-                "update factory_orders set outbound_status = '未查询', outbound_document = '' where factory_order = ?",
+                "update factory_orders set stage='已优化', outbound_document = '' where factory_order = ?",
                 ("F2605120103",),
             )
             store.connection.execute(
-                "update orders set validation_status = '数据异常', validation_message = '旧的缺少 material 提醒' where order_id = ?",
+                "insert or replace into temp.preview_validation(status,message,order_id) values('数据异常','旧的缺少 material 提醒',?)",
                 ("PP0011",),
             )
             store.commit()
@@ -2315,10 +2346,10 @@ class OrderIndexTests(unittest.TestCase):
             updated = _mark_initial_orders_shipped(config, store)
 
             shipped_order = store.connection.execute(
-                "select stage, validation_status, validation_message from orders where order_id = ?", ("PP0011",)
+                "select stage,(select status from temp.preview_validation v where v.order_id=orders.order_id),(select message from temp.preview_validation v where v.order_id=orders.order_id) from orders where order_id = ?", ("PP0011",)
             ).fetchone()
             shipped_factory = store.connection.execute(
-                "select outbound_status, outbound_document, outbound_mode from factory_orders where factory_order = ?",
+                "select (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status, outbound_document, outbound_mode from factory_orders where factory_order = ?",
                 ("F2605120103",),
             ).fetchone()
             store.close()
@@ -3157,7 +3188,7 @@ class OrderIndexTests(unittest.TestCase):
                 ("factory:F2608190230",),
             ).fetchone()
             outbound = reopened.connection.execute(
-                "select outbound_status from factory_orders where factory_order = ?",
+                "select (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status from factory_orders where factory_order = ?",
                 ("F2608190230",),
             ).fetchone()
             review_count = reopened.connection.execute(
@@ -3262,7 +3293,7 @@ class OrderIndexTests(unittest.TestCase):
                 ownership_status="已确认",
             )
             store.connection.execute(
-                "update orders set validation_message = ? where order_id = ?",
+                "update temp.preview_validation set message = ? where order_id = ?",
                 ("未找到 material 文件。请补充后重新扫描 Server。", "PP9999"),
             )
             store.commit()
@@ -3276,9 +3307,9 @@ class OrderIndexTests(unittest.TestCase):
             version = reopened.connection.execute("pragma user_version").fetchone()[0]
             reopened.close()
 
-        self.assertEqual(row["stage"], "数据异常")
-        self.assertEqual(stored_stage, "已设计")
-        self.assertEqual(row["validation_message"], "未找到 material 文件。请补充后重新扫描 Server。")
+        self.assertEqual(row["stage"], "已拆单待优化")
+        self.assertEqual(stored_stage, "已拆单待优化")
+        self.assertEqual(row["validation_message"], "")
         self.assertEqual(version, 11)
 
     def test_schema_migration_resolves_legacy_warning_from_unique_order_folder(self):
@@ -3437,7 +3468,7 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(listed["orders"][0]["completed_at"], "2026-08-15T16:20:00")
             reopened = OrderIndexStore(config.workflow_database)
             row = reopened.connection.execute(
-                "select outbound_status, outbound_document, outbound_completed_at from factory_orders where factory_order = ?",
+                "select (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status, outbound_document, outbound_completed_at from factory_orders where factory_order = ?",
                 ("F2608120222",),
             ).fetchone()
             reopened.close()
@@ -3464,7 +3495,7 @@ class OrderIndexTests(unittest.TestCase):
             row = store.summaries()[0]
             store.close()
 
-        self.assertEqual(row["optimized_count"], 0)
+        self.assertEqual(row["optimized_count"], 2)
         self.assertEqual(row["shipped_count"], 2)
         self.assertEqual(row["stage"], "已出货")
 
@@ -3570,7 +3601,7 @@ class OrderIndexTests(unittest.TestCase):
             ):
                 self.assertEqual(reconcile_outbound_statuses(config, store), 0)
             statuses = store.connection.execute(
-                "select outbound_status from factory_orders order by factory_order"
+                "select (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status from factory_orders order by factory_order"
             ).fetchall()
             store.close()
             self.assertEqual(statuses, [("未出库",), ("未出库",)])
@@ -3599,8 +3630,8 @@ class OrderIndexTests(unittest.TestCase):
             )
             row = store.connection.execute(
                 """
-                select report_state, ownership_status, has_hardware, optimized,
-                       outbound_status, outbound_document
+                select report_state, ownership_status, has_hardware, (stage<>'已拆单') as optimized,
+                       (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status, outbound_document
                 from factory_orders where factory_order = 'F100'
                 """
             ).fetchone()
@@ -3780,19 +3811,19 @@ class OrderIndexTests(unittest.TestCase):
             )
             store.connection.execute(
                 """
-                insert into manual_production_batches(
-                    batch_id, batch_number, order_id, production_time, source,
+                insert into production_records(
+                    batch_id, production_time, source,
                     status, created_at, updated_at
-                ) values(?,?,?,?,?,?,?,?)
+                ) values(?,?,?,?,?,?)
                 """,
                 (
-                    1, "MP-20260821-225155-1D99ED", "PP0063-2",
+                    1,
                     "2026-08-21T22:53:19-07:00", "manual", "completed",
                     "2026-08-21T22:51:55-07:00", "2026-08-21T22:53:19-07:00",
                 ),
             )
             store.connection.execute(
-                "insert into manual_production_batch_factories(batch_id, order_id, factory_order) values(?,?,?)",
+                "update factory_orders set production_record_id=? where order_id=? and factory_order=?",
                 (1, "PP0063-2", "F2606170170"),
             )
             issue_key = f"material_validation:PP0063-2:{material_path}"
@@ -3819,7 +3850,7 @@ class OrderIndexTests(unittest.TestCase):
                 (issue_key,),
             ).fetchone()
             order = reopened.connection.execute(
-                "select material_status from orders where order_id = 'PP0063-2'"
+                "select case when exists(select 1 from material_items where order_id='PP0063-2') then '板材 · 封边' else '待校验' end"
             ).fetchone()
             change = reopened.connection.execute(
                 "select kind from sync_changes where kind = 'material_validation_reconciled'"

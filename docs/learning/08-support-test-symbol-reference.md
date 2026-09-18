@@ -4,7 +4,7 @@
 
 ## 如何阅读
 
-- 范围：`tests/`、`scripts/`、`tools/` 和 `outputs/` 中的一方辅助代码，共登记 **1505** 个类型、函数、方法、计算属性或脚本过程。
+- 范围：`tests/`、`scripts/`、`tools/` 和 `outputs/` 中的一方辅助代码，共登记 **1586** 个类型、函数、方法、计算属性或脚本过程。
 - “输入”来自静态签名；`self`/`cls` 不重复列出。未声明类型不代表运行时没有约束。
 - “项目内下一跳”只表示源码中可静态确认的直接调用，不表示每个分支都会执行。
 - `self.method()`、协议分发、闭包、Swift 重载和动态导入可能无法唯一解析；关键业务路径以 `09-user-operation-call-chains.md` 为准。
@@ -534,13 +534,13 @@ Swift/macOS 源码或测试辅助文件。
 - **L1460 · 方法** `func request(id: String, arguments: [String], inputData: Data?) throws -> Data` — 封装 `request` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`id: String`；`arguments: [String]`；`inputData: Data?`
   - 返回：`Data`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:75` `_FakeNodeInput.write`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:74` `_FakeNodeInput.write`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `write`；是否真实写入仍取决于分支和参数。
 
 - **L1492 · 方法** `func stop()` — 封装 `stop` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:75` `_FakeNodeInput.write`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:74` `_FakeNodeInput.write`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `write`, `closeFile`；是否真实写入仍取决于分支和参数。
 
 - **L1512 · 类** `AppModel` — 定义 `AppModel` 类，集中保存该领域的数据和行为边界。
@@ -607,13 +607,13 @@ Swift/macOS 源码或测试辅助文件。
 - **L1715 · 初始化器** `init()` — 初始化所属类型，把传入参数转换为后续方法可使用的状态。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`所属类型`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1867` `AppModel.loadSettings`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1786` `AppModel.loadTodoItems`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1728` `AppModel.startResidentOrderService`
+  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1867` `AppModel.loadSettings`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1786` `AppModel.loadTodoItems`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1728` `AppModel.startResidentOrderService`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `setEnabled`, `record`；是否真实写入仍取决于分支和参数。
 
 - **L1728 · 方法** `private func startResidentOrderService()` — 启动订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:4360` `AppModel.consumeOrderLogChunk`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1440` `ResidentOrderServiceClient.start`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:2002` `AppModel.environmentForOperation`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1973` `AppModel.newOperationID`
+  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:4360` `AppModel.consumeOrderLogChunk`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1440` `ResidentOrderServiceClient.start`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:2002` `AppModel.environmentForOperation`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1973` `AppModel.newOperationID`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L1749 · 方法** `func checkBackupReminder()` — 检查备份相关数据或步骤。
@@ -670,7 +670,7 @@ Swift/macOS 源码或测试辅助文件。
 - **L1837 · 方法** `private func saveTodoItems()` — 保存待办相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:75` `_FakeNodeInput.write`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:18` `businessFriendlyMessage`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:74` `_FakeNodeInput.write`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:18` `businessFriendlyMessage`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `write`, `record`；是否真实写入仍取决于分支和参数。
 
 - **L1867 · 方法** `func loadSettings() -> Bool` — 读取设置相关数据或步骤。
@@ -681,7 +681,7 @@ Swift/macOS 源码或测试辅助文件。
 - **L1886 · 方法** `func saveSettings()` — 保存设置相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1969` `AppModel.logUserAction`；`tests/test_inventory.py:75` `_FakeNodeInput.write`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:18` `businessFriendlyMessage`
+  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1969` `AppModel.logUserAction`；`tests/test_inventory.py:74` `_FakeNodeInput.write`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:18` `businessFriendlyMessage`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `write`, `record`；是否真实写入仍取决于分支和参数。
 
 - **L1915 · 计算属性** `var operationLogURL: URL` — 根据当前状态计算并返回操作、日志。
@@ -692,7 +692,7 @@ Swift/macOS 源码或测试辅助文件。
 - **L1920 · 方法** `func setOperationLogEnabled(_ enabled: Bool)` — 设置操作、日志相关数据或步骤。
   - 输入：`_ enabled: Bool`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1886` `AppModel.saveSettings`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1886` `AppModel.saveSettings`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`, `setEnabled`, `saveSettings`；是否真实写入仍取决于分支和参数。
 
 - **L1942 · 方法** `func refreshOperationLogInfo()` — 刷新操作、日志相关数据或步骤。
@@ -703,25 +703,25 @@ Swift/macOS 源码或测试辅助文件。
 - **L1946 · 方法** `func trimOperationLog()` — 封装操作、日志相关的辅助逻辑，供所属模块或类型复用。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1942` `AppModel.refreshOperationLogInfo`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1942` `AppModel.refreshOperationLogInfo`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L1969 · 方法** `func logUserAction(_ action: String, details: [String: Any] = [:])` — 封装日志相关的辅助逻辑，供所属模块或类型复用。
   - 输入：`_ action: String`；`details: [String: Any] = [:]`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L1973 · 方法** `func newOperationID(_ name: String, details: [String: Any] = [:]) -> String` — 封装操作相关的辅助逻辑，供所属模块或类型复用。
   - 输入：`_ name: String`；`details: [String: Any] = [:]`
   - 返回：`String`
-  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L1984 · 方法** `private func finishOperationLog( _ operationID: String, name: String, startedAt: Date, exitStatus: Int32 )` — 结束并收口操作、日志相关数据或步骤。
   - 输入：`_ operationID: String`；`name: String`；`startedAt: Date`；`exitStatus: Int32`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L2002 · 方法** `func environmentForOperation(_ operationID: String) -> [String: String]` — 封装操作相关的辅助逻辑，供所属模块或类型复用。
@@ -1010,7 +1010,7 @@ Swift/macOS 源码或测试辅助文件。
 - **L3158 · 方法** `func closeInventoryChromeOnQuit()` — 关闭库存相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `Process`, `run`, `record`；是否真实写入仍取决于分支和参数。
 
 - **L3188 · 方法** `func refreshInventoryCatalogStatus()` — 刷新库存、商品目录、状态相关数据或步骤。
@@ -1197,13 +1197,13 @@ Swift/macOS 源码或测试辅助文件。
 - **L4249 · 方法** `private func addInventoryStep(_ title: String, _ detail: String, _ state: String)` — 新增库存相关数据或步骤。
   - 输入：`_ title: String`；`_ detail: String`；`_ state: String`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1196` `InventoryStep`
+  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1196` `InventoryStep`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L4260 · 方法** `private func finishRunningInventoryStep(_ detail: String, _ state: String)` — 结束并收口库存相关数据或步骤。
   - 输入：`_ detail: String`；`_ state: String`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:4249` `AppModel.addInventoryStep`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1196` `InventoryStep`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:4249` `AppModel.addInventoryStep`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1196` `InventoryStep`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L4274 · 方法** `private func finishInventoryStep(named title: String, detail: String, state: String)` — 结束并收口库存相关数据或步骤。
@@ -1219,13 +1219,13 @@ Swift/macOS 源码或测试辅助文件。
 - **L4314 · 方法** `private func addOrderStep(_ title: String, _ detail: String, _ state: String)` — 新增订单相关数据或步骤。
   - 输入：`_ title: String`；`_ detail: String`；`_ state: String`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1196` `InventoryStep`
+  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1196` `InventoryStep`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L4333 · 方法** `private func finishOrderStep(_ detail: String, _ state: String)` — 结束并收口订单相关数据或步骤。
   - 输入：`_ detail: String`；`_ state: String`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:4314` `AppModel.addOrderStep`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1196` `InventoryStep`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:4314` `AppModel.addOrderStep`；`.superpowers/tasks/pending-center-tasks12/baseline/macos/TravelerAssistant.swift:1196` `InventoryStep`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L4360 · 方法** `private func consumeOrderLogChunk(_ chunk: String)` — 消费并转换订单、日志相关数据或步骤。
@@ -2390,13 +2390,13 @@ Swift/macOS 源码或测试辅助文件。
 - **L1962 · 方法** `private static func headerBoundaryY(flexibleContent: Bool) -> CGFloat` — 封装 `headerBoundaryY` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`flexibleContent: Bool`
   - 返回：`CGFloat`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:21` `HeaderBoundaryProbeBox`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:39` `PageLayoutHarness`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:2095` `MacOSUIRegressionTests.pumpRunLoop`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:2103` `MacOSUIRegressionTests.fail`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:21` `HeaderBoundaryProbeBox`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:39` `PageLayoutHarness`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:2095` `MacOSUIRegressionTests.pumpRunLoop`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:2103` `MacOSUIRegressionTests.fail`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `pumpRunLoop`, `close`；是否真实写入仍取决于分支和参数。
 
 - **L1981 · 方法** `private static func testOperationLogScrollsAfterAppending()` — 验证操作、日志相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:2083` `MacOSUIRegressionTests.step`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:4` `OperationLogHarnessModel`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:12` `OperationLogHarnessView`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:2095` `MacOSUIRegressionTests.pumpRunLoop`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:2087` `MacOSUIRegressionTests.firstScrollView`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:2103` `MacOSUIRegressionTests.fail`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:2099` `MacOSUIRegressionTests.require`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:2083` `MacOSUIRegressionTests.step`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:4` `OperationLogHarnessModel`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:12` `OperationLogHarnessView`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:2095` `MacOSUIRegressionTests.pumpRunLoop`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:2087` `MacOSUIRegressionTests.firstScrollView`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:2103` `MacOSUIRegressionTests.fail`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:2099` `MacOSUIRegressionTests.require`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `pumpRunLoop`, `close`；是否真实写入仍取决于分支和参数。
 
 - **L2032 · 方法** `private static func testOperationLogReader()` — 验证操作、日志相关数据或步骤。
@@ -2407,7 +2407,7 @@ Swift/macOS 源码或测试辅助文件。
 - **L2042 · 方法** `private static func testOperationLogMaintenance()` — 验证操作、日志相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:75` `_FakeNodeInput.write`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:2099` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:74` `_FakeNodeInput.write`；`.superpowers/tasks/pending-center-tasks12/baseline/tests/test_macos_ui.swift:2099` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `write`；是否真实写入仍取决于分支和参数。
 
 - **L2071 · 方法** `private static func traveler(_ name: String, folder: String, modifiedAt: String) -> InventoryTraveler` — 封装Traveler相关的辅助逻辑，供所属模块或类型复用。
@@ -2965,13 +2965,13 @@ Swift/macOS 源码或测试辅助文件。
 - **L1460 · 方法** `func request(id: String, arguments: [String], inputData: Data?) throws -> Data` — 封装 `request` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`id: String`；`arguments: [String]`；`inputData: Data?`
   - 返回：`Data`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:75` `_FakeNodeInput.write`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:74` `_FakeNodeInput.write`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `write`；是否真实写入仍取决于分支和参数。
 
 - **L1492 · 方法** `func stop()` — 封装 `stop` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:75` `_FakeNodeInput.write`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:74` `_FakeNodeInput.write`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `write`, `closeFile`；是否真实写入仍取决于分支和参数。
 
 - **L1512 · 类** `AppModel` — 定义 `AppModel` 类，集中保存该领域的数据和行为边界。
@@ -3043,13 +3043,13 @@ Swift/macOS 源码或测试辅助文件。
 - **L1731 · 初始化器** `init()` — 初始化所属类型，把传入参数转换为后续方法可使用的状态。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`所属类型`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1883` `AppModel.loadSettings`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1802` `AppModel.loadTodoItems`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1744` `AppModel.startResidentOrderService`
+  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1883` `AppModel.loadSettings`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1802` `AppModel.loadTodoItems`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1744` `AppModel.startResidentOrderService`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `setEnabled`, `record`；是否真实写入仍取决于分支和参数。
 
 - **L1744 · 方法** `private func startResidentOrderService()` — 启动订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:4452` `AppModel.consumeOrderLogChunk`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1440` `ResidentOrderServiceClient.start`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:2018` `AppModel.environmentForOperation`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1989` `AppModel.newOperationID`
+  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:4452` `AppModel.consumeOrderLogChunk`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1440` `ResidentOrderServiceClient.start`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:2018` `AppModel.environmentForOperation`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1989` `AppModel.newOperationID`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L1765 · 方法** `func checkBackupReminder()` — 检查备份相关数据或步骤。
@@ -3106,7 +3106,7 @@ Swift/macOS 源码或测试辅助文件。
 - **L1853 · 方法** `private func saveTodoItems()` — 保存待办相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:75` `_FakeNodeInput.write`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:18` `businessFriendlyMessage`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:74` `_FakeNodeInput.write`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:18` `businessFriendlyMessage`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `write`, `record`；是否真实写入仍取决于分支和参数。
 
 - **L1883 · 方法** `func loadSettings() -> Bool` — 读取设置相关数据或步骤。
@@ -3117,7 +3117,7 @@ Swift/macOS 源码或测试辅助文件。
 - **L1902 · 方法** `func saveSettings()` — 保存设置相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1985` `AppModel.logUserAction`；`tests/test_inventory.py:75` `_FakeNodeInput.write`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:18` `businessFriendlyMessage`
+  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1985` `AppModel.logUserAction`；`tests/test_inventory.py:74` `_FakeNodeInput.write`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:18` `businessFriendlyMessage`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `write`, `record`；是否真实写入仍取决于分支和参数。
 
 - **L1931 · 计算属性** `var operationLogURL: URL` — 根据当前状态计算并返回操作、日志。
@@ -3128,7 +3128,7 @@ Swift/macOS 源码或测试辅助文件。
 - **L1936 · 方法** `func setOperationLogEnabled(_ enabled: Bool)` — 设置操作、日志相关数据或步骤。
   - 输入：`_ enabled: Bool`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1902` `AppModel.saveSettings`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1902` `AppModel.saveSettings`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`, `setEnabled`, `saveSettings`；是否真实写入仍取决于分支和参数。
 
 - **L1958 · 方法** `func refreshOperationLogInfo()` — 刷新操作、日志相关数据或步骤。
@@ -3139,25 +3139,25 @@ Swift/macOS 源码或测试辅助文件。
 - **L1962 · 方法** `func trimOperationLog()` — 封装操作、日志相关的辅助逻辑，供所属模块或类型复用。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1958` `AppModel.refreshOperationLogInfo`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1958` `AppModel.refreshOperationLogInfo`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L1985 · 方法** `func logUserAction(_ action: String, details: [String: Any] = [:])` — 封装日志相关的辅助逻辑，供所属模块或类型复用。
   - 输入：`_ action: String`；`details: [String: Any] = [:]`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L1989 · 方法** `func newOperationID(_ name: String, details: [String: Any] = [:]) -> String` — 封装操作相关的辅助逻辑，供所属模块或类型复用。
   - 输入：`_ name: String`；`details: [String: Any] = [:]`
   - 返回：`String`
-  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L2000 · 方法** `private func finishOperationLog( _ operationID: String, name: String, startedAt: Date, exitStatus: Int32 )` — 结束并收口操作、日志相关数据或步骤。
   - 输入：`_ operationID: String`；`name: String`；`startedAt: Date`；`exitStatus: Int32`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L2018 · 方法** `func environmentForOperation(_ operationID: String) -> [String: String]` — 封装操作相关的辅助逻辑，供所属模块或类型复用。
@@ -3462,7 +3462,7 @@ Swift/macOS 源码或测试辅助文件。
 - **L3218 · 方法** `func closeInventoryChromeOnQuit()` — 关闭库存相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `Process`, `run`, `record`；是否真实写入仍取决于分支和参数。
 
 - **L3248 · 方法** `func refreshInventoryCatalogStatus()` — 刷新库存、商品目录、状态相关数据或步骤。
@@ -3649,13 +3649,13 @@ Swift/macOS 源码或测试辅助文件。
 - **L4341 · 方法** `private func addInventoryStep(_ title: String, _ detail: String, _ state: String)` — 新增库存相关数据或步骤。
   - 输入：`_ title: String`；`_ detail: String`；`_ state: String`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1196` `InventoryStep`
+  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1196` `InventoryStep`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L4352 · 方法** `private func finishRunningInventoryStep(_ detail: String, _ state: String)` — 结束并收口库存相关数据或步骤。
   - 输入：`_ detail: String`；`_ state: String`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:4341` `AppModel.addInventoryStep`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1196` `InventoryStep`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:4341` `AppModel.addInventoryStep`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1196` `InventoryStep`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L4366 · 方法** `private func finishInventoryStep(named title: String, detail: String, state: String)` — 结束并收口库存相关数据或步骤。
@@ -3671,13 +3671,13 @@ Swift/macOS 源码或测试辅助文件。
 - **L4406 · 方法** `private func addOrderStep(_ title: String, _ detail: String, _ state: String)` — 新增订单相关数据或步骤。
   - 输入：`_ title: String`；`_ detail: String`；`_ state: String`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1196` `InventoryStep`
+  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1196` `InventoryStep`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L4425 · 方法** `private func finishOrderStep(_ detail: String, _ state: String)` — 结束并收口订单相关数据或步骤。
   - 输入：`_ detail: String`；`_ state: String`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:4406` `AppModel.addOrderStep`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1196` `InventoryStep`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:4406` `AppModel.addOrderStep`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:1196` `InventoryStep`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record`；是否真实写入仍取决于分支和参数。
 
 - **L4452 · 方法** `private func consumeOrderLogChunk(_ chunk: String)` — 消费并转换订单、日志相关数据或步骤。
@@ -4853,13 +4853,13 @@ Swift/macOS 源码或测试辅助文件。
 - **L2084 · 方法** `private static func headerBoundaryY(flexibleContent: Bool) -> CGFloat` — 封装 `headerBoundaryY` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`flexibleContent: Bool`
   - 返回：`CGFloat`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:21` `HeaderBoundaryProbeBox`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:39` `PageLayoutHarness`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:2217` `MacOSUIRegressionTests.pumpRunLoop`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:2225` `MacOSUIRegressionTests.fail`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:21` `HeaderBoundaryProbeBox`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:39` `PageLayoutHarness`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:2217` `MacOSUIRegressionTests.pumpRunLoop`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:2225` `MacOSUIRegressionTests.fail`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `pumpRunLoop`, `close`；是否真实写入仍取决于分支和参数。
 
 - **L2103 · 方法** `private static func testOperationLogScrollsAfterAppending()` — 验证操作、日志相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:2205` `MacOSUIRegressionTests.step`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:4` `OperationLogHarnessModel`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:12` `OperationLogHarnessView`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:2217` `MacOSUIRegressionTests.pumpRunLoop`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:2209` `MacOSUIRegressionTests.firstScrollView`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:2225` `MacOSUIRegressionTests.fail`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:2221` `MacOSUIRegressionTests.require`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:2205` `MacOSUIRegressionTests.step`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:4` `OperationLogHarnessModel`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:12` `OperationLogHarnessView`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:2217` `MacOSUIRegressionTests.pumpRunLoop`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:2209` `MacOSUIRegressionTests.firstScrollView`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:2225` `MacOSUIRegressionTests.fail`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:2221` `MacOSUIRegressionTests.require`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `pumpRunLoop`, `close`；是否真实写入仍取决于分支和参数。
 
 - **L2154 · 方法** `private static func testOperationLogReader()` — 验证操作、日志相关数据或步骤。
@@ -4870,7 +4870,7 @@ Swift/macOS 源码或测试辅助文件。
 - **L2164 · 方法** `private static func testOperationLogMaintenance()` — 验证操作、日志相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:75` `_FakeNodeInput.write`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:2221` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:74` `_FakeNodeInput.write`；`.superpowers/tasks/pending-center-tasks12/review-baseline/tests/test_macos_ui.swift:2221` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `write`；是否真实写入仍取决于分支和参数。
 
 - **L2193 · 方法** `private static func traveler(_ name: String, folder: String, modifiedAt: String) -> InventoryTraveler` — 封装Traveler相关的辅助逻辑，供所属模块或类型复用。
@@ -5224,13 +5224,13 @@ Swift/macOS 源码或测试辅助文件。
 - **L21 · 函数** `withPage(browser, body, test)` — 封装 `withPage` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`browser`；`body`；`test`
   - 返回：`Promise/JavaScript 值`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `setContent`, `close`；是否真实写入仍取决于分支和参数。
 
 - **L32 · 函数** `main()` — 解析命令行参数，建立运行配置并分发到对应业务动作。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`Promise/JavaScript 值`
-  - 静态可确认的项目内下一跳：`tests/test_aimes_table.mjs:21` `withPage`；`tests/test_aimes_table.mjs:8` `tableMarkup`；`tools/aimes_table.mjs:77` `readAimesTable`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_aimes_table.mjs:21` `withPage`；`tests/test_aimes_table.mjs:8` `tableMarkup`；`tools/aimes_table.mjs:77` `readAimesTable`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `launch`, `setTimeout`, `insertAdjacentHTML`, `close`；是否真实写入仍取决于分支和参数。
 
 ## `tests/test_command_router.py`
@@ -5306,6 +5306,120 @@ Swift/macOS 源码或测试辅助文件。
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `execute_local_command`；是否真实写入仍取决于分支和参数。
+
+## `tests/test_confirmed_material_optimization.py`
+
+自动化测试：验证 `confirmed_material_optimization` 模块或业务场景。
+
+- **L21 · 类** `ConfirmedMaterialOptimizationTests` — 定义与材料相关的类，集中保存数据和行为边界。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+
+- **L22 · 方法** `ConfirmedMaterialOptimizationTests.setUp()` — 设置与 `setUp` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:191` `make_product_catalog`；`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:105` `make_board`；`tools/generate_code_reference.py:892` `write_text`；`tests/test_confirmed_material_optimization.py:39` `ConfirmedMaterialOptimizationTests.add_factory`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.mkdir`, `self.xml.parent.mkdir`, `self.xml.write_text`；是否真实写入仍取决于分支和参数。
+
+- **L39 · 方法** `ConfirmedMaterialOptimizationTests.add_factory(factory, room)` — 新增工厂单相关数据或步骤。
+  - 输入：`factory`；`room`
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_aimes_factory`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
+
+- **L47 · 方法** `ConfirmedMaterialOptimizationTests.state()` — 封装 `state` 对应的辅助逻辑，供所属模块或类型复用。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `c.execute`；是否真实写入仍取决于分支和参数。
+
+- **L56 · 方法** `ConfirmedMaterialOptimizationTests.preview()` — 预览预览相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+
+- **L59 · 方法** `ConfirmedMaterialOptimizationTests.unchanged_preview()` — 封装预览相关的辅助逻辑，供所属模块或类型复用。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_confirmed_material_optimization.py:56` `ConfirmedMaterialOptimizationTests.preview`
+
+- **L68 · 方法** `ConfirmedMaterialOptimizationTests.all_business_tables()` — 封装 `all_business_tables` 对应的辅助逻辑，供所属模块或类型复用。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`；是否真实写入仍取决于分支和参数。
+
+- **L76 · 方法** `ConfirmedMaterialOptimizationTests.test_acknowledge_updates_only_preview_baseline_and_future_changes_still_notify()` — 验证预览相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_confirmed_material_optimization.py:59` `ConfirmedMaterialOptimizationTests.unchanged_preview`；`tests/test_confirmed_material_optimization.py:68` `ConfirmedMaterialOptimizationTests.all_business_tables`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`；是否真实写入仍取决于分支和参数。
+
+- **L95 · 方法** `ConfirmedMaterialOptimizationTests.test_acknowledge_failure_rolls_back_and_keeps_folder_pending()` — 验证文件夹相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_confirmed_material_optimization.py:59` `ConfirmedMaterialOptimizationTests.unchanged_preview`；`tests/test_confirmed_material_optimization.py:47` `ConfirmedMaterialOptimizationTests.state`
+
+- **L99 · 方法** `ConfirmedMaterialOptimizationTests.test_acknowledge_failure_rolls_back_and_keeps_folder_pending.fail_after_write(store, *args, **kwargs)` — 封装 `fail_after_write` 对应的辅助逻辑，供所属模块或类型复用。
+  - 输入：`store`；`*args`；`**kwargs`
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+
+- **L108 · 方法** `ConfirmedMaterialOptimizationTests.test_acknowledge_partial_optimization_does_not_optimize_unrepresented_factories()` — 验证与 `test_acknowledge_partial_optimization_does_not_optimize_unrepresented_factories` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_confirmed_material_optimization.py:59` `ConfirmedMaterialOptimizationTests.unchanged_preview`；`tests/test_confirmed_material_optimization.py:39` `ConfirmedMaterialOptimizationTests.add_factory`；`tests/test_confirmed_material_optimization.py:68` `ConfirmedMaterialOptimizationTests.all_business_tables`；`tests/test_confirmed_material_optimization.py:47` `ConfirmedMaterialOptimizationTests.state`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `new_xml.parent.mkdir`, `new_xml.write_text`；是否真实写入仍取决于分支和参数。
+
+- **L124 · 方法** `ConfirmedMaterialOptimizationTests.test_acknowledge_rejects_incomplete_changed_and_stale_previews()` — 验证与 `test_acknowledge_rejects_incomplete_changed_and_stale_previews` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_confirmed_material_optimization.py:59` `ConfirmedMaterialOptimizationTests.unchanged_preview`；`tests/test_confirmed_material_optimization.py:47` `ConfirmedMaterialOptimizationTests.state`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`；是否真实写入仍取决于分支和参数。
+
+- **L155 · 方法** `ConfirmedMaterialOptimizationTests.test_repeat_scan_and_cancel_preview_leave_no_optimization_information()` — 验证预览相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_confirmed_material_optimization.py:47` `ConfirmedMaterialOptimizationTests.state`；`tests/test_confirmed_material_optimization.py:56` `ConfirmedMaterialOptimizationTests.preview`
+
+- **L168 · 方法** `ConfirmedMaterialOptimizationTests.test_commit_is_atomic_and_survives_restart_without_duplicate_materials()` — 验证与 `test_commit_is_atomic_and_survives_restart_without_duplicate_materials` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_confirmed_material_optimization.py:56` `ConfirmedMaterialOptimizationTests.preview`；`tests/test_confirmed_material_optimization.py:47` `ConfirmedMaterialOptimizationTests.state`
+
+- **L191 · 方法** `ConfirmedMaterialOptimizationTests.test_material_confirmation_without_xml_can_complete_optimization()` — 验证材料相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_confirmed_material_optimization.py:56` `ConfirmedMaterialOptimizationTests.preview`；`tests/test_confirmed_material_optimization.py:47` `ConfirmedMaterialOptimizationTests.state`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `self.xml.unlink`；是否真实写入仍取决于分支和参数。
+
+- **L198 · 方法** `ConfirmedMaterialOptimizationTests.test_new_aimes_factory_does_not_inherit_old_material_optimization()` — 验证AIMES 数据、工厂单、材料相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_confirmed_material_optimization.py:56` `ConfirmedMaterialOptimizationTests.preview`；`tests/test_confirmed_material_optimization.py:39` `ConfirmedMaterialOptimizationTests.add_factory`；`tests/test_confirmed_material_optimization.py:47` `ConfirmedMaterialOptimizationTests.state`
+
+- **L207 · 方法** `ConfirmedMaterialOptimizationTests.test_partial_factory_confirmation_keeps_remaining_file_pending()` — 验证工厂单、文件相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_confirmed_material_optimization.py:39` `ConfirmedMaterialOptimizationTests.add_factory`；`tests/test_order_workflow.py:105` `make_board`；`tools/generate_code_reference.py:892` `write_text`；`tests/test_confirmed_material_optimization.py:56` `ConfirmedMaterialOptimizationTests.preview`；`tests/test_confirmed_material_optimization.py:47` `ConfirmedMaterialOptimizationTests.state`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `self.xml.write_text`, `c.execute`；是否真实写入仍取决于分支和参数。
+
+- **L222 · 方法** `ConfirmedMaterialOptimizationTests.test_xml_changed_after_preview_is_not_accepted_as_confirmed_baseline()` — 验证预览相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_confirmed_material_optimization.py:56` `ConfirmedMaterialOptimizationTests.preview`
+
+- **L230 · 方法** `ConfirmedMaterialOptimizationTests.test_missing_material_workbook_preserves_confirmed_facts()` — 验证材料相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_confirmed_material_optimization.py:56` `ConfirmedMaterialOptimizationTests.preview`；`tests/test_confirmed_material_optimization.py:47` `ConfirmedMaterialOptimizationTests.state`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `(self.folder / 'PP9999 materials.xlsx').unlink`；是否真实写入仍取决于分支和参数。
+
+- **L241 · 方法** `ConfirmedMaterialOptimizationTests.test_factory_confirmation_cannot_claim_optimization_without_material_rows()` — 验证工厂单、材料相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_confirmed_material_optimization.py:56` `ConfirmedMaterialOptimizationTests.preview`；`tests/test_confirmed_material_optimization.py:47` `ConfirmedMaterialOptimizationTests.state`
 
 ## `tests/test_core.py`
 
@@ -5444,6 +5558,116 @@ Swift/macOS 源码或测试辅助文件。
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
+## `tests/test_folder_manual_handling.py`
+
+自动化测试：验证 `folder_manual_handling` 模块或业务场景。
+
+- **L15 · 类** `FolderManualHandlingTests` — 定义与文件夹相关的类，集中保存数据和行为边界。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+
+- **L16 · 方法** `FolderManualHandlingTests.setUp()` — 设置与 `setUp` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `self.config.source_root.mkdir`；是否真实写入仍取决于分支和参数。
+
+- **L25 · 方法** `FolderManualHandlingTests.folder(name = 'PP0008-GLASSCABINET AND PP0035 PANELS')` — 封装文件夹相关的辅助逻辑，供所属模块或类型复用。
+  - 输入：`name = 'PP0008-GLASSCABINET AND PP0035 PANELS'`
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `(xml / 'layout file').mkdir`, `(xml / 'Optimize file.xml').write_text`, `(xml / 'layout file' / 'nesting_result.xml').write_text`, `(folder / 'Report').mkdir`, `(folder / 'Report' / 'Fittingslist.xlsx').write_bytes`；是否真实写入仍取决于分支和参数。
+
+- **L36 · 方法** `FolderManualHandlingTests.seed()` — 封装 `seed` 对应的辅助逻辑，供所属模块或类型复用。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.connection.executemany`, `store.upsert_aimes_factory`, `store.connection.execute`, `store.save_server_scan_policy`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
+
+- **L62 · 方法** `FolderManualHandlingTests.record(folder)` — 记录记录相关数据或步骤。
+  - 输入：`folder`
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.close`；是否真实写入仍取决于分支和参数。
+
+- **L68 · 方法** `FolderManualHandlingTests.facts()` — 封装 `facts` 对应的辅助逻辑，供所属模块或类型复用。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
+
+- **L77 · 方法** `FolderManualHandlingTests.change_xml(folder)` — 封装 `change_xml` 对应的辅助逻辑，供所属模块或类型复用。
+  - 输入：`folder`
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `path.write_text`；是否真实写入仍取决于分支和参数。
+
+- **L82 · 方法** `FolderManualHandlingTests.test_shipped_mixed_supplement_is_independent_and_can_have_no_references()` — 验证与 `test_shipped_mixed_supplement_is_independent_and_can_have_no_references` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:25` `FolderManualHandlingTests.folder`；`tests/test_folder_manual_handling.py:36` `FolderManualHandlingTests.seed`；`tests/test_folder_manual_handling.py:68` `FolderManualHandlingTests.facts`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `self.record`；是否真实写入仍取决于分支和参数。
+
+- **L99 · 方法** `FolderManualHandlingTests.test_new_aimes_factory_or_unknown_owner_prevents_mixed_supplement()` — 验证AIMES 数据、工厂单相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:25` `FolderManualHandlingTests.folder`；`tests/test_folder_manual_handling.py:36` `FolderManualHandlingTests.seed`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_aimes_factory`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
+
+- **L114 · 方法** `FolderManualHandlingTests.test_plain_folder_optional_references_and_duplicate_time()` — 验证文件夹、时间相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:25` `FolderManualHandlingTests.folder`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`；`tests/test_folder_manual_handling.py:68` `FolderManualHandlingTests.facts`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `self.record`；是否真实写入仍取决于分支和参数。
+
+- **L128 · 方法** `FolderManualHandlingTests.test_xml_change_remains_pending_past_deadline_then_new_completion()` — 验证与 `test_xml_change_remains_pending_past_deadline_then_new_completion` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:25` `FolderManualHandlingTests.folder`；`tests/test_folder_manual_handling.py:36` `FolderManualHandlingTests.seed`；`tests/test_folder_manual_handling.py:77` `FolderManualHandlingTests.change_xml`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `self.record`, `store.connection.execute`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
+
+- **L143 · 方法** `FolderManualHandlingTests.test_unchanged_folder_expires_independently_of_parent_orders()` — 验证文件夹相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:25` `FolderManualHandlingTests.folder`；`tests/test_folder_manual_handling.py:36` `FolderManualHandlingTests.seed`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.connection.execute`, `store.commit`, `store.close`, `self.record`；是否真实写入仍取决于分支和参数。
+
+- **L152 · 方法** `FolderManualHandlingTests.test_manual_route_blocks_preview_and_auto_outbound()` — 验证预览、出库相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:25` `FolderManualHandlingTests.folder`；`tests/test_folder_manual_handling.py:36` `FolderManualHandlingTests.seed`；`tests/test_folder_manual_handling.py:68` `FolderManualHandlingTests.facts`
+
+- **L162 · 方法** `FolderManualHandlingTests.test_failure_rolls_back_completion_and_baseline()` — 验证与 `test_failure_rolls_back_completion_and_baseline` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:25` `FolderManualHandlingTests.folder`；`tests/test_folder_manual_handling.py:36` `FolderManualHandlingTests.seed`；`tests/test_folder_manual_handling.py:68` `FolderManualHandlingTests.facts`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `self.record`；是否真实写入仍取决于分支和参数。
+
+- **L171 · 方法** `FolderManualHandlingTests.test_additive_migration_preserves_existing_temporary_record()` — 验证记录相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:25` `FolderManualHandlingTests.folder`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `self.record`, `store.connection.execute`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
+
+- **L184 · 方法** `FolderManualHandlingTests.test_single_order_supplement_and_fresh_aimes_rows()` — 验证订单、AIMES 数据相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:25` `FolderManualHandlingTests.folder`；`tests/test_folder_manual_handling.py:36` `FolderManualHandlingTests.seed`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_source_file`, `store.close`；是否真实写入仍取决于分支和参数。
+
+- **L194 · 方法** `FolderManualHandlingTests.test_xml_deletion_reopens_manual_task()` — 验证与 `test_xml_deletion_reopens_manual_task` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:25` `FolderManualHandlingTests.folder`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `path.unlink`, `self.record`；是否真实写入仍取决于分支和参数。
+
+- **L202 · 方法** `FolderManualHandlingTests.test_sync_discovers_supplement_without_parsing_or_projecting_it()` — 验证与 `test_sync_discovers_supplement_without_parsing_or_projecting_it` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_folder_manual_handling.py:25` `FolderManualHandlingTests.folder`；`tests/test_folder_manual_handling.py:36` `FolderManualHandlingTests.seed`；`tests/test_folder_manual_handling.py:68` `FolderManualHandlingTests.facts`；`tests/test_folder_manual_handling.py:62` `FolderManualHandlingTests.record`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `self.record`；是否真实写入仍取决于分支和参数。
+
 ## `tests/test_hardware_facts.py`
 
 自动化测试：验证 `hardware_facts` 模块或业务场景。
@@ -5465,36 +5689,42 @@ Swift/macOS 源码或测试辅助文件。
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `replace_factory_hardware`, `self.c.commit`, `reopened.execute`, `self.c.execute`；是否真实写入仍取决于分支和参数。
 
-- **L45 · 方法** `HardwareFactsTests.test_duplicate_legacy_paths_replaced_and_manual_preserved()` — 验证与 `test_duplicate_legacy_paths_replaced_and_manual_preserved` 对应的数据或步骤。
+- **L45 · 方法** `HardwareFactsTests.test_source_labels_do_not_change_canonical_fingerprint()` — 验证来源相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `replace_factory_hardware`, `self.c.commit`, `self.c.execute`；是否真实写入仍取决于分支和参数。
+
+- **L54 · 方法** `HardwareFactsTests.test_duplicate_legacy_paths_replaced_and_manual_preserved()` — 验证与 `test_duplicate_legacy_paths_replaced_and_manual_preserved` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `self.c.execute`, `replace_factory_hardware`；是否真实写入仍取决于分支和参数。
 
-- **L54 · 方法** `HardwareFactsTests.test_failed_insert_rolls_back_deletion_even_when_caller_commits()` — 验证与 `test_failed_insert_rolls_back_deletion_even_when_caller_commits` 对应的数据或步骤。
+- **L63 · 方法** `HardwareFactsTests.test_failed_insert_rolls_back_deletion_even_when_caller_commits()` — 验证与 `test_failed_insert_rolls_back_deletion_even_when_caller_commits` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `replace_factory_hardware`, `self.c.commit`, `self.c.execute`；是否真实写入仍取决于分支和参数。
 
-- **L63 · 方法** `HardwareFactsTests.test_material_only_preview_and_missing_factory_do_not_delete()` — 验证材料、预览、工厂单相关数据或步骤。
+- **L72 · 方法** `HardwareFactsTests.test_material_only_preview_and_missing_factory_do_not_delete()` — 验证材料、预览、工厂单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `replace_factory_hardware`, `self.c.commit`, `self.c.execute`；是否真实写入仍取决于分支和参数。
 
-- **L72 · 方法** `HardwareFactsTests.test_test_source_cannot_target_production_database()` — 验证来源、生产、数据库相关数据或步骤。
+- **L81 · 方法** `HardwareFactsTests.test_test_source_cannot_target_production_database()` — 验证来源、生产、数据库相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L82 · 方法** `HardwareFactsTests.test_confirmed_shipment_survives_changed_missing_data_and_rename()` — 验证与 `test_confirmed_shipment_survives_changed_missing_data_and_rename` 对应的数据或步骤。
+- **L91 · 方法** `HardwareFactsTests.test_confirmed_shipment_survives_changed_missing_data_and_rename()` — 验证与 `test_confirmed_shipment_survives_changed_missing_data_and_rename` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `self.c.execute`, `self.c.commit`, `replace_factory_hardware`, `reconcile_outbound_statuses`；是否真实写入仍取决于分支和参数。
 
-- **L102 · 方法** `HardwareFactsTests.test_complete_empty_and_missing_source_have_distinct_meanings()` — 验证来源相关数据或步骤。
+- **L111 · 方法** `HardwareFactsTests.test_complete_empty_and_missing_source_have_distinct_meanings()` — 验证来源相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
@@ -5504,142 +5734,142 @@ Swift/macOS 源码或测试辅助文件。
 
 自动化测试：验证 `inventory` 模块或业务场景。
 
-- **L68 · 类** `_FakeNodeInput` — 定义 `_FakeNodeInput` 类，集中保存该领域的数据和行为边界。
+- **L67 · 类** `_FakeNodeInput` — 定义 `_FakeNodeInput` 类，集中保存该领域的数据和行为边界。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L71 · 方法** `_FakeNodeInput.__init__()` — 初始化所属类型，把传入参数转换为后续方法可使用的状态。
+- **L70 · 方法** `_FakeNodeInput.__init__()` — 初始化所属类型，把传入参数转换为后续方法可使用的状态。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L75 · 方法** `_FakeNodeInput.write(value)` — 写入与 `write` 对应的数据或步骤。
+- **L74 · 方法** `_FakeNodeInput.write(value)` — 写入与 `write` 对应的数据或步骤。
   - 输入：`value`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L79 · 方法** `_FakeNodeInput.close()` — 关闭与 `close` 对应的数据或步骤。
+- **L78 · 方法** `_FakeNodeInput.close()` — 关闭与 `close` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L83 · 类** `_FakeNodeProcess` — 定义 `_FakeNodeProcess` 类，集中保存该领域的数据和行为边界。
+- **L82 · 类** `_FakeNodeProcess` — 定义 `_FakeNodeProcess` 类，集中保存该领域的数据和行为边界。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L86 · 方法** `_FakeNodeProcess.__init__(result = None, timeout = None)` — 初始化所属类型，把传入参数转换为后续方法可使用的状态。
+- **L85 · 方法** `_FakeNodeProcess.__init__(result = None, timeout = None)` — 初始化所属类型，把传入参数转换为后续方法可使用的状态。
   - 输入：`result = None`；`timeout = None`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:68` `_FakeNodeInput`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:67` `_FakeNodeInput`
 
-- **L96 · 方法** `_FakeNodeProcess.wait(timeout = None)` — 封装 `wait` 对应的辅助逻辑，供所属模块或类型复用。
+- **L95 · 方法** `_FakeNodeProcess.wait(timeout = None)` — 封装 `wait` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`timeout = None`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L102 · 方法** `_FakeNodeProcess.kill()` — 封装 `kill` 对应的辅助逻辑，供所属模块或类型复用。
+- **L101 · 方法** `_FakeNodeProcess.kill()` — 封装 `kill` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L116 · 函数** `make_traveler(path: Path, items)` — 创建Traveler相关数据或步骤。
+- **L115 · 函数** `make_traveler(path: Path, items)` — 创建Traveler相关数据或步骤。
   - 输入：`path: Path`；`items`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`；是否真实写入仍取决于分支和参数。
 
-- **L173 · 函数** `make_catalog(path: Path)` — 创建商品目录相关数据或步骤。
+- **L172 · 函数** `make_catalog(path: Path)` — 创建商品目录相关数据或步骤。
   - 输入：`path: Path`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `path.parent.mkdir`, `workbook.save`；是否真实写入仍取决于分支和参数。
 
-- **L190 · 函数** `make_priced_catalog(path: Path)` — 创建商品目录相关数据或步骤。
+- **L189 · 函数** `make_priced_catalog(path: Path)` — 创建商品目录相关数据或步骤。
   - 输入：`path: Path`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `path.parent.mkdir`, `workbook.save`；是否真实写入仍取决于分支和参数。
 
-- **L200 · 函数** `seed_sku_products(connection) -> None` — 封装 `seed_sku_products` 对应的辅助逻辑，供所属模块或类型复用。
+- **L199 · 函数** `seed_sku_products(connection) -> None` — 封装 `seed_sku_products` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`connection`
   - 返回：`None`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.executemany`；是否真实写入仍取决于分支和参数。
 
-- **L230 · 类** `InventoryTests` — 定义与库存相关的类，集中保存数据和行为边界。
+- **L229 · 类** `InventoryTests` — 定义与库存相关的类，集中保存数据和行为边界。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L231 · 方法** `InventoryTests.test_database_outbound_blocks_multiple_base_server_material_sources()` — 验证数据库、出库、Server 数据、材料相关数据或步骤。
+- **L230 · 方法** `InventoryTests.test_database_outbound_blocks_multiple_base_server_material_sources()` — 验证数据库、出库、Server 数据、材料相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:200` `seed_sku_products`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:199` `seed_sku_products`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`, `connection.commit`, `connection.close`；是否真实写入仍取决于分支和参数。
 
-- **L255 · 方法** `InventoryTests.test_shipment_without_hardware_marks_status_without_inventory_document()` — 验证五金、状态、库存相关数据或步骤。
+- **L254 · 方法** `InventoryTests.test_shipment_without_hardware_marks_status_without_inventory_document()` — 验证五金、状态、库存相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:173` `make_catalog`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:172` `make_catalog`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `(config.state_dir / 'inventory').mkdir`, `store.connection.execute`, `store.commit`, `store.close`, `mark_no_hardware_outbound`, `sqlite3.connect(config.workflow_database).execute`；是否真实写入仍取决于分支和参数。
 
-- **L286 · 方法** `InventoryTests.test_customer_supplied_outbound_marks_database_only_and_reopens_on_fact_change()` — 验证出库、数据库相关数据或步骤。
+- **L285 · 方法** `InventoryTests.test_customer_supplied_outbound_marks_database_only_and_reopens_on_fact_change()` — 验证出库、数据库相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:200` `seed_sku_products`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:199` `seed_sku_products`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.connection.execute`, `store.commit`, `store.close`, `set_outbound_scope`, `database_outbound_fingerprint`, `mark_customer_supplied_outbound`, `connection.execute`, `_refresh_outbound_status`, `connection.commit`, `connection.close`；是否真实写入仍取决于分支和参数。
 
-- **L351 · 方法** `InventoryTests.test_hardware_scope_requires_actual_positive_hardware_facts()` — 验证五金、范围相关数据或步骤。
+- **L350 · 方法** `InventoryTests.test_hardware_scope_requires_actual_positive_hardware_facts()` — 验证五金、范围相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.connection.execute`, `store.commit`, `store.close`, `outbound_scope_decisions`, `set_outbound_scope`；是否真实写入仍取决于分支和参数。
 
-- **L372 · 方法** `InventoryTests.test_outbound_scope_read_returns_latest_relevant_saved_decision()` — 验证出库、范围相关数据或步骤。
+- **L371 · 方法** `InventoryTests.test_outbound_scope_read_returns_latest_relevant_saved_decision()` — 验证出库、范围相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:200` `seed_sku_products`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:199` `seed_sku_products`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.connection.execute`, `store.commit`, `store.close`, `set_outbound_scope`, `outbound_scope_decisions`；是否真实写入仍取决于分支和参数。
 
-- **L408 · 方法** `InventoryTests.test_cut_to_size_customer_supplied_material_stays_fact_but_is_not_outbound()` — 验证材料、出库相关数据或步骤。
+- **L407 · 方法** `InventoryTests.test_cut_to_size_customer_supplied_material_stays_fact_but_is_not_outbound()` — 验证材料、出库相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:173` `make_catalog`；`tests/test_inventory.py:200` `seed_sku_products`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:172` `make_catalog`；`tests/test_inventory.py:199` `seed_sku_products`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `(config.state_dir / 'inventory').mkdir`, `store.connection.execute`, `store.commit`, `store.close`, `set_outbound_scope`, `sqlite3.connect(config.workflow_database).execute`；是否真实写入仍取决于分支和参数。
 
-- **L451 · 方法** `InventoryTests.test_database_outbound_blocks_mismatched_factory_name_order_prefix()` — 验证数据库、出库、工厂单、名称相关数据或步骤。
+- **L450 · 方法** `InventoryTests.test_database_outbound_blocks_mismatched_factory_name_order_prefix()` — 验证数据库、出库、工厂单、名称相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:200` `seed_sku_products`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:199` `seed_sku_products`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.connection.execute`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L475 · 方法** `InventoryTests.test_customer_supplied_scope_is_rejected_for_owned_order()` — 验证范围、订单相关数据或步骤。
+- **L474 · 方法** `InventoryTests.test_customer_supplied_scope_is_rejected_for_owned_order()` — 验证范围、订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.connection.execute`, `store.commit`, `store.close`, `set_outbound_scope`；是否真实写入仍取决于分支和参数。
 
-- **L489 · 方法** `InventoryTests.test_owned_order_rejects_even_normalized_outbound_scope_decision()` — 验证订单、出库、范围相关数据或步骤。
+- **L488 · 方法** `InventoryTests.test_owned_order_rejects_even_normalized_outbound_scope_decision()` — 验证订单、出库、范围相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.connection.execute`, `store.connection.commit`, `store.close`, `set_outbound_scope`；是否真实写入仍取决于分支和参数。
 
-- **L503 · 方法** `InventoryTests.test_remainder_decision_allows_empty_order_without_opening_browser()` — 验证订单相关数据或步骤。
+- **L502 · 方法** `InventoryTests.test_remainder_decision_allows_empty_order_without_opening_browser()` — 验证订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.connection.execute`, `store.commit`, `store.close`, `set_outbound_scope`；是否真实写入仍取决于分支和参数。
 
-- **L520 · 方法** `InventoryTests.test_database_order_outbound_preview_maps_without_traveler_file()` — 验证数据库、订单、出库、预览相关数据或步骤。
+- **L519 · 方法** `InventoryTests.test_database_order_outbound_preview_maps_without_traveler_file()` — 验证数据库、订单、出库、预览相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:173` `make_catalog`；`tests/test_inventory.py:200` `seed_sku_products`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:172` `make_catalog`；`tests/test_inventory.py:199` `seed_sku_products`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `(state / 'inventory').mkdir`, `(state / 'inventory' / 'mappings.json').write_text`, `store.connection.execute`, `store.connection.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L570 · 方法** `InventoryTests.test_order_context_source_no_longer_requires_traveler_gate()` — 验证订单、来源、Traveler相关数据或步骤。
+- **L569 · 方法** `InventoryTests.test_order_context_source_no_longer_requires_traveler_gate()` — 验证订单、来源、Traveler相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
@@ -5647,7 +5877,7 @@ Swift/macOS 源码或测试辅助文件。
 - **L657 · 方法** `InventoryTests.test_database_outbound_status_changes_when_persisted_order_data_changes()` — 验证数据库、出库、状态、订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:173` `make_catalog`；`tests/test_inventory.py:200` `seed_sku_products`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:172` `make_catalog`；`tests/test_inventory.py:199` `seed_sku_products`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `(state / 'inventory').mkdir`, `(state / 'inventory' / 'mappings.json').write_text`, `store.connection.execute`, `store.commit`, `store.close`, `_refresh_outbound_status`, `connection.execute`, `connection.commit`, `connection.close`；是否真实写入仍取决于分支和参数。
 
 - **L721 · 方法** `InventoryTests.test_inventory_page_detection_accepts_tenant_workbench_subdomain()` — 验证库存相关数据或步骤。
@@ -5718,7 +5948,7 @@ Swift/macOS 源码或测试辅助文件。
 - **L888 · 方法** `InventoryTests.test_order_preview_materials_can_be_mapped_for_stock_check()` — 验证订单、预览相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `catalog.parent.mkdir`, `mappings.write_text`；是否真实写入仍取决于分支和参数。
 
 - **L908 · 方法** `InventoryTests.test_jdy_runtime_uses_portable_overrides_and_rejects_missing_dependencies()` — 验证与 `test_jdy_runtime_uses_portable_overrides_and_rejects_missing_dependencies` 对应的数据或步骤。
@@ -5730,13 +5960,13 @@ Swift/macOS 源码或测试辅助文件。
 - **L935 · 方法** `InventoryTests.test_stock_requirements_default_to_materials_and_can_include_hardware()` — 验证五金相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:116` `make_traveler`；`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:115` `make_traveler`；`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `mappings.write_text`；是否真实写入仍取决于分支和参数。
 
 - **L952 · 方法** `InventoryTests.test_stock_check_compares_required_and_available_quantities()` — 验证与 `test_stock_check_compares_required_and_available_quantities` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:116` `make_traveler`；`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:115` `make_traveler`；`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `catalog.parent.mkdir`, `mappings.write_text`；是否真实写入仍取决于分支和参数。
 
 - **L980 · 方法** `InventoryTests.test_cut_to_size_folder_status_can_be_reconciled()` — 验证文件夹、状态相关数据或步骤。
@@ -5748,18 +5978,18 @@ Swift/macOS 源码或测试辅助文件。
 - **L1000 · 方法** `InventoryTests.test_online_catalog_update_exports_validates_and_installs()` — 验证商品目录相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `update_catalog_online`, `loaded.close`；是否真实写入仍取决于分支和参数。
 
 - **L1005 · 方法** `InventoryTests.test_online_catalog_update_exports_validates_and_installs.fake_export(_config, action, **kwargs)` — 封装 `fake_export` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`_config`；`action`；`**kwargs`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:172` `make_catalog`
 
 - **L1023 · 方法** `InventoryTests.test_catalog_import_persists_cost_price_and_keeps_missing_price_null()` — 验证商品目录、成本相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:190` `make_priced_catalog`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:189` `make_priced_catalog`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`, `connection.close`, `loaded.close`；是否真实写入仍取决于分支和参数。
 
 - **L1046 · 方法** `InventoryTests.test_catalog_change_summary_reports_added_updated_and_removed_products()` — 验证商品目录相关数据或步骤。
@@ -5781,18 +6011,18 @@ Swift/macOS 源码或测试辅助文件。
 - **L1088 · 方法** `InventoryTests.test_lazy_traveler_listing_reports_existing_catalog_status()` — 验证Traveler、商品目录、状态相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:172` `make_catalog`
 
 - **L1103 · 方法** `InventoryTests.test_catalog_refresh_keeps_only_latest_xlsx_backup()` — 验证商品目录、备份相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `inventory_dir.mkdir`, `old_backup.write_bytes`；是否真实写入仍取决于分支和参数。
 
 - **L1122 · 方法** `InventoryTests.test_runtime_product_search_uses_database_after_xlsx_is_removed()` — 验证数据库相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:173` `make_catalog`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:172` `make_catalog`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `catalog.parent.mkdir`, `catalog.unlink`, `loaded.close`；是否真实写入仍取决于分支和参数。
 
 - **L1136 · 方法** `InventoryTests.test_browser_error_preserves_specific_reason()` — 验证与 `test_browser_error_preserves_specific_reason` 对应的数据或步骤。
@@ -5828,13 +6058,13 @@ Swift/macOS 源码或测试辅助文件。
 - **L1192 · 方法** `InventoryTests.test_run_jdy_passes_attachable_chrome_endpoint()` — 验证与 `test_run_jdy_passes_attachable_chrome_endpoint` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:83` `_FakeNodeProcess`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:82` `_FakeNodeProcess`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `run_jdy`；是否真实写入仍取决于分支和参数。
 
 - **L1217 · 方法** `InventoryTests.test_run_jdy_reuses_existing_inventory_page_without_reading_keychain()` — 验证库存相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:83` `_FakeNodeProcess`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:82` `_FakeNodeProcess`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `run_jdy`；是否真实写入仍取决于分支和参数。
 
 - **L1246 · 方法** `InventoryTests.test_inventory_operation_journal_reuses_confirmed_production_across_retry_batch_numbers()` — 验证库存、操作、生产相关数据或步骤。
@@ -5864,25 +6094,25 @@ Swift/macOS 源码或测试辅助文件。
 - **L1341 · 方法** `InventoryTests.test_outbound_stops_before_browser_when_material_mapping_is_missing()` — 验证出库、材料、映射相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:116` `make_traveler`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:115` `make_traveler`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `traveler.parent.mkdir`, `run_jdy`；是否真实写入仍取决于分支和参数。
 
 - **L1357 · 方法** `InventoryTests.test_database_shipped_factory_is_hard_blocked()` — 验证数据库、工厂单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`, `assert_factory_orders_outbound_allowed`；是否真实写入仍取决于分支和参数。
 
 - **L1381 · 方法** `InventoryTests.test_database_shipped_factory_with_changed_data_can_be_updated()` — 验证数据库、工厂单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`, `assert_factory_orders_outbound_allowed`；是否真实写入仍取决于分支和参数。
 
 - **L1409 · 方法** `InventoryTests.test_run_jdy_converts_browser_timeout_to_actionable_rule_error()` — 验证与 `test_run_jdy_converts_browser_timeout_to_actionable_rule_error` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:83` `_FakeNodeProcess`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:82` `_FakeNodeProcess`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `run_jdy`；是否真实写入仍取决于分支和参数。
 
 - **L1426 · 方法** `InventoryTests.test_keychain_timeout_is_reported_as_credentials_error()` — 验证与 `test_keychain_timeout_is_reported_as_credentials_error` 对应的数据或步骤。
@@ -5894,60 +6124,60 @@ Swift/macOS 源码或测试辅助文件。
 - **L1441 · 方法** `InventoryTests.test_parse_dynamic_regions_and_zero()` — 验证与 `test_parse_dynamic_regions_and_zero` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:116` `make_traveler`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:115` `make_traveler`
 
 - **L1450 · 方法** `InventoryTests.test_fixed_mapping_and_push_open_expansion()` — 验证映射相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:116` `make_traveler`；`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:115` `make_traveler`；`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`, `mappings.write_text`；是否真实写入仍取决于分支和参数。
 
 - **L1471 · 方法** `InventoryTests.test_factory_selection_keeps_order_materials_and_selected_hardware_only()` — 验证工厂单、订单、五金相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:116` `make_traveler`；`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:115` `make_traveler`；`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `mappings.write_text`, `set`；是否真实写入仍取决于分支和参数。
 
 - **L1498 · 方法** `InventoryTests.test_zero_quantity_items_are_not_outbound_rows()` — 验证数量、出库相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:116` `make_traveler`；`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:115` `make_traveler`；`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `mappings.write_text`；是否真实写入仍取决于分支和参数。
 
 - **L1513 · 方法** `InventoryTests.test_unique_exact_inventory_name_maps_bls36()` — 验证库存、名称相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:116` `make_traveler`；`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:115` `make_traveler`；`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`, `mappings.write_text`；是否真实写入仍取决于分支和参数。
 
 - **L1530 · 方法** `InventoryTests.test_ignored_material_requires_reason_and_is_visible()` — 验证材料相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:116` `make_traveler`；`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:115` `make_traveler`；`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `mappings.write_text`；是否真实写入仍取决于分支和参数。
 
 - **L1543 · 方法** `InventoryTests.test_edge_quantity_is_rounded_half_up_for_inventory()` — 验证数量、库存相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:116` `make_traveler`；`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:115` `make_traveler`；`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `mappings.write_text`；是否真实写入仍取决于分支和参数。
 
 - **L1556 · 方法** `InventoryTests.test_manual_edge_mapping_also_rounds_quantity_for_inventory()` — 验证映射、数量、库存相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:116` `make_traveler`；`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:115` `make_traveler`；`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `mappings.write_text`；是否真实写入仍取决于分支和参数。
 
 - **L1577 · 方法** `InventoryTests.test_edge_prefers_matching_color_abs_banding_with_24mm_suffix()` — 验证颜色相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:116` `make_traveler`；`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:115` `make_traveler`；`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`, `mappings.write_text`；是否真实写入仍取决于分支和参数。
 
 - **L1598 · 方法** `InventoryTests.test_back_panel_8mm_and_9mm_are_bidirectional_aliases()` — 验证与 `test_back_panel_8mm_and_9mm_are_bidirectional_aliases` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:173` `make_catalog`；`tests/test_inventory.py:116` `make_traveler`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:172` `make_catalog`；`tests/test_inventory.py:115` `make_traveler`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`, `mappings.write_text`；是否真实写入仍取决于分支和参数。
 
 - **L1615 · 方法** `InventoryTests.test_ignored_mapping_can_be_saved_and_removed()` — 验证映射相关数据或步骤。
@@ -5959,108 +6189,102 @@ Swift/macOS 源码或测试辅助文件。
 - **L1627 · 方法** `InventoryTests.test_source_codes_are_not_treated_as_inventory_skus()` — 验证来源、库存相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `set_ignored_mapping`；是否真实写入仍取决于分支和参数。
 
 - **L1648 · 方法** `InventoryTests.test_lower_rail_names_resolve_to_l_rail_sku()` — 验证与 `test_lower_rail_names_resolve_to_l_rail_sku` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`；是否真实写入仍取决于分支和参数。
 
-- **L1667 · 方法** `InventoryTests.test_repair_hardware_collapses_lower_rail_pair_rows()` — 验证五金相关数据或步骤。
+- **L1667 · 方法** `InventoryTests.test_ignoring_hardware_preserves_confirmed_sku_facts()` — 验证五金相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:173` `make_catalog`；`tests/test_inventory.py:200` `seed_sku_products`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
-  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`, `connection.executemany`, `connection.commit`, `connection.close`, `connection.execute`；是否真实写入仍取决于分支和参数。
-
-- **L1704 · 方法** `InventoryTests.test_ignoring_hardware_removes_existing_database_facts()` — 验证五金、数据库相关数据或步骤。
-  - 输入：无显式参数（可能读取所属对象状态）
-  - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:200` `seed_sku_products`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:199` `seed_sku_products`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.executemany`, `connection.commit`, `connection.close`, `set_ignored_mapping`, `connection.execute`；是否真实写入仍取决于分支和参数。
 
-- **L1749 · 方法** `InventoryTests.test_manual_mapping_can_be_saved_and_replaces_ignore()` — 验证映射相关数据或步骤。
+- **L1705 · 方法** `InventoryTests.test_manual_mapping_can_be_saved_and_replaces_ignore()` — 验证映射相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `mappings.save_ignored`, `InventoryMappings(path).save_manual`；是否真实写入仍取决于分支和参数。
 
-- **L1759 · 方法** `InventoryTests.test_manual_mapping_can_be_viewed_updated_and_removed()` — 验证映射相关数据或步骤。
+- **L1715 · 方法** `InventoryTests.test_manual_mapping_can_be_viewed_updated_and_removed()` — 验证映射相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `save_manual_mapping`, `update_manual_mapping`；是否真实写入仍取决于分支和参数。
 
-- **L1773 · 方法** `InventoryTests.test_hardware_display_name_is_shared_by_sku_aliases()` — 验证五金、名称相关数据或步骤。
+- **L1729 · 方法** `InventoryTests.test_hardware_display_name_is_shared_by_sku_aliases()` — 验证五金、名称相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `save_manual_mapping`；是否真实写入仍取决于分支和参数。
 
-- **L1794 · 方法** `InventoryTests.test_sync_status_changes_with_traveler_fingerprint()` — 验证状态、Traveler相关数据或步骤。
+- **L1750 · 方法** `InventoryTests.test_sync_status_changes_with_traveler_fingerprint()` — 验证状态、Traveler相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:116` `make_traveler`；`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:115` `make_traveler`；`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `mapping_path.write_text`, `store.save_success`；是否真实写入仍取决于分支和参数。
 
-- **L1815 · 方法** `InventoryTests.test_order_material_outbound_links_only_selected_split_factories()` — 验证订单、材料、出库相关数据或步骤。
+- **L1771 · 方法** `InventoryTests.test_order_material_outbound_links_only_selected_split_factories()` — 验证订单、材料、出库相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:200` `seed_sku_products`；`tests/test_inventory.py:79` `_FakeNodeInput.close`；`tests/test_inventory.py:1856` `InventoryTests.test_order_material_outbound_links_only_selected_split_factories.preview`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:199` `seed_sku_products`；`tests/test_inventory.py:78` `_FakeNodeInput.close`；`tests/test_inventory.py:1812` `InventoryTests.test_order_material_outbound_links_only_selected_split_factories.preview`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.connection.execute`, `store.commit`, `store.close`, `OutboundItem`, `sync.save_success`, `connection.execute`, `connection.close`, `reconcile_outbound_statuses`；是否真实写入仍取决于分支和参数。
 
-- **L1856 · 方法** `InventoryTests.test_order_material_outbound_links_only_selected_split_factories.preview(factory_order)` — 预览预览相关数据或步骤。
+- **L1812 · 方法** `InventoryTests.test_order_material_outbound_links_only_selected_split_factories.preview(factory_order)` — 预览预览相关数据或步骤。
   - 输入：`factory_order`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L1947 · 方法** `InventoryTests.test_production_material_outbound_does_not_mark_factory_orders_shipped()` — 验证生产、材料、出库、工厂单相关数据或步骤。
+- **L1901 · 方法** `InventoryTests.test_production_material_outbound_does_not_mark_factory_orders_shipped()` — 验证生产、材料、出库、工厂单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:200` `seed_sku_products`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:199` `seed_sku_products`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`, `OutboundItem`, `_persist_single_outbound_result`, `connection.execute`, `sync.save_success`, `connection.close`；是否真实写入仍取决于分支和参数。
 
-- **L2036 · 方法** `InventoryTests.test_production_browser_success_commits_materials_and_batch()` — 验证生产相关数据或步骤。
+- **L1989 · 方法** `InventoryTests.test_production_browser_success_commits_materials_and_batch()` — 验证生产相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:200` `seed_sku_products`；`tests/test_inventory.py:79` `_FakeNodeInput.close`；`tests/test_inventory.py:83` `_FakeNodeProcess`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:199` `seed_sku_products`；`tests/test_inventory.py:78` `_FakeNodeInput.close`；`tests/test_inventory.py:82` `_FakeNodeProcess`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`, `OutboundItem`, `run_jdy`, `connection.execute`, `connection.close`；是否真实写入仍取决于分支和参数。
 
-- **L2124 · 方法** `InventoryTests.test_split_production_material_document_cleans_stale_factory_links()` — 验证生产、材料、工厂单相关数据或步骤。
+- **L2077 · 方法** `InventoryTests.test_split_production_material_document_cleans_stale_factory_links()` — 验证生产、材料、工厂单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:200` `seed_sku_products`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:199` `seed_sku_products`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`, `OutboundItem`, `sync.save_success`, `connection.execute`, `connection.commit`, `connection.close`, `reconcile_outbound_statuses`；是否真实写入仍取决于分支和参数。
 
-- **L2222 · 方法** `InventoryTests.test_previous_hardware_block_becoming_empty_requires_manual_void()` — 验证五金相关数据或步骤。
+- **L2175 · 方法** `InventoryTests.test_previous_hardware_block_becoming_empty_requires_manual_void()` — 验证五金相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:116` `make_traveler`；`tests/test_inventory.py:173` `make_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:115` `make_traveler`；`tests/test_inventory.py:172` `make_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `mapping_path.write_text`, `store.save_success`；是否真实写入仍取决于分支和参数。
 
-- **L2248 · 方法** `InventoryTests.test_hardware_shipment_ignores_previous_order_material_document()` — 验证五金、订单、材料相关数据或步骤。
+- **L2201 · 方法** `InventoryTests.test_hardware_shipment_ignores_previous_order_material_document()` — 验证五金、订单、材料相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`, `connection.commit`, `connection.close`, `OutboundItem`；是否真实写入仍取决于分支和参数。
 
-- **L2298 · 方法** `InventoryTests.test_outbound_status_prefers_factory_hardware_over_order_material_record()` — 验证出库、状态、工厂单、五金相关数据或步骤。
+- **L2251 · 方法** `InventoryTests.test_outbound_status_prefers_factory_hardware_over_order_material_record()` — 验证出库、状态、工厂单、五金相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `_refresh_outbound_status`, `_has_factory_hardware_outbound_record`；是否真实写入仍取决于分支和参数。
 
-- **L2332 · 方法** `InventoryTests.test_sqlite_outbound_record_uses_sync_kind_for_hardware_reconciliation()` — 验证出库、记录、五金相关数据或步骤。
+- **L2285 · 方法** `InventoryTests.test_sqlite_outbound_record_uses_sync_kind_for_hardware_reconciliation()` — 验证出库、记录、五金相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`, `connection.execute`, `connection.commit`, `connection.close`, `_load_outbound_records`, `reconcile_outbound_statuses`, `reopened.execute`；是否真实写入仍取决于分支和参数。
 
-- **L2395 · 方法** `InventoryTests.test_same_hardware_name_is_aggregated_within_factory()` — 验证五金、名称、工厂单相关数据或步骤。
+- **L2348 · 方法** `InventoryTests.test_same_hardware_name_is_aggregated_within_factory()` — 验证五金、名称、工厂单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:116` `make_traveler`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:115` `make_traveler`
 
 ## `tests/test_legacy_fittings.py`
 
@@ -6139,330 +6363,552 @@ Swift/macOS 源码或测试辅助文件。
 - **L65 · 方法** `static func main()` — 解析命令行参数，建立运行配置并分发到对应业务动作。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2026` `MacOSUIRegressionTests.testInventoryTravelerNewestFirst`；`tests/test_macos_ui.swift:118` `MacOSUIRegressionTests.testPushToTalkShortcut`；`tests/test_macos_ui.swift:124` `MacOSUIRegressionTests.testSpeechCommandCanonicalization`；`tests/test_macos_ui.swift:130` `MacOSUIRegressionTests.testAssistantOrderResultParsing`；`tests/test_macos_ui.swift:151` `MacOSUIRegressionTests.testAssistantCompactHelpAndCancelRules`；`tests/test_macos_ui.swift:159` `MacOSUIRegressionTests.testMaterialDisplayNames`；`tests/test_macos_ui.swift:231` `MacOSUIRegressionTests.testOrderDetailMaterialRows`；`tests/test_macos_ui.swift:259` `MacOSUIRegressionTests.testOrderDashboardRules`；`tests/test_macos_ui.swift:1080` `MacOSUIRegressionTests.testDashboardActivityIsScopedToAppSession`；`tests/test_macos_ui.swift:1107` `MacOSUIRegressionTests.testDashboardSessionMessagesAndAimesProgress`；`tests/test_macos_ui.swift:1297` `MacOSUIRegressionTests.testDashboardStartupProgressAndHistory`；`tests/test_macos_ui.swift:1447` `MacOSUIRegressionTests.testDashboardAimesStatusResolution`；另有 37 个直接调用
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2145` `MacOSUIRegressionTests.testInventoryTravelerNewestFirst`；`tests/test_macos_ui.swift:121` `MacOSUIRegressionTests.testPushToTalkShortcut`；`tests/test_macos_ui.swift:127` `MacOSUIRegressionTests.testSpeechCommandCanonicalization`；`tests/test_macos_ui.swift:133` `MacOSUIRegressionTests.testAssistantOrderResultParsing`；`tests/test_macos_ui.swift:154` `MacOSUIRegressionTests.testAssistantCompactHelpAndCancelRules`；`tests/test_macos_ui.swift:162` `MacOSUIRegressionTests.testMaterialDisplayNames`；`tests/test_macos_ui.swift:234` `MacOSUIRegressionTests.testOrderDetailMaterialRows`；`tests/test_macos_ui.swift:262` `MacOSUIRegressionTests.testOrderDashboardRules`；`tests/test_macos_ui.swift:1083` `MacOSUIRegressionTests.testDashboardActivityIsScopedToAppSession`；`tests/test_macos_ui.swift:1110` `MacOSUIRegressionTests.testDashboardSessionMessagesAndAimesProgress`；`tests/test_macos_ui.swift:1300` `MacOSUIRegressionTests.testDashboardStartupProgressAndHistory`；`tests/test_macos_ui.swift:1450` `MacOSUIRegressionTests.testDashboardAimesStatusResolution`；另有 40 个直接调用
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `testOrderOutboundFactorySelection`, `testServerWriteMaterialPreviewOrdering`, `testServerWriteHardwareChangeLayout`；是否真实写入仍取决于分支和参数。
 
-- **L118 · 方法** `private static func testPushToTalkShortcut()` — 验证与 `testPushToTalkShortcut` 对应的数据或步骤。
+- **L121 · 方法** `private static func testPushToTalkShortcut()` — 验证与 `testPushToTalkShortcut` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L124 · 方法** `private static func testSpeechCommandCanonicalization()` — 验证与 `testSpeechCommandCanonicalization` 对应的数据或步骤。
+- **L127 · 方法** `private static func testSpeechCommandCanonicalization()` — 验证与 `testSpeechCommandCanonicalization` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L130 · 方法** `private static func testAssistantOrderResultParsing()` — 验证订单、结果相关数据或步骤。
+- **L133 · 方法** `private static func testAssistantOrderResultParsing()` — 验证订单、结果相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L151 · 方法** `private static func testAssistantCompactHelpAndCancelRules()` — 验证与 `testAssistantCompactHelpAndCancelRules` 对应的数据或步骤。
+- **L154 · 方法** `private static func testAssistantCompactHelpAndCancelRules()` — 验证与 `testAssistantCompactHelpAndCancelRules` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L159 · 方法** `private static func testMaterialDisplayNames()` — 验证材料相关数据或步骤。
+- **L162 · 方法** `private static func testMaterialDisplayNames()` — 验证材料相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`；`tests/test_macos_ui.swift:196` `MacOSUIRegressionTests.material`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`；`tests/test_macos_ui.swift:199` `MacOSUIRegressionTests.material`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `inventoryCatalogUpdateSuccessStatus`, `inventoryCatalogUpdateFailureStatus`, `Set`；是否真实写入仍取决于分支和参数。
 
-- **L196 · 方法** `func material(_ kind: String, _ thickness: Double, _ color: String = "") -> OrderMaterialPreview` — 封装材料相关的辅助逻辑，供所属模块或类型复用。
+- **L199 · 方法** `func material(_ kind: String, _ thickness: Double, _ color: String = "") -> OrderMaterialPreview` — 封装材料相关的辅助逻辑，供所属模块或类型复用。
   - 输入：`_ kind: String`；`_ thickness: Double`；`_ color: String = ""`
   - 返回：`OrderMaterialPreview`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L231 · 方法** `private static func testOrderDetailMaterialRows()` — 验证订单、材料相关数据或步骤。
+- **L234 · 方法** `private static func testOrderDetailMaterialRows()` — 验证订单、材料相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L259 · 方法** `private static func testOrderDashboardRules()` — 验证订单、看板相关数据或步骤。
+- **L262 · 方法** `private static func testOrderDashboardRules()` — 验证订单、看板相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `openRequestedOrderIfAvailable`, `openOrderDetail`, `Set`；是否真实写入仍取决于分支和参数。
 
-- **L1080 · 方法** `private static func testDashboardActivityIsScopedToAppSession()` — 验证看板相关数据或步骤。
+- **L1083 · 方法** `private static func testDashboardActivityIsScopedToAppSession()` — 验证看板相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L1107 · 方法** `private static func testDashboardSessionMessagesAndAimesProgress()` — 验证看板、AIMES 数据、进度相关数据或步骤。
+- **L1110 · 方法** `private static func testDashboardSessionMessagesAndAimesProgress()` — 验证看板、AIMES 数据、进度相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`；`tests/test_macos_ui.swift:1128` `MacOSUIRegressionTests.aimesPayload`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`；`tests/test_macos_ui.swift:1131` `MacOSUIRegressionTests.aimesPayload`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `insert`, `refreshDashboardOrdersAfterOutbound`；是否真实写入仍取决于分支和参数。
 
-- **L1128 · 方法** `func aimesPayload(changed: Bool, changes: [[String: Any]], duration: Double) -> [String: Any]` — 封装AIMES 数据相关的辅助逻辑，供所属模块或类型复用。
+- **L1131 · 方法** `func aimesPayload(changed: Bool, changes: [[String: Any]], duration: Double) -> [String: Any]` — 封装AIMES 数据相关的辅助逻辑，供所属模块或类型复用。
   - 输入：`changed: Bool`；`changes: [[String: Any]]`；`duration: Double`
   - 返回：`[String: Any]`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L1297 · 方法** `private static func testDashboardStartupProgressAndHistory()` — 验证看板、进度相关数据或步骤。
+- **L1300 · 方法** `private static func testDashboardStartupProgressAndHistory()` — 验证看板、进度相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:1303` `MacOSUIRegressionTests.aimesResult`；`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`；`tests/test_macos_ui.swift:2827` `MacOSUIRegressionTests.fail`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:1306` `MacOSUIRegressionTests.aimesResult`；`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`；`tests/test_macos_ui.swift:2957` `MacOSUIRegressionTests.fail`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `Set`；是否真实写入仍取决于分支和参数。
 
-- **L1303 · 方法** `func aimesResult() -> [String: Any]` — 封装AIMES 数据、结果相关的辅助逻辑，供所属模块或类型复用。
+- **L1306 · 方法** `func aimesResult() -> [String: Any]` — 封装AIMES 数据、结果相关的辅助逻辑，供所属模块或类型复用。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`[String: Any]`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L1447 · 方法** `private static func testDashboardAimesStatusResolution()` — 验证看板、AIMES 数据、状态相关数据或步骤。
+- **L1450 · 方法** `private static func testDashboardAimesStatusResolution()` — 验证看板、AIMES 数据、状态相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `dashboardAimesStatusUpdate`；是否真实写入仍取决于分支和参数。
 
-- **L1527 · 方法** `private static func testPendingServerSelectionAndRefreshContract()` — 验证Server 数据相关数据或步骤。
+- **L1530 · 方法** `private static func testPendingServerSelectionAndRefreshContract()` — 验证Server 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `refreshDashboardAfterServerWrite`, `closePendingCenterIfEmpty`；是否真实写入仍取决于分支和参数。
 
-- **L1556 · 方法** `private static func testPendingInventorySourceFolderPath()` — 验证库存、来源、文件夹、路径相关数据或步骤。
+- **L1559 · 方法** `private static func testPendingInventorySourceFolderPath()` — 验证库存、来源、文件夹、路径相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L1574 · 方法** `private static func testPendingMaterialMappingIssueRoute()` — 验证材料、映射、待处理问题相关数据或步骤。
+- **L1577 · 方法** `private static func testPendingMaterialMappingIssueRoute()` — 验证材料、映射、待处理问题相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L1606 · 方法** `private static func testPendingInventoryMappingResumeContract()` — 验证库存、映射相关数据或步骤。
+- **L1609 · 方法** `private static func testPendingInventoryMappingResumeContract()` — 验证库存、映射相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `saveInventoryMapping`, `presentServerWritePreview`；是否真实写入仍取决于分支和参数。
 
-- **L1644 · 方法** `private static func testPendingCenterWorkflowUIContract()` — 验证与 `testPendingCenterWorkflowUIContract` 对应的数据或步骤。
+- **L1647 · 方法** `private static func testPendingCenterWorkflowUIContract()` — 验证与 `testPendingCenterWorkflowUIContract` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L1660 · 方法** `private static func testSelectedServerPreviewFailure()` — 验证Server 数据、预览相关数据或步骤。
+- **L1663 · 方法** `private static func testSelectedServerPreviewFailure()` — 验证Server 数据、预览相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L1675 · 方法** `private static func testHardwareSourceSelectionFlow()` — 验证五金、来源相关数据或步骤。
+- **L1678 · 方法** `private static func testHardwareSourceSelectionFlow()` — 验证五金、来源相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L1704 · 方法** `private static func testFolderPreviewMappingRecovery()` — 验证文件夹、预览、映射相关数据或步骤。
+- **L1707 · 方法** `private static func testManualHardwareEditorContract()` — 验证五金相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`；`tests/test_macos_ui.swift:2957` `MacOSUIRegressionTests.fail`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `saveManualHardware`；是否真实写入仍取决于分支和参数。
+
+- **L1736 · 方法** `private static func testServerNoChangeAcknowledgement()` — 验证Server 数据相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `ServerWritePreview`；是否真实写入仍取决于分支和参数。
+
+- **L1775 · 方法** `private static func testServerHardwareMappingRefresh()` — 验证Server 数据、五金、映射相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `ServerWritePreview`, `saveServerHardwareMapping`, `saveServerHardwareIgnoredMapping`；是否真实写入仍取决于分支和参数。
+
+- **L1823 · 方法** `private static func testFolderPreviewMappingRecovery()` — 验证文件夹、预览、映射相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `saveInventoryMapping`；是否真实写入仍取决于分支和参数。
 
-- **L1723 · 方法** `private static func testPendingMappingCallbacks()` — 验证映射相关数据或步骤。
+- **L1842 · 方法** `private static func testPendingMappingCallbacks()` — 验证映射相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:3132` `AppModel.retryPendingMappingPreview`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:3092` `AppModel.inventoryMappingWorkspaceDidDismiss`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:3132` `AppModel.retryPendingMappingPreview`；`.superpowers/tasks/pending-center-tasks12/review-baseline/macos/TravelerAssistant.swift:3092` `AppModel.inventoryMappingWorkspaceDidDismiss`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `saveInventoryMapping`, `closeInventoryMappingWorkspace`, `saveInventoryIgnoredMapping`；是否真实写入仍取决于分支和参数。
 
-- **L1838 · 方法** `private static func testPendingMappingMergesFolderIssues()` — 验证映射、文件夹相关数据或步骤。
+- **L1957 · 方法** `private static func testPendingMappingMergesFolderIssues()` — 验证映射、文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `saveInventoryMapping`, `closeInventoryMappingWorkspace`, `saveInventoryIgnoredMapping`；是否真实写入仍取决于分支和参数。
 
-- **L1867 · 方法** `private static func testOrderOutboundFactorySelection()` — 验证订单、出库、工厂单相关数据或步骤。
+- **L1986 · 方法** `private static func testOrderOutboundFactorySelection()` — 验证订单、出库、工厂单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `Set`, `orderDashboardOutboundDisplay`, `orderDashboardNeedsOutboundUpdateSelection`, `orderDashboardOutboundActionTitle`；是否真实写入仍取决于分支和参数。
 
-- **L1927 · 方法** `private static func testProductionFeedbackAndDashboardProgress()` — 验证生产、看板、进度相关数据或步骤。
+- **L2046 · 方法** `private static func testProductionFeedbackAndDashboardProgress()` — 验证生产、看板、进度相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `refreshDashboardAfterServerWrite`；是否真实写入仍取决于分支和参数。
 
-- **L2026 · 方法** `private static func testInventoryTravelerNewestFirst()` — 验证库存、Traveler相关数据或步骤。
+- **L2145 · 方法** `private static func testInventoryTravelerNewestFirst()` — 验证库存、Traveler相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2795` `MacOSUIRegressionTests.traveler`；`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2925` `MacOSUIRegressionTests.traveler`；`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2039 · 方法** `private static func testSharedPageHeaderHeight()` — 验证与 `testSharedPageHeaderHeight` 对应的数据或步骤。
+- **L2158 · 方法** `private static func testSharedPageHeaderHeight()` — 验证与 `testSharedPageHeaderHeight` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2063 · 方法** `private static func testAssistantOrderTimelineContract()` — 验证订单相关数据或步骤。
+- **L2182 · 方法** `private static func testAssistantOrderTimelineContract()` — 验证订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `openOrderCenter`；是否真实写入仍取决于分支和参数。
 
-- **L2223 · 方法** `private static func testAssistantStageIconAssets()` — 验证与 `testAssistantStageIconAssets` 对应的数据或步骤。
+- **L2353 · 方法** `private static func testAssistantStageIconAssets()` — 验证与 `testAssistantStageIconAssets` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2238 · 方法** `private static func testGlassDatePickerContract()` — 验证日期相关数据或步骤。
+- **L2368 · 方法** `private static func testGlassDatePickerContract()` — 验证日期相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2282 · 方法** `private static func testTodoTableHeaderRoundedCorners()` — 验证待办相关数据或步骤。
+- **L2412 · 方法** `private static func testTodoTableHeaderRoundedCorners()` — 验证待办相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2305 · 方法** `private static func testSettingsDefaultWindowLayoutContract()` — 验证设置相关数据或步骤。
+- **L2435 · 方法** `private static func testSettingsDefaultWindowLayoutContract()` — 验证设置相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2395 · 方法** `private static func testFixedWindowSizeContract()` — 验证与 `testFixedWindowSizeContract` 对应的数据或步骤。
+- **L2525 · 方法** `private static func testFixedWindowSizeContract()` — 验证与 `testFixedWindowSizeContract` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2416 · 方法** `private static func testInventoryActionLayoutRules()` — 验证库存相关数据或步骤。
+- **L2546 · 方法** `private static func testInventoryActionLayoutRules()` — 验证库存相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`；`tests/test_macos_ui.swift:2432` `MacOSUIRegressionTests.preview`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`；`tests/test_macos_ui.swift:2562` `MacOSUIRegressionTests.preview`
 
-- **L2432 · 方法** `func preview(_ name: String, _ section: String) -> InventoryPreviewRow` — 预览预览相关数据或步骤。
+- **L2562 · 方法** `func preview(_ name: String, _ section: String) -> InventoryPreviewRow` — 预览预览相关数据或步骤。
   - 输入：`_ name: String`；`_ section: String`
   - 返回：`InventoryPreviewRow`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L2461 · 方法** `private static func testRunningProgressReusesOperationRow()` — 验证进度、操作、行数据相关数据或步骤。
+- **L2591 · 方法** `private static func testRunningProgressReusesOperationRow()` — 验证进度、操作、行数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2827` `MacOSUIRegressionTests.fail`；`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2957` `MacOSUIRegressionTests.fail`；`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2475 · 方法** `private static func testDashboardInventoryProgressText()` — 验证看板、库存、进度相关数据或步骤。
+- **L2605 · 方法** `private static func testDashboardInventoryProgressText()` — 验证看板、库存、进度相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2497 · 方法** `private static func testInventoryProgressKeepsStageHistory()` — 验证库存、进度相关数据或步骤。
+- **L2627 · 方法** `private static func testInventoryProgressKeepsStageHistory()` — 验证库存、进度相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2508 · 方法** `private static func testDashboardSeparatesInventoryAndRefreshTiming()` — 验证看板、库存相关数据或步骤。
+- **L2638 · 方法** `private static func testDashboardSeparatesInventoryAndRefreshTiming()` — 验证看板、库存相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2534 · 方法** `private static func testOrderOperationDurationFormatting()` — 验证订单、操作相关数据或步骤。
+- **L2664 · 方法** `private static func testOrderOperationDurationFormatting()` — 验证订单、操作相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2539 · 方法** `private static func testServerWriteMaterialPreviewOrdering()` — 验证Server 数据、材料、预览相关数据或步骤。
+- **L2669 · 方法** `private static func testServerWriteMaterialPreviewOrdering()` — 验证Server 数据、材料、预览相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `ServerWriteMaterialChange`, `sortedServerWriteMaterialChanges`；是否真实写入仍取决于分支和参数。
 
-- **L2556 · 方法** `private static func testServerWriteHardwareChangeLayout()` — 验证Server 数据、五金相关数据或步骤。
+- **L2686 · 方法** `private static func testServerWriteHardwareChangeLayout()` — 验证Server 数据、五金相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `ServerWriteOrderPreview`；是否真实写入仍取决于分支和参数。
 
-- **L2586 · 方法** `private static func testProductionOrderPaths()` — 验证生产、订单相关数据或步骤。
+- **L2716 · 方法** `private static func testProductionOrderPaths()` — 验证生产、订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2597 · 方法** `private static func testStockFailureKeepsManualRetryEnabled()` — 验证与 `testStockFailureKeepsManualRetryEnabled` 对应的数据或步骤。
+- **L2727 · 方法** `private static func testStockFailureKeepsManualRetryEnabled()` — 验证与 `testStockFailureKeepsManualRetryEnabled` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2612 · 方法** `private static func testExistingTravelerCanBeUpdatedAfterPreviewFailure()` — 验证Traveler、预览相关数据或步骤。
+- **L2742 · 方法** `private static func testExistingTravelerCanBeUpdatedAfterPreviewFailure()` — 验证Traveler、预览相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `orderUpdateActionReady`；是否真实写入仍取决于分支和参数。
 
-- **L2627 · 方法** `private static func testDashboardTravelerActionsUseDatabaseFacts()` — 验证看板、Traveler、数据库相关数据或步骤。
+- **L2757 · 方法** `private static func testDashboardTravelerActionsUseDatabaseFacts()` — 验证看板、Traveler、数据库相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `orderTravelerOpenActionReady`；是否真实写入仍取决于分支和参数。
 
-- **L2640 · 方法** `private static func testRelatedPreviewMissingMaterialIssue()` — 验证预览、材料、待处理问题相关数据或步骤。
+- **L2770 · 方法** `private static func testRelatedPreviewMissingMaterialIssue()` — 验证预览、材料、待处理问题相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2656 · 方法** `private static func testPP0067MissingMaterialShowsPrompt()` — 验证材料相关数据或步骤。
+- **L2786 · 方法** `private static func testPP0067MissingMaterialShowsPrompt()` — 验证材料相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2827` `MacOSUIRegressionTests.fail`；`tests/test_macos_ui.swift:2819` `MacOSUIRegressionTests.pumpRunLoop`；`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2957` `MacOSUIRegressionTests.fail`；`tests/test_macos_ui.swift:2949` `MacOSUIRegressionTests.pumpRunLoop`；`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `pumpRunLoop`；是否真实写入仍取决于分支和参数。
 
-- **L2677 · 方法** `private static func testFullPageHeaderBoundaryAlignment()` — 验证与 `testFullPageHeaderBoundaryAlignment` 对应的数据或步骤。
+- **L2807 · 方法** `private static func testFullPageHeaderBoundaryAlignment()` — 验证与 `testFullPageHeaderBoundaryAlignment` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2686` `MacOSUIRegressionTests.headerBoundaryY`；`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2816` `MacOSUIRegressionTests.headerBoundaryY`；`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2686 · 方法** `private static func headerBoundaryY(flexibleContent: Bool) -> CGFloat` — 封装 `headerBoundaryY` 对应的辅助逻辑，供所属模块或类型复用。
+- **L2816 · 方法** `private static func headerBoundaryY(flexibleContent: Bool) -> CGFloat` — 封装 `headerBoundaryY` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`flexibleContent: Bool`
   - 返回：`CGFloat`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:21` `HeaderBoundaryProbeBox`；`tests/test_macos_ui.swift:39` `PageLayoutHarness`；`tests/test_macos_ui.swift:2819` `MacOSUIRegressionTests.pumpRunLoop`；`tests/test_macos_ui.swift:2827` `MacOSUIRegressionTests.fail`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:21` `HeaderBoundaryProbeBox`；`tests/test_macos_ui.swift:39` `PageLayoutHarness`；`tests/test_macos_ui.swift:2949` `MacOSUIRegressionTests.pumpRunLoop`；`tests/test_macos_ui.swift:2957` `MacOSUIRegressionTests.fail`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `pumpRunLoop`, `close`；是否真实写入仍取决于分支和参数。
 
-- **L2705 · 方法** `private static func testOperationLogScrollsAfterAppending()` — 验证操作、日志相关数据或步骤。
+- **L2835 · 方法** `private static func testOperationLogScrollsAfterAppending()` — 验证操作、日志相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2807` `MacOSUIRegressionTests.step`；`tests/test_macos_ui.swift:4` `OperationLogHarnessModel`；`tests/test_macos_ui.swift:12` `OperationLogHarnessView`；`tests/test_macos_ui.swift:2819` `MacOSUIRegressionTests.pumpRunLoop`；`tests/test_macos_ui.swift:2811` `MacOSUIRegressionTests.firstScrollView`；`tests/test_macos_ui.swift:2827` `MacOSUIRegressionTests.fail`；`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`；`tests/test_inventory.py:79` `_FakeNodeInput.close`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2937` `MacOSUIRegressionTests.step`；`tests/test_macos_ui.swift:4` `OperationLogHarnessModel`；`tests/test_macos_ui.swift:12` `OperationLogHarnessView`；`tests/test_macos_ui.swift:2949` `MacOSUIRegressionTests.pumpRunLoop`；`tests/test_macos_ui.swift:2941` `MacOSUIRegressionTests.firstScrollView`；`tests/test_macos_ui.swift:2957` `MacOSUIRegressionTests.fail`；`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`；`tests/test_inventory.py:78` `_FakeNodeInput.close`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `pumpRunLoop`, `close`；是否真实写入仍取决于分支和参数。
 
-- **L2756 · 方法** `private static func testOperationLogReader()` — 验证操作、日志相关数据或步骤。
+- **L2886 · 方法** `private static func testOperationLogReader()` — 验证操作、日志相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
 
-- **L2766 · 方法** `private static func testOperationLogMaintenance()` — 验证操作、日志相关数据或步骤。
+- **L2896 · 方法** `private static func testOperationLogMaintenance()` — 验证操作、日志相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_inventory.py:75` `_FakeNodeInput.write`；`tests/test_macos_ui.swift:2823` `MacOSUIRegressionTests.require`
+  - 静态可确认的项目内下一跳：`tests/test_inventory.py:74` `_FakeNodeInput.write`；`tests/test_macos_ui.swift:2953` `MacOSUIRegressionTests.require`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `write`；是否真实写入仍取决于分支和参数。
 
-- **L2795 · 方法** `private static func traveler(_ name: String, folder: String, modifiedAt: String) -> InventoryTraveler` — 封装Traveler相关的辅助逻辑，供所属模块或类型复用。
+- **L2925 · 方法** `private static func traveler(_ name: String, folder: String, modifiedAt: String) -> InventoryTraveler` — 封装Traveler相关的辅助逻辑，供所属模块或类型复用。
   - 输入：`_ name: String`；`folder: String`；`modifiedAt: String`
   - 返回：`InventoryTraveler`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L2807 · 方法** `private static func step(_ index: Int) -> InventoryStep` — 封装 `step` 对应的辅助逻辑，供所属模块或类型复用。
+- **L2937 · 方法** `private static func step(_ index: Int) -> InventoryStep` — 封装 `step` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`_ index: Int`
   - 返回：`InventoryStep`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L2811 · 方法** `private static func firstScrollView(in view: NSView) -> NSScrollView?` — 封装 `firstScrollView` 对应的辅助逻辑，供所属模块或类型复用。
+- **L2941 · 方法** `private static func firstScrollView(in view: NSView) -> NSScrollView?` — 封装 `firstScrollView` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`in view: NSView`
   - 返回：`NSScrollView?`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L2819 · 方法** `private static func pumpRunLoop(for seconds: TimeInterval)` — 封装 `pumpRunLoop` 对应的辅助逻辑，供所属模块或类型复用。
+- **L2949 · 方法** `private static func pumpRunLoop(for seconds: TimeInterval)` — 封装 `pumpRunLoop` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`for seconds: TimeInterval`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `run`；是否真实写入仍取决于分支和参数。
 
-- **L2823 · 方法** `private static func require(_ condition: @autoclosure () -> Bool, _ message: String)` — 封装 `require` 对应的辅助逻辑，供所属模块或类型复用。
+- **L2953 · 方法** `private static func require(_ condition: @autoclosure () -> Bool, _ message: String)` — 封装 `require` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`_ condition: @autoclosure () -> Bool`；`_ message: String`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2827` `MacOSUIRegressionTests.fail`
+  - 静态可确认的项目内下一跳：`tests/test_macos_ui.swift:2957` `MacOSUIRegressionTests.fail`
 
-- **L2827 · 方法** `private static func fail(_ message: String) -> Never` — 封装 `fail` 对应的辅助逻辑，供所属模块或类型复用。
+- **L2957 · 方法** `private static func fail(_ message: String) -> Never` — 封装 `fail` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`_ message: String`
   - 返回：`Never`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+
+## `tests/test_material_sku_contract.py`
+
+自动化测试：验证 `material_sku_contract` 模块或业务场景。
+
+- **L39 · 类** `MaterialSkuContractTests` — 定义与材料相关的类，集中保存数据和行为边界。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+
+- **L40 · 方法** `MaterialSkuContractTests.setUp() -> None` — 设置与 `setUp` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`None`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
+
+- **L62 · 方法** `MaterialSkuContractTests._write_catalog(name: str, rows: list[tuple[str, ...]]) -> Path` — 写入商品目录相关数据或步骤。
+  - 输入：`name: str`；`rows: list[tuple[str, ...]]`
+  - 返回：`Path`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`；是否真实写入仍取决于分支和参数。
+
+- **L75 · 方法** `MaterialSkuContractTests._import_standard_catalog() -> None` — 导入商品目录相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`None`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_contract.py:62` `MaterialSkuContractTests._write_catalog`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `self._write_catalog`；是否真实写入仍取决于分支和参数。
+
+- **L90 · 方法** `MaterialSkuContractTests._write_material_source(order_id: str = 'CS901', color: str = 'Contract Oak', panel_quantity: float = 2, edge_quantity: float = 6) -> Path` — 写入材料、来源相关数据或步骤。
+  - 输入：`order_id: str = 'CS901'`；`color: str = 'Contract Oak'`；`panel_quantity: float = 2`；`edge_quantity: float = 6`
+  - 返回：`Path`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `workbook.save`；是否真实写入仍取决于分支和参数。
+
+- **L126 · 方法** `MaterialSkuContractTests._confirmed_material_snapshot(order_id: str = 'CS901') -> list[tuple]` — 封装材料相关的辅助逻辑，供所属模块或类型复用。
+  - 输入：`order_id: str = 'CS901'`
+  - 返回：`list[tuple]`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`；是否真实写入仍取决于分支和参数。
+
+- **L135 · 方法** `MaterialSkuContractTests._confirm_standard_materials() -> OrderPreview` — 封装 `_confirm_standard_materials` 对应的辅助逻辑，供所属模块或类型复用。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`OrderPreview`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_contract.py:75` `MaterialSkuContractTests._import_standard_catalog`；`tests/test_material_sku_contract.py:90` `MaterialSkuContractTests._write_material_source`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `save_manual_mapping`, `self._write_material_source`；是否真实写入仍取决于分支和参数。
+
+- **L149 · 方法** `MaterialSkuContractTests.test_parse_confirm_reopen_and_repeat_keep_saved_skus_and_quantities() -> None` — 验证与 `test_parse_confirm_reopen_and_repeat_keep_saved_skus_and_quantities` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`None`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_contract.py:135` `MaterialSkuContractTests._confirm_standard_materials`；`tests/test_material_sku_contract.py:126` `MaterialSkuContractTests._confirmed_material_snapshot`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `set`；是否真实写入仍取决于分支和参数。
+
+- **L180 · 方法** `MaterialSkuContractTests.test_mapping_changes_do_not_rebind_confirmed_materials() -> None` — 验证映射相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`None`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_contract.py:135` `MaterialSkuContractTests._confirm_standard_materials`；`tests/test_material_sku_contract.py:126` `MaterialSkuContractTests._confirmed_material_snapshot`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `update_manual_mapping`；是否真实写入仍取决于分支和参数。
+
+- **L212 · 方法** `MaterialSkuContractTests.test_historical_production_and_server_allocations_keep_product_attributes_bound() -> None` — 验证生产、Server 数据相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`None`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_contract.py:75` `MaterialSkuContractTests._import_standard_catalog`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`；是否真实写入仍取决于分支和参数。
+
+- **L280 · 方法** `MaterialSkuContractTests.test_long_catalog_names_and_imperial_specs_project_source_business_attributes() -> None` — 验证商品目录、来源相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`None`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_contract.py:62` `MaterialSkuContractTests._write_catalog`；`tests/test_material_sku_contract.py:90` `MaterialSkuContractTests._write_material_source`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `self._write_catalog`, `save_manual_mapping`, `self._write_material_source`；是否真实写入仍取决于分支和参数。
+
+- **L318 · 方法** `MaterialSkuContractTests.test_server_memory_confirmation_copies_verified_long_name_product_attributes() -> None` — 验证Server 数据、名称相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`None`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_contract.py:62` `MaterialSkuContractTests._write_catalog`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `self._write_catalog`, `preview_connection.execute`, `connection.execute`；是否真实写入仍取决于分支和参数。
+
+- **L425 · 方法** `MaterialSkuContractTests.test_unmatched_and_disabled_materials_leave_old_facts_unchanged() -> None` — 验证与 `test_unmatched_and_disabled_materials_leave_old_facts_unchanged` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`None`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_contract.py:135` `MaterialSkuContractTests._confirm_standard_materials`；`tests/test_material_sku_contract.py:126` `MaterialSkuContractTests._confirmed_material_snapshot`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `InventoryMappings(self.config.workflow_database).save_manual`；是否真实写入仍取决于分支和参数。
+
+- **L462 · 方法** `MaterialSkuContractTests.test_catalog_refresh_preserves_referenced_missing_products() -> None` — 验证商品目录相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`None`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_contract.py:135` `MaterialSkuContractTests._confirm_standard_materials`；`tests/test_material_sku_contract.py:126` `MaterialSkuContractTests._confirmed_material_snapshot`；`tests/test_material_sku_contract.py:62` `MaterialSkuContractTests._write_catalog`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `self._write_catalog`, `connection.execute`；是否真实写入仍取决于分支和参数。
+
+- **L496 · 方法** `MaterialSkuContractTests.test_every_sku_fact_table_declares_and_enforces_product_foreign_key() -> None` — 验证与 `test_every_sku_fact_table_declares_and_enforces_product_foreign_key` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`None`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_contract.py:75` `MaterialSkuContractTests._import_standard_catalog`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
+
+- **L611 · 方法** `MaterialSkuContractTests.test_legacy_migration_preserves_consumption_and_is_idempotent() -> None` — 验证与 `test_legacy_migration_preserves_consumption_and_is_idempotent` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`None`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_contract.py:696` `MaterialSkuContractTests._create_legacy_database`；`tests/test_material_sku_contract.py:781` `MaterialSkuContractTests._migration_snapshot`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `config.workflow_database.parent.mkdir`, `database.replace`, `store.connection.execute`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
+
+- **L642 · 方法** `MaterialSkuContractTests.test_legacy_migration_failure_rolls_back_and_can_retry() -> None` — 验证与 `test_legacy_migration_failure_rolls_back_and_can_retry` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`None`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_contract.py:696` `MaterialSkuContractTests._create_legacy_database`；`tests/test_material_sku_contract.py:762` `MaterialSkuContractTests._legacy_material_snapshot`；`tests/test_material_sku_contract.py:769` `MaterialSkuContractTests._legacy_target_schema`；`tests/test_material_sku_contract.py:781` `MaterialSkuContractTests._migration_snapshot`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`；是否真实写入仍取决于分支和参数。
+
+- **L674 · 方法** `MaterialSkuContractTests.test_legacy_migration_upgrades_an_empty_production_material_table() -> None` — 验证生产、材料相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`None`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_contract.py:696` `MaterialSkuContractTests._create_legacy_database`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`；是否真实写入仍取决于分支和参数。
+
+- **L696 · 方法** `MaterialSkuContractTests._create_legacy_database(path: Path, include_unresolved: bool = False, include_production: bool = True) -> None` — 创建数据库相关数据或步骤。
+  - 输入：`path: Path`；`include_unresolved: bool = False`；`include_production: bool = True`
+  - 返回：`None`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`, `connection.commit`, `connection.close`；是否真实写入仍取决于分支和参数。
+
+- **L762 · 方法** `MaterialSkuContractTests._legacy_material_snapshot(path: Path) -> list[tuple]` — 封装材料相关的辅助逻辑，供所属模块或类型复用。
+  - 输入：`path: Path`
+  - 返回：`list[tuple]`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`；是否真实写入仍取决于分支和参数。
+
+- **L769 · 方法** `MaterialSkuContractTests._legacy_target_schema(path: Path) -> list[tuple]` — 封装 `_legacy_target_schema` 对应的辅助逻辑，供所属模块或类型复用。
+  - 输入：`path: Path`
+  - 返回：`list[tuple]`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`；是否真实写入仍取决于分支和参数。
+
+- **L781 · 方法** `MaterialSkuContractTests._migration_snapshot(path: Path) -> dict[str, list[tuple]]` — 封装 `_migration_snapshot` 对应的辅助逻辑，供所属模块或类型复用。
+  - 输入：`path: Path`
+  - 返回：`dict[str, list[tuple]]`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`；是否真实写入仍取决于分支和参数。
+
+## `tests/test_material_sku_outbound_history.py`
+
+自动化测试：验证 `material_sku_outbound_history` 模块或业务场景。
+
+- **L26 · 函数** `legacy_raw_fingerprint(name: str, quantity: float) -> str` — 封装 `legacy_raw_fingerprint` 对应的辅助逻辑，供所属模块或类型复用。
+  - 输入：`name: str`；`quantity: float`
+  - 返回：`str`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+
+- **L39 · 函数** `mapped_fingerprint(product_code: str, quantity: float) -> str` — 封装 `mapped_fingerprint` 对应的辅助逻辑，供所属模块或类型复用。
+  - 输入：`product_code: str`；`quantity: float`
+  - 返回：`str`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+
+- **L50 · 类** `MaterialSkuOutboundHistoryTests` — 定义与材料、出库相关的类，集中保存数据和行为边界。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+
+- **L51 · 方法** `MaterialSkuOutboundHistoryTests.setUp()` — 设置与 `setUp` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_outbound_history.py:26` `legacy_raw_fingerprint`；`tests/test_material_sku_outbound_history.py:39` `mapped_fingerprint`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `order_store.close`, `connection.execute`, `connection.executemany`, `connection.commit`, `connection.close`, `InventoryMappings(self.config.workflow_database).save_manual`；是否真实写入仍取决于分支和参数。
+
+- **L143 · 方法** `MaterialSkuOutboundHistoryTests.preview()` — 预览预览相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+
+- **L149 · 方法** `MaterialSkuOutboundHistoryTests.assert_unchanged(preview)` — 强制校验与 `assert_unchanged` 对应的数据或步骤。
+  - 输入：`preview`
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+
+- **L158 · 方法** `MaterialSkuOutboundHistoryTests.assert_changed(preview)` — 强制校验与 `assert_changed` 对应的数据或步骤。
+  - 输入：`preview`
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+
+- **L167 · 方法** `MaterialSkuOutboundHistoryTests.update_material(product_code: str, quantity: float)` — 更新材料相关数据或步骤。
+  - 输入：`product_code: str`；`quantity: float`
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`, `connection.commit`, `connection.close`；是否真实写入仍取决于分支和参数。
+
+- **L180 · 方法** `MaterialSkuOutboundHistoryTests.test_legacy_human_name_fingerprint_remains_unchanged_for_same_sku_and_quantity()` — 验证名称、数量相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_outbound_history.py:143` `MaterialSkuOutboundHistoryTests.preview`；`tests/test_material_sku_outbound_history.py:149` `MaterialSkuOutboundHistoryTests.assert_unchanged`
+
+- **L187 · 方法** `MaterialSkuOutboundHistoryTests.test_quantity_or_sku_change_still_requires_outbound_update()` — 验证数量、出库相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_outbound_history.py:167` `MaterialSkuOutboundHistoryTests.update_material`；`tests/test_material_sku_outbound_history.py:158` `MaterialSkuOutboundHistoryTests.assert_changed`；`tests/test_material_sku_outbound_history.py:143` `MaterialSkuOutboundHistoryTests.preview`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `self.update_material`；是否真实写入仍取决于分支和参数。
+
+- **L197 · 方法** `MaterialSkuOutboundHistoryTests.test_mapping_change_does_not_rebind_saved_material_sku()` — 验证映射、材料相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_outbound_history.py:143` `MaterialSkuOutboundHistoryTests.preview`；`tests/test_material_sku_outbound_history.py:149` `MaterialSkuOutboundHistoryTests.assert_unchanged`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `InventoryMappings(self.config.workflow_database).save_manual`；是否真实写入仍取决于分支和参数。
+
+- **L207 · 方法** `MaterialSkuOutboundHistoryTests.test_ignore_change_does_not_remove_confirmed_material_sku()` — 验证材料相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_material_sku_outbound_history.py:143` `MaterialSkuOutboundHistoryTests.preview`；`tests/test_material_sku_outbound_history.py:149` `MaterialSkuOutboundHistoryTests.assert_unchanged`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `InventoryMappings(self.config.workflow_database).save_ignored`；是否真实写入仍取决于分支和参数。
 
 ## `tests/test_operation_log.py`
 
@@ -6498,13 +6944,13 @@ Swift/macOS 源码或测试辅助文件。
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L13 · 方法** `OrderDetailsTests.test_hardware_detail_projects_display_name_without_changing_raw_fact()` — 验证五金、名称相关数据或步骤。
+- **L13 · 方法** `OrderDetailsTests.test_hardware_detail_uses_catalog_not_mapping_display_alias()` — 验证五金、商品目录、映射相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `OrderIndexStore(config.workflow_database).close`, `_replace_product_database`, `connection.execute`, `connection.commit`, `connection.close`, `save_manual_mapping`；是否真实写入仍取决于分支和参数。
 
-- **L52 · 方法** `OrderDetailsTests.test_panel_projection_uses_one_color_image_identity_across_thicknesses()` — 验证颜色相关数据或步骤。
+- **L47 · 方法** `OrderDetailsTests.test_panel_projection_uses_one_color_image_identity_across_thicknesses()` — 验证颜色相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
@@ -6553,694 +6999,706 @@ Swift/macOS 源码或测试辅助文件。
   - 静态可确认的项目内下一跳：`tests/test_order_index.py:82` `OrderIndexTests._seed_sku_products`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `current.upsert_order`, `current.upsert_factory`, `current.connection.execute`, `current.commit`, `current.close`, `preview.upsert_order`, `preview.upsert_factory`, `preview.connection.executemany`, `preview.connection.execute`；是否真实写入仍取决于分支和参数。
 
-- **L305 · 方法** `OrderIndexTests.test_invalid_preview_folder_reports_path_without_copying_database()` — 验证预览、文件夹、路径、数据库相关数据或步骤。
+- **L293 · 方法** `OrderIndexTests.test_invalid_preview_folder_reports_path_without_copying_database()` — 验证预览、文件夹、路径、数据库相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `(folder / 'nesting_result.xml').write_text`；是否真实写入仍取决于分支和参数。
 
-- **L322 · 方法** `OrderIndexTests.test_server_preview_requires_factory_confirmation_before_production_write()` — 验证Server 数据、预览、工厂单、生产相关数据或步骤。
+- **L310 · 方法** `OrderIndexTests.test_server_preview_requires_factory_confirmation_before_production_write()` — 验证Server 数据、预览、工厂单、生产相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_index.py:123` `OrderIndexTests._seed_config_products`；`tests/test_order_workflow.py:80` `make_materials`；`tests/test_order_workflow.py:113` `make_board_material_report`；`tests/test_order_workflow.py:138` `make_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_index.py:123` `OrderIndexTests._seed_config_products`；`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:114` `make_board_material_report`；`tests/test_order_workflow.py:139` `make_fittings`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.mkdir`, `stale.upsert_order`, `stale.upsert_factory`, `stale.connection.execute`, `stale.commit`, `stale.close`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L398 · 方法** `OrderIndexTests.test_selected_server_folder_validation_does_not_touch_other_aimes_orders()` — 验证Server 数据、文件夹、AIMES 数据相关数据或步骤。
+- **L386 · 方法** `OrderIndexTests.test_selected_server_folder_validation_does_not_touch_other_aimes_orders()` — 验证Server 数据、文件夹、AIMES 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_index.py:123` `OrderIndexTests._seed_config_products`；`tests/test_order_workflow.py:80` `make_materials`；`tests/test_order_workflow.py:113` `make_board_material_report`；`tests/test_order_workflow.py:138` `make_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_index.py:123` `OrderIndexTests._seed_config_products`；`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:114` `make_board_material_report`；`tests/test_order_workflow.py:139` `make_fittings`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.mkdir`, `store.upsert_order`, `store.connection.execute`, `store.upsert_factory`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L456 · 方法** `OrderIndexTests.test_server_preview_preserves_recut_material_and_requires_hardware_choice()` — 验证Server 数据、预览、材料、五金相关数据或步骤。
+- **L444 · 方法** `OrderIndexTests.test_server_preview_preserves_recut_material_and_requires_hardware_choice()` — 验证Server 数据、预览、材料、五金相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`；`tests/test_order_workflow.py:113` `make_board_material_report`；`tests/test_order_workflow.py:138` `make_fittings`；`tests/test_order_index.py:82` `OrderIndexTests._seed_sku_products`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:114` `make_board_material_report`；`tests/test_order_workflow.py:139` `make_fittings`；`tests/test_order_index.py:82` `OrderIndexTests._seed_sku_products`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `current.upsert_order`, `current.upsert_factory`, `current.connection.execute`, `current.commit`, `current.close`；是否真实写入仍取决于分支和参数。
 
-- **L580 · 方法** `OrderIndexTests.test_server_confirmation_writes_materials_and_factory_hardware_after_mapping()` — 验证Server 数据、工厂单、五金、映射相关数据或步骤。
+- **L562 · 方法** `OrderIndexTests.test_server_confirmation_writes_materials_and_factory_hardware_after_mapping()` — 验证Server 数据、工厂单、五金、映射相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_index.py:123` `OrderIndexTests._seed_config_products`；`tests/test_order_workflow.py:80` `make_materials`；`tests/test_order_workflow.py:113` `make_board_material_report`；`tests/test_order_workflow.py:138` `make_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_index.py:123` `OrderIndexTests._seed_config_products`；`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:114` `make_board_material_report`；`tests/test_order_workflow.py:139` `make_fittings`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.mkdir`, `current.upsert_order`, `current.upsert_factory`, `current.commit`, `current.close`, `InventoryMappings(config.workflow_database).save_manual`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L619 · 方法** `OrderIndexTests.test_server_confirmation_writes_materials_and_factory_hardware_after_mapping.resolve_items(current_config, pairs)` — 解析并确定与 `resolve_items` 对应的数据或步骤。
+- **L601 · 方法** `OrderIndexTests.test_server_confirmation_writes_materials_and_factory_hardware_after_mapping.resolve_items(current_config, pairs)` — 解析并确定与 `resolve_items` 对应的数据或步骤。
   - 输入：`current_config`；`pairs`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L753 · 方法** `OrderIndexTests.test_cut_to_size_server_confirmation_can_skip_hardware_for_entire_order()` — 验证Server 数据、五金、订单相关数据或步骤。
+- **L735 · 方法** `OrderIndexTests.test_cut_to_size_server_confirmation_can_skip_hardware_for_entire_order()` — 验证Server 数据、五金、订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_index.py:123` `OrderIndexTests._seed_config_products`；`tests/test_order_workflow.py:80` `make_materials`；`tests/test_order_workflow.py:113` `make_board_material_report`；`tests/test_order_workflow.py:138` `make_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_index.py:123` `OrderIndexTests._seed_config_products`；`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:114` `make_board_material_report`；`tests/test_order_workflow.py:139` `make_fittings`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `current.upsert_order`, `current.commit`, `current.close`, `report.mkdir`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L785 · 方法** `OrderIndexTests.test_cut_to_size_server_confirmation_can_skip_hardware_for_entire_order.unresolved(current_config, pairs)` — 封装 `unresolved` 对应的辅助逻辑，供所属模块或类型复用。
+- **L767 · 方法** `OrderIndexTests.test_cut_to_size_server_confirmation_can_skip_hardware_for_entire_order.unresolved(current_config, pairs)` — 封装 `unresolved` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`current_config`；`pairs`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L848 · 方法** `OrderIndexTests.test_server_scan_blocks_material_preview_until_source_file_is_fixed()` — 验证Server 数据、材料、预览、来源相关数据或步骤。
+- **L830 · 方法** `OrderIndexTests.test_server_scan_blocks_material_preview_until_source_file_is_fixed()` — 验证Server 数据、材料、预览、来源相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_index.py:123` `OrderIndexTests._seed_config_products`；`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_index.py:123` `OrderIndexTests._seed_config_products`；`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `material_path.write_bytes`；是否真实写入仍取决于分支和参数。
 
-- **L911 · 方法** `OrderIndexTests.test_server_preview_validates_material_before_room_allocation()` — 验证Server 数据、预览、材料相关数据或步骤。
+- **L893 · 方法** `OrderIndexTests.test_server_preview_validates_material_before_room_allocation()` — 验证Server 数据、预览、材料相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `workbook.save`；是否真实写入仍取决于分支和参数。
 
-- **L941 · 方法** `OrderIndexTests.test_server_material_allocation_splits_one_source_row_between_orders()` — 验证Server 数据、材料、来源、行数据相关数据或步骤。
+- **L923 · 方法** `OrderIndexTests.test_server_material_allocation_splits_one_source_row_between_orders()` — 验证Server 数据、材料、来源、行数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：`tests/test_order_index.py:123` `OrderIndexTests._seed_config_products`；`tests/test_order_index.py:82` `OrderIndexTests._seed_sku_products`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `preview.upsert_order`, `preview.upsert_factory`, `preview.connection.execute`, `preview.commit`, `preview.close`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L1013 · 方法** `OrderIndexTests.test_server_material_allocation_ignores_stale_sqlite_row_ids()` — 验证Server 数据、材料、行数据相关数据或步骤。
+- **L995 · 方法** `OrderIndexTests.test_server_material_allocation_ignores_stale_sqlite_row_ids()` — 验证Server 数据、材料、行数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：`tests/test_order_index.py:123` `OrderIndexTests._seed_config_products`；`tests/test_order_index.py:82` `OrderIndexTests._seed_sku_products`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `preview.upsert_order`, `preview.connection.execute`, `preview.commit`, `preview.close`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L1086 · 方法** `OrderIndexTests.test_resolved_mapping_clears_stale_order_validation_error()` — 验证映射、订单相关数据或步骤。
+- **L1068 · 方法** `OrderIndexTests.test_resolved_mapping_clears_stale_order_validation_error()` — 验证映射、订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.connection.execute`, `set`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L1116 · 方法** `OrderIndexTests.test_unresolved_mapping_keeps_order_validation_error()` — 验证映射、订单相关数据或步骤。
+- **L1098 · 方法** `OrderIndexTests.test_unresolved_mapping_keeps_order_validation_error()` — 验证映射、订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L1146 · 方法** `OrderIndexTests.test_fully_shipped_temporary_order_is_excluded_from_unfinished_stage()` — 验证订单相关数据或步骤。
+- **L1128 · 方法** `OrderIndexTests.test_fully_shipped_temporary_order_is_excluded_from_unfinished_stage()` — 验证订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L1180 · 方法** `OrderIndexTests.test_temporary_projection_is_removed_without_overwriting_formal_order()` — 验证订单相关数据或步骤。
+- **L1162 · 方法** `OrderIndexTests.test_temporary_projection_is_removed_without_overwriting_formal_order()` — 验证订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `formal_folder.mkdir`, `store.upsert_order`, `store.upsert_factory`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L1218 · 方法** `OrderIndexTests.test_aimes_stage_durations_exclude_aggregate_and_account_for_backend_overhead()` — 验证AIMES 数据相关数据或步骤。
+- **L1200 · 方法** `OrderIndexTests.test_aimes_stage_durations_exclude_aggregate_and_account_for_backend_overhead()` — 验证AIMES 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L1234 · 方法** `OrderIndexTests.test_order_annotations_store_single_actual_installation_start_date()` — 验证订单、日期相关数据或步骤。
+- **L1216 · 方法** `OrderIndexTests.test_order_annotations_store_single_actual_installation_start_date()` — 验证订单、日期相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`, `save_order_annotations`, `reopened.upsert_order`, `reopened.close`；是否真实写入仍取决于分支和参数。
 
-- **L1287 · 方法** `OrderIndexTests.test_order_annotations_reject_multiple_actual_installation_dates()` — 验证订单相关数据或步骤。
+- **L1269 · 方法** `OrderIndexTests.test_order_annotations_reject_multiple_actual_installation_dates()` — 验证订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.commit`, `store.save_order_annotations`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L1306 · 方法** `OrderIndexTests.test_order_index_collapses_historical_actual_installation_dates()` — 验证订单相关数据或步骤。
+- **L1288 · 方法** `OrderIndexTests.test_order_index_collapses_historical_actual_installation_dates()` — 验证订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.connection.execute`, `store.connection.executemany`, `store.connection.commit`, `store.close`, `reopened.connection.execute`, `reopened.close`；是否真实写入仍取决于分支和参数。
 
-- **L1341 · 方法** `OrderIndexTests.test_order_annotations_allow_missing_installer_but_reject_duplicate_dates()` — 验证订单相关数据或步骤。
+- **L1323 · 方法** `OrderIndexTests.test_order_annotations_allow_missing_installer_but_reject_duplicate_dates()` — 验证订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.commit`, `store.save_order_annotations`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L1383 · 方法** `OrderIndexTests.test_server_folder_rename_requires_unique_identical_report_signature()` — 验证Server 数据、文件夹相关数据或步骤。
+- **L1365 · 方法** `OrderIndexTests.test_server_folder_rename_requires_unique_identical_report_signature()` — 验证Server 数据、文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L1397 · 方法** `OrderIndexTests.test_server_material_replacement_collapses_old_source_path_rows()` — 验证Server 数据、材料、来源、路径相关数据或步骤。
+- **L1379 · 方法** `OrderIndexTests.test_server_material_replacement_collapses_old_source_path_rows()` — 验证Server 数据、材料、来源、路径相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：`tests/test_order_index.py:82` `OrderIndexTests._seed_sku_products`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.commit`, `current_path.parent.mkdir`, `current_path.write_bytes`, `store.connection.execute`, `_replace_server_material_facts`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L1434 · 方法** `OrderIndexTests.test_server_material_scope_retires_rows_from_previous_server_root()` — 验证Server 数据、材料、范围相关数据或步骤。
+- **L1416 · 方法** `OrderIndexTests.test_server_material_scope_retires_rows_from_previous_server_root()` — 验证Server 数据、材料、范围相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：`tests/test_order_index.py:82` `OrderIndexTests._seed_sku_products`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `path.parent.mkdir`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L1476 · 方法** `OrderIndexTests.test_prepared_sync_can_resolve_material_mappings_before_fittings_import_path()` — 验证材料、路径相关数据或步骤。
+- **L1458 · 方法** `OrderIndexTests.test_material_scope_preserves_facts_without_equivalent_replacement()` — 验证材料、范围相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_order_index.py:82` `OrderIndexTests._seed_sku_products`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.connection.executemany`, `store.connection.execute`, `set`, `store.close`；是否真实写入仍取决于分支和参数。
+
+- **L1484 · 方法** `OrderIndexTests.test_material_scope_cleanup_preserves_other_order_in_shared_workbook()` — 验证材料、范围、订单相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_order_index.py:82` `OrderIndexTests._seed_sku_products`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.connection.execute`, `set`, `store.close`；是否真实写入仍取决于分支和参数。
+
+- **L1513 · 方法** `OrderIndexTests.test_prepared_sync_can_resolve_material_mappings_before_fittings_import_path()` — 验证材料、路径相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `material.parent.mkdir`, `material.write_bytes`；是否真实写入仍取决于分支和参数。
 
-- **L1505 · 方法** `OrderIndexTests.test_server_read_trace_is_grouped_by_folder_and_file_kind()` — 验证Server 数据、文件夹、文件相关数据或步骤。
+- **L1542 · 方法** `OrderIndexTests.test_server_read_trace_is_grouped_by_folder_and_file_kind()` — 验证Server 数据、文件夹、文件相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L1522 · 方法** `OrderIndexTests.test_server_read_trace_limits_folder_examples()` — 验证Server 数据、文件夹相关数据或步骤。
+- **L1559 · 方法** `OrderIndexTests.test_server_read_trace_limits_folder_examples()` — 验证Server 数据、文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L1534 · 方法** `OrderIndexTests.test_server_scan_covers_owned_and_cut_to_size_roots()` — 验证Server 数据相关数据或步骤。
+- **L1571 · 方法** `OrderIndexTests.test_server_scan_covers_owned_and_cut_to_size_roots()` — 验证Server 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `owned.mkdir`, `cut_to_size.mkdir`, `(owned / 'PP9999 materials.xlsx').write_bytes`, `(cut_to_size / 'CS999 materials.xlsx').write_bytes`, `store.upsert_aimes_factory`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L1570 · 方法** `OrderIndexTests.test_successful_cut_to_size_preview_does_not_claim_optimization_without_aicnc_evidence()` — 验证预览相关数据或步骤。
+- **L1607 · 方法** `OrderIndexTests.test_successful_cut_to_size_preview_does_not_claim_optimization_without_aicnc_evidence()` — 验证预览相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.parent.mkdir`, `report.write_bytes`；是否真实写入仍取决于分支和参数。
 
-- **L1594 · 方法** `OrderIndexTests.test_cut_to_size_xml_cannot_mark_optimized_when_material_is_absent()` — 验证材料相关数据或步骤。
+- **L1631 · 方法** `OrderIndexTests.test_cut_to_size_xml_cannot_mark_optimized_when_material_is_absent()` — 验证材料相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.parent.mkdir`, `artifact.parent.mkdir`, `report.write_bytes`, `artifact.write_text`；是否真实写入仍取决于分支和参数。
 
-- **L1624 · 方法** `OrderIndexTests.test_xml_only_sync_never_optimizes_even_with_all_active_factory_artifacts()` — 验证工厂单相关数据或步骤。
+- **L1661 · 方法** `OrderIndexTests.test_xml_only_sync_never_optimizes_even_with_all_active_factory_artifacts()` — 验证工厂单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `first.parent.mkdir`, `first.write_text`, `second.parent.mkdir`, `second.write_text`, `evidence_connection.execute`, `evidence_connection.close`；是否真实写入仍取决于分支和参数。
 
-- **L1681 · 方法** `OrderIndexTests.test_optimization_marker_scan_uses_known_paths_without_recursive_file_walk()` — 验证文件相关数据或步骤。
+- **L1718 · 方法** `OrderIndexTests.test_optimization_marker_scan_uses_known_paths_without_recursive_file_walk()` — 验证文件相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `kitchen_root.mkdir`, `(kitchen_root / 'Optimize file.xml').write_text`, `(kitchen_root / 'layout file').mkdir`, `nesting.write_text`, `unexpected.parent.mkdir`, `unexpected.write_text`；是否真实写入仍取决于分支和参数。
 
-- **L1705 · 方法** `OrderIndexTests.test_folder_timing_total_equals_final_file_timing_sum()` — 验证文件夹、文件相关数据或步骤。
+- **L1742 · 方法** `OrderIndexTests.test_folder_timing_total_equals_final_file_timing_sum()` — 验证文件夹、文件相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `optimize_root.mkdir`, `(optimize_root / 'Optimize file.xml').write_text`, `(optimize_root / 'layout file').mkdir`, `(optimize_root / 'layout file' / 'nesting_result.xml').write_text`；是否真实写入仍取决于分支和参数。
 
-- **L1722 · 方法** `OrderIndexTests.test_visible_server_scan_keeps_optimization_state_unchanged()` — 验证Server 数据相关数据或步骤。
+- **L1759 · 方法** `OrderIndexTests.test_visible_server_scan_keeps_optimization_state_unchanged()` — 验证Server 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `artifact.parent.mkdir`, `artifact.write_text`, `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L1756 · 方法** `OrderIndexTests.test_exact_standard_order_folder_wins_over_mixed_factory_report_folder()` — 验证订单、文件夹、工厂单相关数据或步骤。
+- **L1793 · 方法** `OrderIndexTests.test_exact_standard_order_folder_wins_over_mixed_factory_report_folder()` — 验证订单、文件夹、工厂单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `(mixed_folder / 'Report').mkdir`, `(mixed_folder / 'Report' / '板材清单.xlsx').write_bytes`, `exact_folder.mkdir`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L1796 · 方法** `OrderIndexTests.test_cut_to_size_fittings_are_not_persisted_as_hardware()` — 验证五金相关数据或步骤。
+- **L1833 · 方法** `OrderIndexTests.test_cut_to_size_fittings_are_not_persisted_as_hardware()` — 验证五金相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `(folder / 'CS999 materials.xlsx').write_bytes`, `(folder / 'Fittingslist.xlsx').write_bytes`, `connection.execute`, `connection.close`；是否真实写入仍取决于分支和参数。
 
-- **L1826 · 方法** `OrderIndexTests.test_incremental_sync_reuses_unchanged_server_report_and_rechecks_changes()` — 验证Server 数据相关数据或步骤。
+- **L1863 · 方法** `OrderIndexTests.test_incremental_sync_reuses_unchanged_server_report_and_rechecks_changes()` — 验证Server 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.parent.mkdir`, `report.write_bytes`；是否真实写入仍取决于分支和参数。
 
-- **L1868 · 方法** `OrderIndexTests.test_server_sync_preserves_hardware_when_report_is_unchanged_or_mapping_fails()` — 验证Server 数据、五金、映射相关数据或步骤。
+- **L1905 · 方法** `OrderIndexTests.test_server_sync_preserves_hardware_when_report_is_unchanged_or_mapping_fails()` — 验证Server 数据、五金、映射相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:138` `make_fittings`；`tests/test_order_index.py:82` `OrderIndexTests._seed_sku_products`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:139` `make_fittings`；`tests/test_order_index.py:82` `OrderIndexTests._seed_sku_products`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `fittings.parent.mkdir`, `store.upsert_order`, `store.upsert_factory`, `store.upsert_source_file`, `store.connection.execute`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L1968 · 方法** `OrderIndexTests.test_server_sync_replaces_hardware_by_factory_order_across_source_paths()` — 验证Server 数据、五金、工厂单、订单相关数据或步骤。
+- **L1999 · 方法** `OrderIndexTests.test_server_sync_replaces_hardware_by_factory_order_across_source_paths()` — 验证Server 数据、五金、工厂单、订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:138` `make_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:139` `make_fittings`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `first.parent.mkdir`, `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`, `second.parent.mkdir`, `store.connection.execute`, `third.parent.mkdir`；是否真实写入仍取决于分支和参数。
 
-- **L2064 · 方法** `OrderIndexTests.test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records()` — 验证Server 数据相关数据或步骤。
+- **L2095 · 方法** `OrderIndexTests.test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records()` — 验证Server 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `(folder / f'{name} materials.xlsx').write_bytes`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L2065 · 类** `TrackingExecutor` — 定义 `TrackingExecutor` 类，集中保存该领域的数据和行为边界。
+- **L2096 · 类** `TrackingExecutor` — 定义 `TrackingExecutor` 类，集中保存该领域的数据和行为边界。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L2066 · 方法** `OrderIndexTests.test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records.TrackingExecutor.__init__(max_workers)` — 初始化所属类型，把传入参数转换为后续方法可使用的状态。
+- **L2097 · 方法** `OrderIndexTests.test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records.TrackingExecutor.__init__(max_workers)` — 初始化所属类型，把传入参数转换为后续方法可使用的状态。
   - 输入：`max_workers`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L2069 · 方法** `OrderIndexTests.test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records.TrackingExecutor.__enter__()` — 管理所属对象的资源生命周期，确保进入、退出或销毁时正确收口。
+- **L2100 · 方法** `OrderIndexTests.test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records.TrackingExecutor.__enter__()` — 管理所属对象的资源生命周期，确保进入、退出或销毁时正确收口。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L2072 · 方法** `OrderIndexTests.test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records.TrackingExecutor.__exit__(exc_type, exc_value, traceback)` — 管理所属对象的资源生命周期，确保进入、退出或销毁时正确收口。
+- **L2103 · 方法** `OrderIndexTests.test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records.TrackingExecutor.__exit__(exc_type, exc_value, traceback)` — 管理所属对象的资源生命周期，确保进入、退出或销毁时正确收口。
   - 输入：`exc_type`；`exc_value`；`traceback`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L2075 · 方法** `OrderIndexTests.test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records.TrackingExecutor.map(function, folders)` — 封装 `map` 对应的辅助逻辑，供所属模块或类型复用。
+- **L2106 · 方法** `OrderIndexTests.test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records.TrackingExecutor.map(function, folders)` — 封装 `map` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`function`；`folders`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L2088 · 方法** `OrderIndexTests.test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records.make_executor(max_workers)` — 创建与 `make_executor` 对应的数据或步骤。
+- **L2119 · 方法** `OrderIndexTests.test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records.make_executor(max_workers)` — 创建与 `make_executor` 对应的数据或步骤。
   - 输入：`max_workers`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_index.py:2065` `OrderIndexTests.test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records.TrackingExecutor`
+  - 静态可确认的项目内下一跳：`tests/test_order_index.py:2096` `OrderIndexTests.test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records.TrackingExecutor`
 
-- **L2116 · 方法** `OrderIndexTests.test_sync_index_reuses_scan_snapshot_and_reports_phase_durations()` — 验证与 `test_sync_index_reuses_scan_snapshot_and_reports_phase_durations` 对应的数据或步骤。
+- **L2147 · 方法** `OrderIndexTests.test_sync_index_reuses_scan_snapshot_and_reports_phase_durations()` — 验证与 `test_sync_index_reuses_scan_snapshot_and_reports_phase_durations` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.parent.mkdir`, `report.write_bytes`, `store.upsert_aimes_factory`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L2153 · 方法** `OrderIndexTests.test_prebaseline_temporary_folder_is_excluded_and_stale_pending_cleared()` — 验证文件夹相关数据或步骤。
+- **L2184 · 方法** `OrderIndexTests.test_prebaseline_temporary_folder_is_excluded_and_stale_pending_cleared()` — 验证文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `store.upsert_source_file`, `store.upsert_active_issue`, `store.commit`, `store.close`, `reopened.connection.execute`, `reopened.close`；是否真实写入仍取决于分支和参数。
 
-- **L2191 · 方法** `OrderIndexTests.test_named_mixed_folder_is_not_marked_as_temporary()` — 验证文件夹相关数据或步骤。
+- **L2222 · 方法** `OrderIndexTests.test_named_mixed_folder_is_not_marked_as_temporary()` — 验证文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`；是否真实写入仍取决于分支和参数。
 
-- **L2206 · 方法** `OrderIndexTests.test_fully_shipped_mixed_folder_is_watched_then_reopened_by_aimes()` — 验证文件夹、AIMES 数据相关数据或步骤。
+- **L2237 · 方法** `OrderIndexTests.test_fully_shipped_mixed_folder_is_watched_then_reopened_by_aimes()` — 验证文件夹、AIMES 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `store.upsert_aimes_factory`, `store.commit`, `store.close`, `reopened.upsert_aimes_factory`, `reopened.commit`, `reopened.close`；是否真实写入仍取决于分支和参数。
 
-- **L2254 · 方法** `OrderIndexTests.test_shipped_server_order_becomes_permanent_after_seven_day_watch()` — 验证Server 数据、订单相关数据或步骤。
+- **L2285 · 方法** `OrderIndexTests.test_shipped_server_order_becomes_permanent_after_seven_day_watch()` — 验证Server 数据、订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `(folder / 'PP9999 materials.xlsx').write_bytes`, `store.upsert_aimes_factory`, `store.commit`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L2288 · 方法** `OrderIndexTests.test_initial_date_orders_are_marked_shipped_without_fabricating_documents()` — 验证日期相关数据或步骤。
+- **L2319 · 方法** `OrderIndexTests.test_initial_date_orders_are_marked_shipped_without_fabricating_documents()` — 验证日期相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `old_folder.mkdir`, `factory_folder.mkdir`, `store.upsert_aimes_factory`, `store.upsert_order`, `store.connection.execute`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L2330 · 方法** `OrderIndexTests.test_mark_temporary_folder_manual_starts_three_day_xml_watch()` — 验证文件夹相关数据或步骤。
+- **L2361 · 方法** `OrderIndexTests.test_mark_temporary_folder_manual_starts_three_day_xml_watch()` — 验证文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `xml_root.mkdir`, `(xml_root / 'Optimize file.xml').write_text`, `(xml_root / 'layout file').mkdir`, `(xml_root / 'layout file' / 'nesting_result.xml').write_text`, `(folder / 'manual materials.xlsx').write_bytes`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L2362 · 方法** `OrderIndexTests.test_removed_server_folder_ignore_table_is_cleaned_on_open()` — 验证Server 数据、文件夹相关数据或步骤。
+- **L2393 · 方法** `OrderIndexTests.test_removed_server_folder_ignore_table_is_cleaned_on_open()` — 验证Server 数据、文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `config.state_dir.mkdir`, `connection.execute`, `connection.commit`, `connection.close`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L2385 · 方法** `OrderIndexTests.test_reportless_mixed_folder_requires_review()` — 验证文件夹相关数据或步骤。
+- **L2416 · 方法** `OrderIndexTests.test_reportless_mixed_folder_requires_review()` — 验证文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`；是否真实写入仍取决于分支和参数。
 
-- **L2400 · 方法** `OrderIndexTests.test_processed_temporary_folder_uses_three_day_xml_watch_then_is_permanent()` — 验证文件夹相关数据或步骤。
+- **L2431 · 方法** `OrderIndexTests.test_processed_temporary_folder_uses_three_day_xml_watch_then_is_permanent()` — 验证文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `xml.parent.mkdir`, `xml.write_text`, `(folder / 'material.xlsx').write_bytes`, `store.upsert_temporary_order`, `store.save_server_scan_xml_baseline`, `store.commit`, `store.close`, `store.connection.execute`；是否真实写入仍取决于分支和参数。
 
-- **L2459 · 方法** `OrderIndexTests.test_failed_temporary_processing_remains_in_pending_server_changes()` — 验证Server 数据相关数据或步骤。
+- **L2490 · 方法** `OrderIndexTests.test_failed_temporary_processing_remains_in_pending_server_changes()` — 验证Server 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `(folder / 'material.xlsx').write_bytes`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L2492 · 方法** `OrderIndexTests.test_temporary_fittings_report_is_deferred_until_user_approves_processing()` — 验证与 `test_temporary_fittings_report_is_deferred_until_user_approves_processing` 对应的数据或步骤。
+- **L2523 · 方法** `OrderIndexTests.test_temporary_fittings_report_is_deferred_until_user_approves_processing()` — 验证与 `test_temporary_fittings_report_is_deferred_until_user_approves_processing` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `fittings.parent.mkdir`, `fittings.write_bytes`；是否真实写入仍取决于分支和参数。
 
-- **L2508 · 方法** `OrderIndexTests.test_manual_temporary_outbound_records_server_baseline_case_insensitively()` — 验证出库、Server 数据相关数据或步骤。
+- **L2539 · 方法** `OrderIndexTests.test_manual_temporary_outbound_records_server_baseline_case_insensitively()` — 验证出库、Server 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.mkdir`, `(folder / 'INSERTHOOD CABINET OLD CNC materials.xlsx').write_bytes`, `(report / 'Fittingslist.xlsx').write_bytes`, `(report / 'pp-板材清单-new.xlsx').write_bytes`, `record_temporary_outbound`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L2545 · 方法** `OrderIndexTests.test_shipped_temporary_folder_is_skipped_without_report_rescan()` — 验证文件夹相关数据或步骤。
+- **L2576 · 方法** `OrderIndexTests.test_shipped_temporary_folder_is_skipped_without_report_rescan()` — 验证文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.parent.mkdir`, `report.write_bytes`, `xml.parent.mkdir`, `xml.write_text`, `record_temporary_outbound`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L2582 · 方法** `OrderIndexTests.test_old_temporary_folder_is_filtered_before_report_rescan()` — 验证文件夹相关数据或步骤。
+- **L2613 · 方法** `OrderIndexTests.test_old_temporary_folder_is_filtered_before_report_rescan()` — 验证文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.parent.mkdir`, `report.write_bytes`；是否真实写入仍取决于分支和参数。
 
-- **L2604 · 方法** `OrderIndexTests.test_temporary_processing_generates_material_traveler_and_outbounds()` — 验证材料、Traveler相关数据或步骤。
+- **L2635 · 方法** `OrderIndexTests.test_temporary_processing_generates_material_traveler_and_outbounds()` — 验证材料、Traveler相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:113` `make_board_material_report`；`tests/test_order_workflow.py:138` `make_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:114` `make_board_material_report`；`tests/test_order_workflow.py:139` `make_fittings`
 
-- **L2632 · 方法** `OrderIndexTests.test_temporary_processing_can_skip_hardware_in_traveler_and_outbound()` — 验证五金、Traveler、出库相关数据或步骤。
+- **L2663 · 方法** `OrderIndexTests.test_temporary_processing_can_skip_hardware_in_traveler_and_outbound()` — 验证五金、Traveler、出库相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:113` `make_board_material_report`；`tests/test_order_workflow.py:138` `make_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:114` `make_board_material_report`；`tests/test_order_workflow.py:139` `make_fittings`
 
-- **L2663 · 方法** `OrderIndexTests.test_temporary_folder_without_aimes_identity_uses_folder_name_everywhere()` — 验证文件夹、AIMES 数据、名称相关数据或步骤。
+- **L2694 · 方法** `OrderIndexTests.test_temporary_folder_without_aimes_identity_uses_folder_name_everywhere()` — 验证文件夹、AIMES 数据、名称相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:113` `make_board_material_report`；`tests/test_order_workflow.py:138` `make_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:114` `make_board_material_report`；`tests/test_order_workflow.py:139` `make_fittings`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L2705 · 方法** `OrderIndexTests.test_temporary_outbound_is_not_repeated_when_folder_content_is_unchanged()` — 验证出库、文件夹相关数据或步骤。
+- **L2736 · 方法** `OrderIndexTests.test_temporary_outbound_is_not_repeated_when_folder_content_is_unchanged()` — 验证出库、文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:113` `make_board_material_report`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:114` `make_board_material_report`
 
-- **L2730 · 方法** `OrderIndexTests.test_failed_outbound_reuses_unchanged_generated_traveler_on_retry()` — 验证出库、Traveler相关数据或步骤。
+- **L2761 · 方法** `OrderIndexTests.test_failed_outbound_reuses_unchanged_generated_traveler_on_retry()` — 验证出库、Traveler相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:113` `make_board_material_report`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:114` `make_board_material_report`
 
-- **L2764 · 方法** `OrderIndexTests.test_temporary_folder_uses_unique_aimes_review_match_when_available()` — 验证文件夹、AIMES 数据相关数据或步骤。
+- **L2795 · 方法** `OrderIndexTests.test_temporary_folder_uses_unique_aimes_review_match_when_available()` — 验证文件夹、AIMES 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:113` `make_board_material_report`；`tests/test_order_workflow.py:138` `make_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:114` `make_board_material_report`；`tests/test_order_workflow.py:139` `make_fittings`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.replace_aimes_review_rows`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L2806 · 方法** `OrderIndexTests.test_factory_order_initial_date_cutoff_uses_embedded_date()` — 验证工厂单、订单、日期相关数据或步骤。
+- **L2837 · 方法** `OrderIndexTests.test_factory_order_initial_date_cutoff_uses_embedded_date()` — 验证工厂单、订单、日期相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L2812 · 方法** `OrderIndexTests.test_initial_date_removes_stale_ownership_issue_and_does_not_recreate_it()` — 验证日期、待处理问题相关数据或步骤。
+- **L2843 · 方法** `OrderIndexTests.test_initial_date_removes_stale_ownership_issue_and_does_not_recreate_it()` — 验证日期、待处理问题相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_factory`, `store.upsert_active_issue`, `store.commit`, `store.close`, `reopened.close`；是否真实写入仍取决于分支和参数。
 
-- **L2853 · 方法** `OrderIndexTests.test_server_change_message_identifies_order_factory_and_data()` — 验证Server 数据、订单、工厂单相关数据或步骤。
+- **L2884 · 方法** `OrderIndexTests.test_server_change_message_identifies_order_factory_and_data()` — 验证Server 数据、订单、工厂单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L2859 · 方法** `OrderIndexTests.test_server_change_message_explains_action_and_path()` — 验证Server 数据、路径相关数据或步骤。
+- **L2890 · 方法** `OrderIndexTests.test_server_change_message_explains_action_and_path()` — 验证Server 数据、路径相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L2872 · 方法** `OrderIndexTests.test_invalid_and_test_aimes_rows_are_warnings_only()` — 验证AIMES 数据相关数据或步骤。
-  - 输入：无显式参数（可能读取所属对象状态）
-  - 返回：`未声明`
-  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
-  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `set`；是否真实写入仍取决于分支和参数。
-
-- **L2918 · 方法** `OrderIndexTests.test_aimes_factory_name_order_prefix_mismatch_is_a_warning()` — 验证AIMES 数据、工厂单、名称、订单相关数据或步骤。
+- **L2903 · 方法** `OrderIndexTests.test_invalid_and_test_aimes_rows_are_warnings_only()` — 验证AIMES 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `set`；是否真实写入仍取决于分支和参数。
 
-- **L2939 · 方法** `OrderIndexTests.test_fittings_factory_order_uses_order_folder_hint()` — 验证工厂单、订单、文件夹相关数据或步骤。
+- **L2949 · 方法** `OrderIndexTests.test_aimes_factory_name_order_prefix_mismatch_is_a_warning()` — 验证AIMES 数据、工厂单、名称、订单相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `set`；是否真实写入仍取决于分支和参数。
+
+- **L2970 · 方法** `OrderIndexTests.test_fittings_factory_order_uses_order_folder_hint()` — 验证工厂单、订单、文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L2954 · 方法** `OrderIndexTests.test_unowned_factory_uses_exact_aimes_name_to_derive_order()` — 验证工厂单、AIMES 数据、名称、订单相关数据或步骤。
+- **L2985 · 方法** `OrderIndexTests.test_unowned_factory_uses_exact_aimes_name_to_derive_order()` — 验证工厂单、AIMES 数据、名称、订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L2975 · 方法** `OrderIndexTests.test_existing_database_factory_skips_exact_aimes_lookup()` — 验证数据库、工厂单、AIMES 数据相关数据或步骤。
+- **L3006 · 方法** `OrderIndexTests.test_existing_database_factory_skips_exact_aimes_lookup()` — 验证数据库、工厂单、AIMES 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_factory`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L3013 · 方法** `OrderIndexTests.test_active_issue_is_persisted_and_resolved()` — 验证待处理问题相关数据或步骤。
+- **L3044 · 方法** `OrderIndexTests.test_active_issue_is_persisted_and_resolved()` — 验证待处理问题相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_active_issue`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L3031 · 方法** `OrderIndexTests.test_deleted_aimes_factory_is_audit_only_and_not_in_summaries()` — 验证AIMES 数据、工厂单相关数据或步骤。
+- **L3062 · 方法** `OrderIndexTests.test_deleted_aimes_factory_is_audit_only_and_not_in_summaries()` — 验证AIMES 数据、工厂单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_aimes_factory`, `store.commit`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L3056 · 方法** `OrderIndexTests.test_invalid_aimes_rows_persist_for_reopen_without_entering_business_tables()` — 验证AIMES 数据相关数据或步骤。
+- **L3087 · 方法** `OrderIndexTests.test_invalid_aimes_rows_persist_for_reopen_without_entering_business_tables()` — 验证AIMES 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L3087 · 方法** `OrderIndexTests.test_skipped_aimes_refresh_keeps_persisted_warning_visible_after_reopen()` — 验证AIMES 数据相关数据或步骤。
+- **L3118 · 方法** `OrderIndexTests.test_skipped_aimes_refresh_keeps_persisted_warning_visible_after_reopen()` — 验证AIMES 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.replace_aimes_review_rows`, `store.record_run`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L3119 · 方法** `OrderIndexTests.test_persisted_aimes_warning_can_be_assigned_when_valid_cache_excludes_it()` — 验证AIMES 数据、缓存相关数据或步骤。
+- **L3150 · 方法** `OrderIndexTests.test_persisted_aimes_warning_can_be_assigned_when_valid_cache_excludes_it()` — 验证AIMES 数据、缓存相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.replace_aimes_review_rows`, `store.commit`, `store.close`, `reopened.connection.execute`, `reopened.close`；是否真实写入仍取决于分支和参数。
 
-- **L3172 · 方法** `OrderIndexTests.test_exactly_verified_aimes_factory_is_persisted_as_aimes_identity()` — 验证AIMES 数据、工厂单相关数据或步骤。
+- **L3203 · 方法** `OrderIndexTests.test_exactly_verified_aimes_factory_is_persisted_as_aimes_identity()` — 验证AIMES 数据、工厂单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`, `store.connection.execute`；是否真实写入仍取决于分支和参数。
 
-- **L3221 · 方法** `OrderIndexTests.test_business_errors_are_actionable_and_hide_technical_details()` — 验证与 `test_business_errors_are_actionable_and_hide_technical_details` 对应的数据或步骤。
+- **L3252 · 方法** `OrderIndexTests.test_business_errors_are_actionable_and_hide_technical_details()` — 验证与 `test_business_errors_are_actionable_and_hide_technical_details` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L3236 · 方法** `OrderIndexTests.test_business_aimes_message_uses_explicit_error_type_before_message_words()` — 验证AIMES 数据相关数据或步骤。
+- **L3267 · 方法** `OrderIndexTests.test_business_aimes_message_uses_explicit_error_type_before_message_words()` — 验证AIMES 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L3250 · 方法** `OrderIndexTests.test_old_status_is_migrated_and_validation_reason_is_persisted()` — 验证状态相关数据或步骤。
+- **L3281 · 方法** `OrderIndexTests.test_old_status_is_migrated_and_validation_reason_is_persisted()` — 验证状态相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.connection.execute`, `store.commit`, `store.close`, `reopened.connection.execute`, `reopened.close`；是否真实写入仍取决于分支和参数。
 
-- **L3284 · 方法** `OrderIndexTests.test_schema_migration_resolves_legacy_warning_from_unique_order_folder()` — 验证订单、文件夹相关数据或步骤。
+- **L3315 · 方法** `OrderIndexTests.test_schema_migration_resolves_legacy_warning_from_unique_order_folder()` — 验证订单、文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `source_folder.mkdir`, `store.upsert_factory`, `store.connection.execute`, `store.commit`, `store.close`, `reopened.connection.execute`, `reopened.close`；是否真实写入仍取决于分支和参数。
 
-- **L3313 · 方法** `OrderIndexTests.test_aimes_owner_wins_over_stale_server_owner()` — 验证AIMES 数据、Server 数据相关数据或步骤。
+- **L3344 · 方法** `OrderIndexTests.test_aimes_owner_wins_over_stale_server_owner()` — 验证AIMES 数据、Server 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L3336 · 方法** `OrderIndexTests.test_aimes_order_validation_and_test_filter()` — 验证AIMES 数据、订单相关数据或步骤。
+- **L3367 · 方法** `OrderIndexTests.test_aimes_order_validation_and_test_filter()` — 验证AIMES 数据、订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L3357 · 方法** `OrderIndexTests.test_historical_pp_server_paths_are_in_dashboard_scope()` — 验证Server 数据、看板、范围相关数据或步骤。
+- **L3388 · 方法** `OrderIndexTests.test_historical_pp_server_paths_are_in_dashboard_scope()` — 验证Server 数据、看板、范围相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L3366 · 方法** `OrderIndexTests.test_summary_aggregates_factory_status()` — 验证工厂单、状态相关数据或步骤。
+- **L3397 · 方法** `OrderIndexTests.test_summary_aggregates_factory_status()` — 验证工厂单、状态相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L3405 · 方法** `OrderIndexTests.test_standard_outbound_status_reconciles_and_survives_reopen()` — 验证出库、状态相关数据或步骤。
+- **L3436 · 方法** `OrderIndexTests.test_standard_outbound_status_reconciles_and_survives_reopen()` — 验证出库、状态相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`, `reconcile_outbound_statuses`, `reopened.connection.execute`, `reopened.close`；是否真实写入仍取决于分支和参数。
 
-- **L3446 · 方法** `OrderIndexTests.test_fully_shipped_order_is_completed_even_if_optimization_evidence_is_missing()` — 验证订单相关数据或步骤。
+- **L3477 · 方法** `OrderIndexTests.test_fully_shipped_order_is_completed_even_if_optimization_evidence_is_missing()` — 验证订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L3471 · 方法** `OrderIndexTests.test_grouped_outbound_document_reconciles_all_factory_orders_after_reindex()` — 验证出库、工厂单相关数据或步骤。
+- **L3502 · 方法** `OrderIndexTests.test_grouped_outbound_document_reconciles_all_factory_orders_after_reindex()` — 验证出库、工厂单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`, `connection.execute`, `connection.commit`, `connection.close`, `_load_outbound_records`, `reconcile_outbound_statuses`；是否真实写入仍取决于分支和参数。
 
-- **L3545 · 方法** `OrderIndexTests.test_order_level_outbound_record_is_not_broadcast_to_split_factories()` — 验证订单、出库、记录相关数据或步骤。
+- **L3576 · 方法** `OrderIndexTests.test_order_level_outbound_record_is_not_broadcast_to_split_factories()` — 验证订单、出库、记录相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.commit`, `reconcile_outbound_statuses`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L3578 · 方法** `OrderIndexTests.test_partial_factory_upsert_preserves_persisted_business_statuses()` — 验证工厂单相关数据或步骤。
+- **L3609 · 方法** `OrderIndexTests.test_partial_factory_upsert_preserves_persisted_business_statuses()` — 验证工厂单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_factory`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L3610 · 方法** `OrderIndexTests.test_fully_shipped_aimes_order_is_not_a_server_scan_candidate()` — 验证AIMES 数据、订单、Server 数据相关数据或步骤。
+- **L3641 · 方法** `OrderIndexTests.test_fully_shipped_aimes_order_is_not_a_server_scan_candidate()` — 验证AIMES 数据、订单、Server 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_aimes_factory`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L3636 · 方法** `OrderIndexTests.test_scan_does_not_parse_material_source_as_traveler_during_outbound_reconcile()` — 验证材料、来源、Traveler、出库相关数据或步骤。
+- **L3667 · 方法** `OrderIndexTests.test_scan_does_not_parse_material_source_as_traveler_during_outbound_reconcile()` — 验证材料、来源、Traveler、出库相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：`tests/test_order_index.py:144` `OrderIndexTests._set_permanent_server_policy`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `workbook.save`, `store.upsert_aimes_factory`, `self._set_permanent_server_policy`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L3686 · 方法** `OrderIndexTests.test_fully_shipped_folder_resolves_stale_material_validation_issue()` — 验证文件夹、材料、待处理问题相关数据或步骤。
+- **L3717 · 方法** `OrderIndexTests.test_fully_shipped_folder_resolves_stale_material_validation_issue()` — 验证文件夹、材料、待处理问题相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：`tests/test_order_index.py:144` `OrderIndexTests._set_permanent_server_policy`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `material_path.write_bytes`, `store.upsert_aimes_factory`, `self._set_permanent_server_policy`, `store.upsert_active_issue`, `store.commit`, `store.close`, `reopened.connection.execute`, `reopened.close`；是否真实写入仍取决于分支和参数。
 
-- **L3745 · 方法** `OrderIndexTests.test_completed_production_resolves_post_production_material_issue()` — 验证生产、材料、待处理问题相关数据或步骤。
+- **L3776 · 方法** `OrderIndexTests.test_completed_production_resolves_post_production_material_issue()` — 验证生产、材料、待处理问题相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：`tests/test_order_index.py:82` `OrderIndexTests._seed_sku_products`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `material_path.write_bytes`, `store.upsert_order`, `store.upsert_aimes_factory`, `store.connection.execute`, `store.upsert_active_issue`, `store.commit`, `store.close`, `reopened.connection.execute`, `reopened.close`；是否真实写入仍取决于分支和参数。
 
-- **L3834 · 方法** `OrderIndexTests.test_fully_shipped_folder_resolves_stale_hardware_selection_issue()` — 验证文件夹、五金、待处理问题相关数据或步骤。
+- **L3865 · 方法** `OrderIndexTests.test_fully_shipped_folder_resolves_stale_hardware_selection_issue()` — 验证文件夹、五金、待处理问题相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：`tests/test_order_index.py:144` `OrderIndexTests._set_permanent_server_policy`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `store.upsert_aimes_factory`, `self._set_permanent_server_policy`, `store.upsert_active_issue`, `store.commit`, `store.close`, `reopened.connection.execute`, `reopened.close`；是否真实写入仍取决于分支和参数。
 
-- **L3892 · 方法** `OrderIndexTests.test_fully_shipped_folder_resolves_stale_order_validation_issue()` — 验证文件夹、订单、待处理问题相关数据或步骤。
+- **L3923 · 方法** `OrderIndexTests.test_fully_shipped_folder_resolves_stale_order_validation_issue()` — 验证文件夹、订单、待处理问题相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：`tests/test_order_index.py:144` `OrderIndexTests._set_permanent_server_policy`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `store.upsert_aimes_factory`, `self._set_permanent_server_policy`, `store.upsert_active_issue`, `store.commit`, `store.close`, `reopened.connection.execute`, `reopened.close`；是否真实写入仍取决于分支和参数。
 
-- **L3950 · 方法** `OrderIndexTests.test_automatic_server_snapshot_skips_shipped_order_until_aimes_adds_factory()` — 验证Server 数据、订单、AIMES 数据、工厂单相关数据或步骤。
+- **L3981 · 方法** `OrderIndexTests.test_automatic_server_snapshot_skips_shipped_order_until_aimes_adds_factory()` — 验证Server 数据、订单、AIMES 数据、工厂单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `shipped_folder.mkdir`, `active_folder.mkdir`, `unindexed_folder.mkdir`, `(shipped_folder / 'PP9999 materials.xlsx').write_bytes`, `(active_folder / 'PP8888 materials.xlsx').write_bytes`, `(unindexed_folder / 'PP7777 materials.xlsx').write_bytes`, `store.upsert_aimes_factory`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L4016 · 方法** `OrderIndexTests.test_new_current_aimes_factory_reopens_server_scan_candidate()` — 验证AIMES 数据、工厂单、Server 数据相关数据或步骤。
+- **L4047 · 方法** `OrderIndexTests.test_new_current_aimes_factory_reopens_server_scan_candidate()` — 验证AIMES 数据、工厂单、Server 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `config.source_root.mkdir`, `(config.source_root / 'PP9999').mkdir`；是否真实写入仍取决于分支和参数。
 
-- **L4042 · 方法** `OrderIndexTests.test_skipped_standard_order_does_not_resolve_its_old_issue()` — 验证订单、待处理问题相关数据或步骤。
+- **L4073 · 方法** `OrderIndexTests.test_skipped_standard_order_does_not_resolve_its_old_issue()` — 验证订单、待处理问题相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：`tests/test_order_index.py:144` `OrderIndexTests._set_permanent_server_policy`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `config.source_root.mkdir`, `folder.mkdir`, `self._set_permanent_server_policy`, `store.upsert_active_issue`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L4068 · 方法** `OrderIndexTests.test_orders_sort_by_latest_factory_split_time()` — 验证工厂单、时间相关数据或步骤。
+- **L4099 · 方法** `OrderIndexTests.test_orders_sort_by_latest_factory_split_time()` — 验证工厂单、时间相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L4084 · 方法** `OrderIndexTests.test_summary_includes_confirmed_server_report_factory_assigned_to_normal_order()` — 验证Server 数据、工厂单、订单相关数据或步骤。
+- **L4115 · 方法** `OrderIndexTests.test_summary_includes_confirmed_server_report_factory_assigned_to_normal_order()` — 验证Server 数据、工厂单、订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L4103 · 方法** `OrderIndexTests.test_aimes_if_needed_runs_once_per_day_after_success()` — 验证AIMES 数据相关数据或步骤。
+- **L4134 · 方法** `OrderIndexTests.test_aimes_if_needed_runs_once_per_day_after_success()` — 验证AIMES 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `config.source_root.mkdir`；是否真实写入仍取决于分支和参数。
 
-- **L4136 · 方法** `OrderIndexTests.test_aimes_only_sync_reports_change_then_skips_after_daily_success()` — 验证AIMES 数据相关数据或步骤。
+- **L4167 · 方法** `OrderIndexTests.test_aimes_only_sync_reports_change_then_skips_after_daily_success()` — 验证AIMES 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L4165 · 方法** `OrderIndexTests.test_server_scan_is_non_mutating_until_full_processing()` — 验证Server 数据相关数据或步骤。
+- **L4196 · 方法** `OrderIndexTests.test_server_scan_is_non_mutating_until_full_processing()` — 验证Server 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:190` `make_product_catalog`；`tests/test_order_workflow.py:80` `make_materials`；`tests/test_order_workflow.py:104` `make_board`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:191` `make_product_catalog`；`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:105` `make_board`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `nesting.parent.mkdir`, `nesting.write_text`, `store.upsert_aimes_factory`, `store.commit`, `store.close`, `report_folder.mkdir`, `store.connection.execute`, `report.write_bytes`, `report.unlink`；是否真实写入仍取决于分支和参数。
 
-- **L4284 · 方法** `OrderIndexTests.test_confirm_without_materials_does_not_establish_xml_scan_baseline()` — 验证与 `test_confirm_without_materials_does_not_establish_xml_scan_baseline` 对应的数据或步骤。
+- **L4315 · 方法** `OrderIndexTests.test_confirm_without_materials_does_not_establish_xml_scan_baseline()` — 验证与 `test_confirm_without_materials_does_not_establish_xml_scan_baseline` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `xml.parent.mkdir`, `xml.write_text`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L4330 · 方法** `OrderIndexTests.test_preview_scopes_optimization_artifacts_to_selected_order()` — 验证预览、订单相关数据或步骤。
+- **L4361 · 方法** `OrderIndexTests.test_preview_scopes_optimization_artifacts_to_selected_order()` — 验证预览、订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `other_folder.mkdir`, `preview.upsert_order`, `preview.upsert_factory`, `preview.connection.execute`, `preview.commit`, `preview.close`；是否真实写入仍取决于分支和参数。
 
-- **L4368 · 方法** `OrderIndexTests.test_business_confirmation_persists_optimization_evidence_for_list_index()` — 验证与 `test_business_confirmation_persists_optimization_evidence_for_list_index` 对应的数据或步骤。
+- **L4399 · 方法** `OrderIndexTests.test_business_confirmation_persists_optimization_evidence_for_list_index()` — 验证与 `test_business_confirmation_persists_optimization_evidence_for_list_index` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：`tests/test_order_index.py:123` `OrderIndexTests._seed_config_products`；`tests/test_order_index.py:82` `OrderIndexTests._seed_sku_products`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `preview.upsert_order`, `preview.upsert_factory`, `preview.connection.execute`, `(folder / 'material.xlsx').write_bytes`, `preview.upsert_source_file`, `preview.commit`, `preview.close`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L4424 · 方法** `OrderIndexTests.test_memory_confirmation_upserts_selected_optimization_evidence_idempotently()` — 验证与 `test_memory_confirmation_upserts_selected_optimization_evidence_idempotently` 对应的数据或步骤。
+- **L4455 · 方法** `OrderIndexTests.test_memory_confirmation_upserts_selected_optimization_evidence_idempotently()` — 验证与 `test_memory_confirmation_upserts_selected_optimization_evidence_idempotently` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：`tests/test_order_index.py:82` `OrderIndexTests._seed_sku_products`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `current.upsert_order`, `current.upsert_factory`, `current.connection.execute`, `current.commit`, `current.close`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L4505 · 方法** `OrderIndexTests.test_memory_evidence_confirmation_rolls_back_on_baseline_failure()` — 验证与 `test_memory_evidence_confirmation_rolls_back_on_baseline_failure` 对应的数据或步骤。
+- **L4536 · 方法** `OrderIndexTests.test_memory_evidence_confirmation_rolls_back_on_baseline_failure()` — 验证与 `test_memory_evidence_confirmation_rolls_back_on_baseline_failure` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `shared.execute`, `bootstrap.close`, `shared.close`；是否真实写入仍取决于分支和参数。
 
-- **L4536 · 方法** `OrderIndexTests.test_server_scan_baseline_covers_both_server_roots()` — 验证Server 数据相关数据或步骤。
+- **L4567 · 方法** `OrderIndexTests.test_server_scan_baseline_covers_both_server_roots()` — 验证Server 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:190` `make_product_catalog`；`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:191` `make_product_catalog`；`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `nesting.parent.mkdir`, `nesting.write_text`, `store.upsert_aimes_factory`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L4581 · 方法** `OrderIndexTests.test_report_edits_are_ignored_by_xml_only_server_scan()` — 验证Server 数据相关数据或步骤。
+- **L4612 · 方法** `OrderIndexTests.test_report_edits_are_ignored_by_xml_only_server_scan()` — 验证Server 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `store.upsert_aimes_factory`, `store.upsert_source_file`, `store.commit`, `store.close`, `materials.write_bytes`, `_record_generated_material_baseline`；是否真实写入仍取决于分支和参数。
 
-- **L4626 · 方法** `OrderIndexTests.test_selected_server_folder_reuses_index_processing_for_one_folder()` — 验证Server 数据、文件夹相关数据或步骤。
+- **L4657 · 方法** `OrderIndexTests.test_selected_server_folder_reuses_index_processing_for_one_folder()` — 验证Server 数据、文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `store.upsert_order`, `store.commit`, `store.close`, `store.connection.execute`；是否真实写入仍取决于分支和参数。
 
-- **L4654 · 方法** `OrderIndexTests.test_selected_non_order_folder_is_rejected_without_processing_children()` — 验证订单、文件夹相关数据或步骤。
+- **L4685 · 方法** `OrderIndexTests.test_selected_non_order_folder_is_rejected_without_processing_children()` — 验证订单、文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `child_order.mkdir`, `(child_order / 'material.xlsx').write_bytes`；是否真实写入仍取决于分支和参数。
 
-- **L4669 · 方法** `OrderIndexTests.test_selected_non_order_folder_with_recognized_report_is_temporary_order()` — 验证订单、文件夹相关数据或步骤。
+- **L4700 · 方法** `OrderIndexTests.test_selected_non_order_folder_with_recognized_report_is_temporary_order()` — 验证订单、文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `selected.mkdir`, `(selected / 'material.xlsx').write_bytes`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L4691 · 方法** `OrderIndexTests.test_scan_reports_unprocessed_non_order_folder_as_manual_only()` — 验证订单、文件夹相关数据或步骤。
+- **L4722 · 方法** `OrderIndexTests.test_scan_reports_unprocessed_non_order_folder_as_manual_only()` — 验证订单、文件夹相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
@@ -7279,106 +7737,111 @@ Swift/macOS 源码或测试辅助文件。
 
 自动化测试：验证 `order_workflow` 模块或业务场景。
 
-- **L46 · 函数** `seed_products(connection, rows)` — 封装 `seed_products` 对应的辅助逻辑，供所属模块或类型复用。
+- **L47 · 函数** `seed_products(connection, rows)` — 封装 `seed_products` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`connection`；`rows`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.executemany`, `code.replace`；是否真实写入仍取决于分支和参数。
 
-- **L80 · 函数** `make_materials(path: Path, order_id: str = 'PP9999', fractional: bool = False, edge: float = 12.5)` — 创建与 `make_materials` 对应的数据或步骤。
+- **L81 · 函数** `make_materials(path: Path, order_id: str = 'PP9999', fractional: bool = False, edge: float = 12.5)` — 创建与 `make_materials` 对应的数据或步骤。
   - 输入：`path: Path`；`order_id: str = 'PP9999'`；`fractional: bool = False`；`edge: float = 12.5`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `wb.save`；是否真实写入仍取决于分支和参数。
 
-- **L104 · 函数** `make_board(path: Path, factory: str, name: str)` — 创建与 `make_board` 对应的数据或步骤。
+- **L105 · 函数** `make_board(path: Path, factory: str, name: str)` — 创建与 `make_board` 对应的数据或步骤。
   - 输入：`path: Path`；`factory: str`；`name: str`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `wb.save`；是否真实写入仍取决于分支和参数。
 
-- **L113 · 函数** `make_board_material_report(path: Path, factory: str = 'F100', name: str = 'PP9999-KITCHEN', plywood_qty: int = 2, panel_qty: int = 3, edge_qty: float = 12.5)` — 创建材料相关数据或步骤。
+- **L114 · 函数** `make_board_material_report(path: Path, factory: str = 'F100', name: str = 'PP9999-KITCHEN', plywood_qty: int = 2, panel_qty: int = 3, edge_qty: float = 12.5)` — 创建材料相关数据或步骤。
   - 输入：`path: Path`；`factory: str = 'F100'`；`name: str = 'PP9999-KITCHEN'`；`plywood_qty: int = 2`；`panel_qty: int = 3`；`edge_qty: float = 12.5`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `path.parent.mkdir`, `wb.save`；是否真实写入仍取决于分支和参数。
 
-- **L138 · 函数** `make_fittings(path: Path, groups: list[tuple[str, float]])` — 创建与 `make_fittings` 对应的数据或步骤。
+- **L139 · 函数** `make_fittings(path: Path, groups: list[tuple[str, float]])` — 创建与 `make_fittings` 对应的数据或步骤。
   - 输入：`path: Path`；`groups: list[tuple[str, float]]`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `wb.save`；是否真实写入仍取决于分支和参数。
 
-- **L159 · 函数** `make_rail_fittings(path: Path, left_quantity: float, right_quantity: float | None, left_name: str = 'Left Rail', right_name: str = 'Right Rail')` — 创建与 `make_rail_fittings` 对应的数据或步骤。
+- **L160 · 函数** `make_rail_fittings(path: Path, left_quantity: float, right_quantity: float | None, left_name: str = 'Left Rail', right_name: str = 'Right Rail')` — 创建与 `make_rail_fittings` 对应的数据或步骤。
   - 输入：`path: Path`；`left_quantity: float`；`right_quantity: float | None`；`left_name: str = 'Left Rail'`；`right_name: str = 'Right Rail'`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `wb.save`；是否真实写入仍取决于分支和参数。
 
-- **L185 · 函数** `make_template(path: Path)` — 创建与 `make_template` 对应的数据或步骤。
+- **L186 · 函数** `make_template(path: Path)` — 创建与 `make_template` 对应的数据或步骤。
   - 输入：`path: Path`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L190 · 函数** `make_product_catalog(path: Path)` — 创建商品目录相关数据或步骤。
+- **L191 · 函数** `make_product_catalog(path: Path)` — 创建商品目录相关数据或步骤。
   - 输入：`path: Path`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `path.parent.mkdir`, `workbook.save`；是否真实写入仍取决于分支和参数。
 
-- **L210 · 函数** `picking_layout_snapshot(sheet)` — 封装 `picking_layout_snapshot` 对应的辅助逻辑，供所属模块或类型复用。
+- **L211 · 函数** `picking_layout_snapshot(sheet)` — 封装 `picking_layout_snapshot` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`sheet`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L237 · 类** `OrderWorkflowTests` — 定义与订单相关的类，集中保存数据和行为边界。
+- **L238 · 类** `OrderWorkflowTests` — 定义与订单相关的类，集中保存数据和行为边界。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L238 · 方法** `OrderWorkflowTests.test_memory_server_confirmation_command_reads_json_from_stdin()` — 验证Server 数据相关数据或步骤。
+- **L239 · 方法** `OrderWorkflowTests.test_no_change_acknowledgement_routes_preview_without_business_write()` — 验证预览相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L260 · 方法** `OrderWorkflowTests.test_database_order_traveler_uses_sqlite_facts_without_source_material()` — 验证数据库、订单、Traveler、来源相关数据或步骤。
+- **L254 · 方法** `OrderWorkflowTests.test_memory_server_confirmation_command_reads_json_from_stdin()` — 验证Server 数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:185` `make_template`；`tests/test_order_workflow.py:46` `seed_products`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+
+- **L276 · 方法** `OrderWorkflowTests.test_database_order_traveler_uses_sqlite_facts_without_source_material()` — 验证数据库、订单、Traveler、来源相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:186` `make_template`；`tests/test_order_workflow.py:47` `seed_products`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.connection.execute`, `store.connection.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L334 · 方法** `OrderWorkflowTests.test_database_order_traveler_keeps_fifth_and_later_hardware_visible()` — 验证数据库、订单、Traveler、五金相关数据或步骤。
+- **L350 · 方法** `OrderWorkflowTests.test_database_order_traveler_keeps_fifth_and_later_hardware_visible()` — 验证数据库、订单、Traveler、五金相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:185` `make_template`；`tests/test_order_workflow.py:46` `seed_products`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:186` `make_template`；`tests/test_order_workflow.py:47` `seed_products`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.connection.execute`, `store.connection.executemany`, `store.connection.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L408 · 方法** `OrderWorkflowTests.test_database_order_traveler_writes_manual_hardware_to_accessory_section()` — 验证数据库、订单、Traveler、五金相关数据或步骤。
+- **L418 · 方法** `OrderWorkflowTests.test_database_order_traveler_writes_manual_hardware_to_accessory_section()` — 验证数据库、订单、Traveler、五金相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:185` `make_template`；`tests/test_order_workflow.py:46` `seed_products`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:186` `make_template`；`tests/test_order_workflow.py:47` `seed_products`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.connection.execute`, `store.connection.executemany`, `store.connection.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
 - **L502 · 方法** `OrderWorkflowTests.test_legacy_traveler_gets_usage_list_and_material_from_picking_list()` — 验证Traveler、材料相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:185` `make_template`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:186` `make_template`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `local_order.mkdir`, `workbook.save`, `target.mkdir`；是否真实写入仍取决于分支和参数。
 
 - **L554 · 方法** `OrderWorkflowTests.test_missing_material_can_be_generated_from_report_summary()` — 验证材料相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:113` `make_board_material_report`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:114` `make_board_material_report`
 
 - **L587 · 方法** `OrderWorkflowTests.test_generated_material_color_table_aggregates_repeated_report_colors()` — 验证材料、颜色相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:113` `make_board_material_report`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:114` `make_board_material_report`
 
 - **L621 · 方法** `OrderWorkflowTests.test_complex_report_generation_requests_manual_material()` — 验证材料相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:113` `make_board_material_report`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:114` `make_board_material_report`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `wb.save`；是否真实写入仍取决于分支和参数。
 
 - **L635 · 方法** `OrderWorkflowTests.test_local_test_source_is_repeatable_and_matches_server_layout()` — 验证来源、Server 数据相关数据或步骤。
@@ -7390,13 +7853,13 @@ Swift/macOS 源码或测试辅助文件。
 - **L663 · 方法** `OrderWorkflowTests.test_usage_list_expands_and_rewrites_summary_formulas()` — 验证与 `test_usage_list_expands_and_rewrites_summary_formulas` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:185` `make_template`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:186` `make_template`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`；是否真实写入仍取决于分支和参数。
 
 - **L708 · 方法** `OrderWorkflowTests.test_usage_list_normalizes_alias_color_before_color_table_formulas()` — 验证颜色相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:185` `make_template`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:186` `make_template`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`；是否真实写入仍取决于分支和参数。
 
 - **L745 · 方法** `OrderWorkflowTests.test_order_folders_are_sorted_by_modified_time_descending()` — 验证订单、时间相关数据或步骤。
@@ -7414,19 +7877,19 @@ Swift/macOS 源码或测试辅助文件。
 - **L777 · 方法** `OrderWorkflowTests.test_cut_to_size_generates_materials_only_traveler()` — 验证Traveler相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`；`tests/test_order_workflow.py:138` `make_fittings`；`tests/test_order_workflow.py:185` `make_template`；`tests/test_order_workflow.py:210` `picking_layout_snapshot`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:139` `make_fittings`；`tests/test_order_workflow.py:186` `make_template`；`tests/test_order_workflow.py:211` `picking_layout_snapshot`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `order.mkdir`, `untouched.save`, `set`；是否真实写入仍取决于分支和参数。
 
 - **L849 · 方法** `OrderWorkflowTests.test_source_component_code_is_not_written_as_sku()` — 验证来源、编码相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`；`tests/test_order_workflow.py:104` `make_board`；`tests/test_order_workflow.py:138` `make_fittings`；`tests/test_order_workflow.py:185` `make_template`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:105` `make_board`；`tests/test_order_workflow.py:139` `make_fittings`；`tests/test_order_workflow.py:186` `make_template`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.mkdir`；是否真实写入仍取决于分支和参数。
 
 - **L877 · 方法** `OrderWorkflowTests.test_opt_out_hardware_omits_report_fittings_from_traveler()` — 验证五金、Traveler相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`；`tests/test_order_workflow.py:104` `make_board`；`tests/test_order_workflow.py:138` `make_fittings`；`tests/test_order_workflow.py:185` `make_template`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:105` `make_board`；`tests/test_order_workflow.py:139` `make_fittings`；`tests/test_order_workflow.py:186` `make_template`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.mkdir`；是否真实写入仍取决于分支和参数。
 
 - **L907 · 方法** `OrderWorkflowTests.test_invalid_empty_dimension_returns_one_business_error()` — 验证与 `test_invalid_empty_dimension_returns_one_business_error` 对应的数据或步骤。
@@ -7438,194 +7901,211 @@ Swift/macOS 源码或测试辅助文件。
 - **L923 · 方法** `OrderWorkflowTests.test_equal_rail_pair_is_collapsed_but_mismatch_stops_read()` — 验证与 `test_equal_rail_pair_is_collapsed_but_mismatch_stops_read` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:159` `make_rail_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:160` `make_rail_fittings`
 
 - **L954 · 方法** `OrderWorkflowTests.test_equal_rail_pair_preview_consumes_canonical_quantity()` — 验证预览、数量相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`；`tests/test_order_workflow.py:104` `make_board`；`tests/test_order_workflow.py:159` `make_rail_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:105` `make_board`；`tests/test_order_workflow.py:160` `make_rail_fittings`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.mkdir`；是否真实写入仍取决于分支和参数。
 
 - **L975 · 方法** `OrderWorkflowTests.test_single_color_materials_and_integer_validation()` — 验证颜色相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
 
 - **L988 · 方法** `OrderWorkflowTests.test_multicolor_materials_accepts_color_table_marker_in_total_row()` — 验证颜色、行数据相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`；是否真实写入仍取决于分支和参数。
 
 - **L1022 · 方法** `OrderWorkflowTests.test_single_color_materials_without_color_table_is_a_schema_error()` — 验证颜色相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`；是否真实写入仍取决于分支和参数。
 
 - **L1041 · 方法** `OrderWorkflowTests.test_single_color_materials_keep_edge_when_panel_is_zero()` — 验证颜色相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`；是否真实写入仍取决于分支和参数。
 
 - **L1059 · 方法** `OrderWorkflowTests.test_repairs_empty_single_color_table_from_detail_rows_without_changing_details()` — 验证颜色相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`；是否真实写入仍取决于分支和参数。
 
 - **L1104 · 方法** `OrderWorkflowTests.test_repairs_missing_color_table_colors_and_rebuilds_all_summary_formulas()` — 验证颜色相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`；是否真实写入仍取决于分支和参数。
 
 - **L1144 · 方法** `OrderWorkflowTests.test_preview_rejects_incomplete_color_table_without_rewriting_source()` — 验证预览、颜色、来源相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `order.mkdir`, `workbook.save`；是否真实写入仍取决于分支和参数。
 
 - **L1166 · 方法** `OrderWorkflowTests.test_repair_aggregates_repeated_detail_color_rows()` — 验证颜色相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`；是否真实写入仍取决于分支和参数。
 
 - **L1193 · 方法** `OrderWorkflowTests.test_existing_complete_color_table_mismatch_requires_manual_handling()` — 验证颜色相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`；是否真实写入仍取决于分支和参数。
 
 - **L1211 · 方法** `OrderWorkflowTests.test_eight_color_table_is_read_without_seven_color_limit_error()` — 验证颜色相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`, `set`；是否真实写入仍取决于分支和参数。
 
 - **L1244 · 方法** `OrderWorkflowTests.test_integer_display_format_uses_the_total_qty_values_excel_shows()` — 验证与 `test_integer_display_format_uses_the_total_qty_values_excel_shows` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `wb.save`；是否真实写入仍取决于分支和参数。
 
 - **L1273 · 方法** `OrderWorkflowTests.test_material_detail_quantity_requires_color()` — 验证材料、数量、颜色相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`；是否真实写入仍取决于分支和参数。
 
 - **L1287 · 方法** `OrderWorkflowTests.test_total_qty_and_color_table_must_match_before_material_write()` — 验证颜色、材料相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `workbook.save`；是否真实写入仍取决于分支和参数。
 
 - **L1311 · 方法** `OrderWorkflowTests.test_formula_without_cached_values_uses_display_values_for_totals_and_color_table()` — 验证颜色相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `wb.save`；是否真实写入仍取决于分支和参数。
 
-- **L1339 · 方法** `OrderWorkflowTests.test_integer_display_format_is_also_used_for_room_rows()` — 验证与 `test_integer_display_format_is_also_used_for_room_rows` 对应的数据或步骤。
+- **L1339 · 方法** `OrderWorkflowTests.test_edge_summary_format_with_and_without_formula_cache()` — 验证缓存相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `wb.save`；是否真实写入仍取决于分支和参数。
 
-- **L1355 · 方法** `OrderWorkflowTests.test_room_section_factory_name_extracts_exact_order_and_rejects_ambiguous_rows()` — 验证工厂单、名称、订单相关数据或步骤。
+- **L1370 · 方法** `OrderWorkflowTests.test_edge_display_rounding_preserves_real_summary_mismatch()` — 验证与 `test_edge_display_rounding_preserves_real_summary_mismatch` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `wb.save`；是否真实写入仍取决于分支和参数。
+
+- **L1383 · 方法** `OrderWorkflowTests.test_integer_display_format_is_also_used_for_room_rows()` — 验证与 `test_integer_display_format_is_also_used_for_room_rows` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `wb.save`；是否真实写入仍取决于分支和参数。
+
+- **L1399 · 方法** `OrderWorkflowTests.test_room_section_factory_name_extracts_exact_order_and_rejects_ambiguous_rows()` — 验证工厂单、名称、订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L1378 · 方法** `OrderWorkflowTests.test_related_update_reports_the_specific_order_error()` — 验证订单相关数据或步骤。
+- **L1422 · 方法** `OrderWorkflowTests.test_related_update_reports_the_specific_order_error()` — 验证订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `update_related_orders`；是否真实写入仍取决于分支和参数。
 
-- **L1394 · 方法** `OrderWorkflowTests.test_related_update_response_keeps_all_orders_and_factories()` — 验证与 `test_related_update_response_keeps_all_orders_and_factories` 对应的数据或步骤。
+- **L1438 · 方法** `OrderWorkflowTests.test_related_update_response_keeps_all_orders_and_factories()` — 验证与 `test_related_update_response_keeps_all_orders_and_factories` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `update_related_orders`；是否真实写入仍取决于分支和参数。
 
-- **L1422 · 方法** `OrderWorkflowTests.test_duplicate_fittings_require_choice_regardless_of_time()` — 验证时间相关数据或步骤。
+- **L1466 · 方法** `OrderWorkflowTests.test_duplicate_fittings_require_choice_regardless_of_time()` — 验证时间相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:138` `make_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:139` `make_fittings`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `older.parent.mkdir`, `newer.parent.mkdir`；是否真实写入仍取决于分支和参数。
 
-- **L1448 · 方法** `OrderWorkflowTests.test_empty_malformed_fittings_is_skipped_and_traveler_can_generate()` — 验证Traveler相关数据或步骤。
+- **L1492 · 方法** `OrderWorkflowTests.test_empty_malformed_fittings_is_skipped_and_traveler_can_generate()` — 验证Traveler相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`；`tests/test_order_workflow.py:104` `make_board`；`tests/test_order_workflow.py:185` `make_template`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:105` `make_board`；`tests/test_order_workflow.py:186` `make_template`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.mkdir`, `workbook.save`, `empty.save`；是否真实写入仍取决于分支和参数。
 
-- **L1504 · 方法** `OrderWorkflowTests.test_global_ignore_and_generate_one_order_workbook()` — 验证订单相关数据或步骤。
+- **L1548 · 方法** `OrderWorkflowTests.test_global_ignore_and_generate_one_order_workbook()` — 验证订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`；`tests/test_order_workflow.py:104` `make_board`；`tests/test_order_workflow.py:138` `make_fittings`；`tests/test_order_workflow.py:185` `make_template`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:105` `make_board`；`tests/test_order_workflow.py:139` `make_fittings`；`tests/test_order_workflow.py:186` `make_template`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report_a.mkdir`, `report_b.mkdir`, `set_ignored`, `set_ignored_mapping`, `wb.save`, `materials_wb.save`, `update_order_traveler`；是否真实写入仍取决于分支和参数。
 
-- **L1606 · 方法** `OrderWorkflowTests.test_ignored_hardware_is_not_persisted_when_order_is_rescanned()` — 验证五金、订单相关数据或步骤。
+- **L1650 · 方法** `OrderWorkflowTests.test_ignored_hardware_is_not_persisted_when_order_is_rescanned()` — 验证五金、订单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`；`tests/test_order_workflow.py:104` `make_board`；`tests/test_order_workflow.py:138` `make_fittings`；`tests/test_order_workflow.py:190` `make_product_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:105` `make_board`；`tests/test_order_workflow.py:139` `make_fittings`；`tests/test_order_workflow.py:191` `make_product_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.mkdir`, `connection.execute`, `connection.close`, `set_ignored`；是否真实写入仍取决于分支和参数。
 
-- **L1641 · 方法** `OrderWorkflowTests.test_add_manual_hardware_writes_database_and_aggregates_same_sku()` — 验证五金、数据库相关数据或步骤。
+- **L1685 · 方法** `OrderWorkflowTests.test_add_manual_hardware_writes_database_and_aggregates_same_sku()` — 验证五金、数据库相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`；`tests/test_order_workflow.py:104` `make_board`；`tests/test_order_workflow.py:138` `make_fittings`；`tests/test_order_workflow.py:190` `make_product_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:105` `make_board`；`tests/test_order_workflow.py:139` `make_fittings`；`tests/test_order_workflow.py:191` `make_product_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.mkdir`, `index.connection.execute`, `index.connection.commit`, `index.close`, `traveler.parent.mkdir`, `traveler.write_text`, `connection.execute`, `connection.commit`, `connection.close`；是否真实写入仍取决于分支和参数。
 
-- **L1742 · 方法** `OrderWorkflowTests.test_manual_hardware_accepts_factory_number_without_traveler()` — 验证五金、工厂单、Traveler相关数据或步骤。
+- **L1780 · 方法** `OrderWorkflowTests.test_manual_hardware_accepts_factory_number_without_traveler()` — 验证五金、工厂单、Traveler相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:190` `make_product_catalog`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:191` `make_product_catalog`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`, `connection.commit`, `index.close`, `connection.close`；是否真实写入仍取决于分支和参数。
 
 ## `tests/test_production.py`
 
 自动化测试：验证 `production` 模块或业务场景。
 
-- **L19 · 类** `ProductionTransactionTests` — 定义与生产相关的类，集中保存数据和行为边界。
+- **L20 · 类** `ProductionTransactionTests` — 定义与生产相关的类，集中保存数据和行为边界。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L21 · 方法** `ProductionTransactionTests._seed_products(connection)` — 封装 `_seed_products` 对应的辅助逻辑，供所属模块或类型复用。
+- **L21 · 方法** `ProductionTransactionTests.test_app_material_identity_and_conflicting_sku()` — 验证材料相关数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+
+- **L30 · 方法** `ProductionTransactionTests._seed_products(connection)` — 封装 `_seed_products` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`connection`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.executemany`；是否真实写入仍取决于分支和参数。
 
-- **L36 · 方法** `ProductionTransactionTests.test_production_preview_aggregates_duplicate_order_material_rows()` — 验证生产、预览、订单、材料相关数据或步骤。
+- **L45 · 方法** `ProductionTransactionTests.test_production_preview_aggregates_duplicate_order_material_rows()` — 验证生产、预览、订单、材料相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_production.py:21` `ProductionTransactionTests._seed_products`
+  - 静态可确认的项目内下一跳：`tests/test_production.py:30` `ProductionTransactionTests._seed_products`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`, `connection.executemany`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L74 · 方法** `ProductionTransactionTests.test_production_preview_deducts_legacy_inventory_materials()` — 验证生产、预览、库存相关数据或步骤。
+- **L80 · 方法** `ProductionTransactionTests.test_production_preview_deducts_legacy_inventory_materials()` — 验证生产、预览、库存相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_production.py:21` `ProductionTransactionTests._seed_products`
+  - 静态可确认的项目内下一跳：`tests/test_production.py:30` `ProductionTransactionTests._seed_products`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`, `connection.executemany`, `store.commit`, `store.close`, `connection.commit`, `connection.close`；是否真实写入仍取决于分支和参数。
 
-- **L187 · 方法** `ProductionTransactionTests.test_prepare_production_is_read_only_until_inventory_succeeds()` — 验证生产、库存相关数据或步骤。
+- **L190 · 方法** `ProductionTransactionTests.test_prepare_production_is_read_only_until_inventory_succeeds()` — 验证生产、库存相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_production.py:21` `ProductionTransactionTests._seed_products`
+  - 静态可确认的项目内下一跳：`tests/test_production.py:30` `ProductionTransactionTests._seed_products`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`, `connection.commit`, `store.commit`, `store.close`, `connection.close`；是否真实写入仍取决于分支和参数。
 
 - **L241 · 方法** `ProductionTransactionTests.test_completed_production_can_share_the_local_commit()` — 验证生产相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_production.py:21` `ProductionTransactionTests._seed_products`
-  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `record_completed_production`, `connection.commit`, `connection.execute`, `connection.close`；是否真实写入仍取决于分支和参数。
+  - 静态可确认的项目内下一跳：`tests/test_production.py:30` `ProductionTransactionTests._seed_products`
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `connection.execute`, `record_completed_production`, `connection.commit`, `connection.close`；是否真实写入仍取决于分支和参数。
 
 ## `tests/test_report_selection.py`
 
@@ -7639,13 +8119,13 @@ Swift/macOS 源码或测试辅助文件。
 - **L20 · 方法** `ReportSelectionTests.test_changed_choice_requires_reselection_and_identical_content_deduplicates()` — 验证与 `test_changed_choice_requires_reselection_and_identical_content_deduplicates` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:138` `make_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:139` `make_fittings`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `path.parent.mkdir`；是否真实写入仍取决于分支和参数。
 
 - **L39 · 方法** `ReportSelectionTests.test_choices_apply_per_factory_in_multiblock_files()` — 验证工厂单相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:138` `make_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:139` `make_fittings`
 
 - **L55 · 方法** `ReportSelectionTests.test_database_ownership_precedes_display_prefix_and_no_network()` — 验证数据库相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
@@ -7656,7 +8136,7 @@ Swift/macOS 源码或测试辅助文件。
 - **L71 · 方法** `ReportSelectionTests.test_report_cache_is_request_local_copied_and_file_change_sensitive()` — 验证缓存、文件相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:138` `make_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:139` `make_fittings`
 
 - **L86 · 方法** `ReportSelectionTests.test_process_progress_delivered_before_exit_and_timeout_kills_child()` — 验证进度相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
@@ -7678,12 +8158,12 @@ Swift/macOS 源码或测试辅助文件。
 - **L116 · 方法** `ReportSelectionTests.test_zero_quantity_report_is_not_silently_discarded()` — 验证数量相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:138` `make_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:139` `make_fittings`
 
 - **L125 · 方法** `ReportSelectionTests.test_confirmed_source_is_fixed_until_content_changes_and_keep_survives_restart()` — 验证来源相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:190` `make_product_catalog`；`tests/test_order_workflow.py:80` `make_materials`；`tests/test_order_workflow.py:138` `make_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:191` `make_product_catalog`；`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:139` `make_fittings`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `folder.mkdir`, `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`, `connection.execute`, `connection.close`；是否真实写入仍取决于分支和参数。
 
 ## `tests/test_runtime_store.py`
@@ -7759,13 +8239,13 @@ Swift/macOS 源码或测试辅助文件。
 - **L21 · 方法** `ServerRailUnitsTests.setUp()` — 设置与 `setUp` 对应的数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:80` `make_materials`；`tests/test_order_workflow.py:104` `make_board`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:81` `make_materials`；`tests/test_order_workflow.py:105` `make_board`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `report.mkdir`, `wb.save`, `mappings.save_manual`, `mappings.save_ignored`, `store.upsert_order`, `store.upsert_factory`, `store.commit`, `store.close`；是否真实写入仍取决于分支和参数。
 
 - **L56 · 方法** `ServerRailUnitsTests.write_report(quantities)` — 写入与 `write_report` 对应的数据或步骤。
   - 输入：`quantities`
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:138` `make_fittings`
+  - 静态可确认的项目内下一跳：`tests/test_order_workflow.py:139` `make_fittings`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `wb.save`；是否真实写入仍取决于分支和参数。
 
 - **L67 · 方法** `ServerRailUnitsTests.rows()` — 封装 `rows` 对应的辅助逻辑，供所属模块或类型复用。
@@ -7842,23 +8322,23 @@ Swift/macOS 源码或测试辅助文件。
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `state.mkdir`, `connection.execute`, `connection.commit`, `connection.close`, `legacy_inventory.parent.mkdir`；是否真实写入仍取决于分支和参数。
 
-- **L159 · 方法** `WorkflowDatabaseTests.test_one_factory_order_gets_one_batch_and_conflict_raises_open_issue()` — 验证工厂单、订单、待处理问题相关数据或步骤。
+- **L159 · 方法** `WorkflowDatabaseTests.test_source_batches_do_not_create_production_or_conflicts()` — 验证来源、生产相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
-  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_aimes_factory`, `store.update_source_file_identity`, `store.record_batch_evidence`, `store.commit`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
+  - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `store.upsert_aimes_factory`, `store.update_source_file_identity`, `store.connection.execute`, `store.close`；是否真实写入仍取决于分支和参数。
 
-- **L174 · 方法** `WorkflowDatabaseTests.test_backup_status_requires_user_action_without_successful_record()` — 验证备份、状态、记录相关数据或步骤。
-  - 输入：无显式参数（可能读取所属对象状态）
-  - 返回：`未声明`
-  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
-
-- **L181 · 方法** `WorkflowDatabaseTests.test_retention_keeps_recent_daily_and_sunday_weekly_backups()` — 验证与 `test_retention_keeps_recent_daily_and_sunday_weekly_backups` 对应的数据或步骤。
+- **L170 · 方法** `WorkflowDatabaseTests.test_backup_status_requires_user_action_without_successful_record()` — 验证备份、状态、记录相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
 
-- **L202 · 方法** `WorkflowDatabaseTests.test_perform_backup_uses_local_database_backup_directory()` — 验证备份、数据库相关数据或步骤。
+- **L177 · 方法** `WorkflowDatabaseTests.test_retention_keeps_recent_daily_and_sunday_weekly_backups()` — 验证与 `test_retention_keeps_recent_daily_and_sunday_weekly_backups` 对应的数据或步骤。
+  - 输入：无显式参数（可能读取所属对象状态）
+  - 返回：`未声明`
+  - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
+
+- **L198 · 方法** `WorkflowDatabaseTests.test_perform_backup_uses_local_database_backup_directory()` — 验证备份、数据库相关数据或步骤。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发
@@ -8242,13 +8722,13 @@ Python 源码或一次性辅助文件。
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：`tools/repair_hardware_history.py:21` `records`；`tools/repair_hardware_history.py:27` `quantities`
 
-- **L72 · 函数** `digest_documents(connection)` — 封装 `digest_documents` 对应的辅助逻辑，供所属模块或类型复用。
+- **L74 · 函数** `digest_documents(connection)` — 封装 `digest_documents` 对应的辅助逻辑，供所属模块或类型复用。
   - 输入：`connection`
   - 返回：`未声明`
   - 静态可确认的项目内下一跳：`tools/repair_hardware_history.py:21` `records`
 
-- **L77 · 函数** `main()` — 解析命令行参数，建立运行配置并分发到对应业务动作。
+- **L79 · 函数** `main()` — 解析命令行参数，建立运行配置并分发到对应业务动作。
   - 输入：无显式参数（可能读取所属对象状态）
   - 返回：`未声明`
-  - 静态可确认的项目内下一跳：`tools/repair_hardware_history.py:34` `plan_repair`；`tools/repair_hardware_history.py:72` `digest_documents`；`tools/repair_hardware_history.py:21` `records`
+  - 静态可确认的项目内下一跳：`tools/repair_hardware_history.py:34` `plan_repair`；`tools/repair_hardware_history.py:74` `digest_documents`；`tools/repair_hardware_history.py:21` `records`
   - 副作用提示：检测到可能写库、写文件、启动进程或操作外部系统的调用 `args.backup_dir.mkdir`, `backup.close`, `source.close`, `connection.execute`, `replace_factory_hardware`, `(args.backup_dir / 'repair-report.json').write_text`, `connection.commit`, `connection.close`, `reference.close`；是否真实写入仍取决于分支和参数。

@@ -51,7 +51,6 @@ from traveler_assistant.inventory import (
     reconcile_folder_status,
     run_jdy,
     resolve_inventory_items,
-    repair_hardware_inventory_codes,
     outbound_scope_decisions,
     set_ignored_mapping,
     save_manual_mapping,
@@ -265,7 +264,7 @@ class InventoryTests(unittest.TestCase):
                 ("PP0100", "owned", "now"),
             )
             store.connection.execute(
-                "insert into factory_orders(factory_order, order_id, factory_name, optimized, outbound_status, updated_at) values(?,?,?,?,?,?)",
+                "insert into factory_orders(factory_order,order_id,factory_name,updated_at,stage) select v.factory_order,v.order_id,v.factory_name,v.updated_at,case when v.outbound_status='已出库' then '已出货' when v.optimized then '已优化' else '已拆单' end from (select ? as factory_order,? as order_id,? as factory_name,? as optimized,? as outbound_status,? as updated_at) v",
                 ("F1000", "PP0100", "PP0100-NO-HARDWARE", 1, "未出库", "now"),
             )
             store.commit()
@@ -279,7 +278,7 @@ class InventoryTests(unittest.TestCase):
             result = mark_no_hardware_outbound(config, "PP0100", ["F1000"])
             self.assertEqual(result["outbound_mode"], "no_hardware")
             row = sqlite3.connect(config.workflow_database).execute(
-                "select outbound_status, outbound_document, outbound_mode from factory_orders where factory_order='F1000'"
+                "select (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status, outbound_document, outbound_mode from factory_orders where factory_order='F1000'"
             ).fetchone()
             self.assertEqual(row, ("已出库", "", "no_hardware"))
 
@@ -295,7 +294,7 @@ class InventoryTests(unittest.TestCase):
                 ("CS001", "cutToSize", "now"),
             )
             store.connection.execute(
-                "insert into factory_orders(factory_order, order_id, factory_name, optimized, outbound_status, updated_at) values(?,?,?,?,?,?)",
+                "insert into factory_orders(factory_order,order_id,factory_name,updated_at,stage) select v.factory_order,v.order_id,v.factory_name,v.updated_at,case when v.outbound_status='已出库' then '已出货' when v.optimized then '已优化' else '已拆单' end from (select ? as factory_order,? as order_id,? as factory_name,? as optimized,? as outbound_status,? as updated_at) v",
                 ("F1001", "CS001", "CS001-KITCHEN", 1, "未出库", "now"),
             )
             store.connection.execute(
@@ -319,7 +318,7 @@ class InventoryTests(unittest.TestCase):
 
             connection = sqlite3.connect(config.workflow_database)
             row = connection.execute(
-                "select outbound_status, outbound_document, outbound_mode, outbound_fingerprint from factory_orders where factory_order='F1001'"
+                "select (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status, outbound_document, outbound_mode, outbound_fingerprint from factory_orders where factory_order='F1001'"
             ).fetchone()
             self.assertEqual(row, ("已出库", "", "customer_supplied", fingerprint))
             self.assertEqual(
@@ -358,7 +357,7 @@ class InventoryTests(unittest.TestCase):
                 ("CS004", "cutToSize", "now"),
             )
             store.connection.execute(
-                "insert into factory_orders(factory_order, order_id, factory_name, optimized, outbound_status, updated_at) values(?,?,?,?,?,?)",
+                "insert into factory_orders(factory_order,order_id,factory_name,updated_at,stage) select v.factory_order,v.order_id,v.factory_name,v.updated_at,case when v.outbound_status='已出库' then '已出货' when v.optimized then '已优化' else '已拆单' end from (select ? as factory_order,? as order_id,? as factory_name,? as optimized,? as outbound_status,? as updated_at) v",
                 ("F4004", "CS004", "CS004-KITCHEN", 1, "未出库", "now"),
             )
             store.commit()
@@ -380,7 +379,7 @@ class InventoryTests(unittest.TestCase):
                 ("CS005", "cutToSize", "now"),
             )
             store.connection.execute(
-                "insert into factory_orders(factory_order, order_id, factory_name, optimized, outbound_status, updated_at) values(?,?,?,?,?,?)",
+                "insert into factory_orders(factory_order,order_id,factory_name,updated_at,stage) select v.factory_order,v.order_id,v.factory_name,v.updated_at,case when v.outbound_status='已出库' then '已出货' when v.optimized then '已优化' else '已拆单' end from (select ? as factory_order,? as order_id,? as factory_name,? as optimized,? as outbound_status,? as updated_at) v",
                 ("F5005", "CS005", "CS005-KITCHEN", 1, "未出库", "now"),
             )
             store.connection.execute(
@@ -388,8 +387,8 @@ class InventoryTests(unittest.TestCase):
                 ("CS005", "M-BLANCO", 1, "manual", "now"),
             )
             store.connection.execute(
-                "insert into hardware_items(order_id, factory_order, scope, product_code, name, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?,?)",
-                ("CS005", "F5005", "factory_order", "M1001", "Hinge", 1, "件", "database", "now"),
+                'insert into hardware_items(order_id,factory_order,scope,product_code,quantity,source_type,updated_at) values(?,?,?,?,?,?,?)',
+                ('CS005', 'F5005', 'factory_order', 'M1001', 1, 'database', 'now'),
             )
             store.commit()
             store.close()
@@ -419,7 +418,7 @@ class InventoryTests(unittest.TestCase):
                 ("CS002", "cutToSize", str(root / "source" / "CS002"), "now"),
             )
             store.connection.execute(
-                "insert into factory_orders(factory_order, order_id, factory_name, optimized, outbound_status, updated_at) values(?,?,?,?,?,?)",
+                "insert into factory_orders(factory_order,order_id,factory_name,updated_at,stage) select v.factory_order,v.order_id,v.factory_name,v.updated_at,case when v.outbound_status='已出库' then '已出货' when v.optimized then '已优化' else '已拆单' end from (select ? as factory_order,? as order_id,? as factory_name,? as optimized,? as outbound_status,? as updated_at) v",
                 ("F2002", "CS002", "CS002-Hardware", 1, "未出库", "now"),
             )
             store.connection.execute(
@@ -431,8 +430,8 @@ class InventoryTests(unittest.TestCase):
                 ("CS002", "M0020", 100, "aihouse", "now"),
             )
             store.connection.execute(
-                "insert into hardware_items(order_id, factory_order, scope, product_code, name, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?,?)",
-                ("CS002", "F2002", "factory_order", "M1001", "Unihopper Hinge", 2, "件", "aicnc", "now"),
+                'insert into hardware_items(order_id,factory_order,scope,product_code,quantity,source_type,updated_at) values(?,?,?,?,?,?,?)',
+                ('CS002', 'F2002', 'factory_order', 'M1001', 2, 'aicnc', 'now'),
             )
             store.commit()
             store.close()
@@ -459,12 +458,12 @@ class InventoryTests(unittest.TestCase):
                 ("PP0072", "owned", "now"),
             )
             store.connection.execute(
-                "insert into factory_orders(factory_order, order_id, factory_name, sales_order_name, optimized, outbound_status, updated_at) values(?,?,?,?,?,?,?)",
+                "insert into factory_orders(factory_order,order_id,factory_name,sales_order_name,updated_at,stage) select v.factory_order,v.order_id,v.factory_name,v.sales_order_name,v.updated_at,case when v.outbound_status='已出库' then '已出货' when v.optimized then '已优化' else '已拆单' end from (select ? as factory_order,? as order_id,? as factory_name,? as sales_order_name,? as optimized,? as outbound_status,? as updated_at) v",
                 ("F2608190230", "PP0072", "P0072-BED 2", "PP0072", 1, "未出库", "now"),
             )
             store.connection.execute(
-                "insert into hardware_items(order_id, factory_order, scope, product_code, name, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?,?)",
-                ("PP0072", "F2608190230", "factory_order", "M1001", "Hinge", 1, "件", "aicnc", "now"),
+                'insert into hardware_items(order_id,factory_order,scope,product_code,quantity,source_type,updated_at) values(?,?,?,?,?,?,?)',
+                ('PP0072', 'F2608190230', 'factory_order', 'M1001', 1, 'aicnc', 'now'),
             )
             store.commit()
             store.close()
@@ -535,7 +534,7 @@ class InventoryTests(unittest.TestCase):
                 ("PP9999", "owned", str(root / "source" / "PP9999"), "2026-08-15T10:00:00"),
             )
             store.connection.execute(
-                "insert into factory_orders(factory_order, order_id, factory_name, optimized, outbound_status, updated_at) values(?,?,?,?,?,?)",
+                "insert into factory_orders(factory_order,order_id,factory_name,updated_at,stage) select v.factory_order,v.order_id,v.factory_name,v.updated_at,case when v.outbound_status='已出库' then '已出货' when v.optimized then '已优化' else '已拆单' end from (select ? as factory_order,? as order_id,? as factory_name,? as optimized,? as outbound_status,? as updated_at) v",
                 ("F9999", "PP9999", "PP9999-KITCHEN", 1, "未出库", "2026-08-15T10:00:00"),
             )
             store.connection.execute(
@@ -547,8 +546,8 @@ class InventoryTests(unittest.TestCase):
                 ("PP9999", "M0020", 12.5, "database", "2026-08-15T10:00:00"),
             )
             store.connection.execute(
-                "insert into hardware_items(order_id, factory_order, scope, product_code, name, spec, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?,?,?)",
-                ("PP9999", "F9999", "factory_order", "M1001", "Unihopper Hinge", "", 3, "件", "database", "2026-08-15T10:00:00"),
+                'insert into hardware_items(order_id,factory_order,scope,product_code,quantity,source_type,updated_at) values(?,?,?,?,?,?,?)',
+                ('PP9999', 'F9999', 'factory_order', 'M1001', 3, 'database', '2026-08-15T10:00:00'),
             )
             store.connection.commit()
             store.close()
@@ -608,7 +607,8 @@ class InventoryTests(unittest.TestCase):
         self.assertIn("?.produced != true", detail_card)
         self.assertIn("AppLayout.controlHeight", detail_card)
         self.assertIn('if orderType != "owned"', detail_card)
-        self.assertIn('Button("设置出库范围")', detail_card)
+        self.assertIn('Button { onOpenScope() } label:', detail_card)
+        self.assertIn('Text("设置出库范围")', detail_card)
         detail = dashboard.split("struct OrderDashboardDetailPage", 1)[1].split(
             "private func orderInstallationDateFormatter", 1
         )[0]
@@ -672,7 +672,7 @@ class InventoryTests(unittest.TestCase):
                 ("PP9999", "owned", str(root / "source" / "PP9999"), "2026-08-15T10:00:00"),
             )
             store.connection.execute(
-                "insert into factory_orders(factory_order, order_id, factory_name, optimized, outbound_status, updated_at) values(?,?,?,?,?,?)",
+                "insert into factory_orders(factory_order,order_id,factory_name,updated_at,stage) select v.factory_order,v.order_id,v.factory_name,v.updated_at,case when v.outbound_status='已出库' then '已出货' when v.optimized then '已优化' else '已拆单' end from (select ? as factory_order,? as order_id,? as factory_name,? as optimized,? as outbound_status,? as updated_at) v",
                 ("F9999", "PP9999", "PP9999-KITCHEN", 1, "已出库", "2026-08-15T10:00:00"),
             )
             store.connection.execute(
@@ -680,8 +680,8 @@ class InventoryTests(unittest.TestCase):
                 ("PP9999", "M0004", 2, "database", "2026-08-15T10:00:00"),
             )
             store.connection.execute(
-                "insert into hardware_items(order_id, factory_order, scope, product_code, name, spec, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?,?,?)",
-                ("PP9999", "F9999", "factory_order", "M1001", "Unihopper Hinge", "", 3, "件", "database", "2026-08-15T10:00:00"),
+                'insert into hardware_items(order_id,factory_order,scope,product_code,quantity,source_type,updated_at) values(?,?,?,?,?,?,?)',
+                ('PP9999', 'F9999', 'factory_order', 'M1001', 3, 'database', '2026-08-15T10:00:00'),
             )
             store.commit()
             store.close()
@@ -1664,44 +1664,7 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(result["missing"], [])
             self.assertEqual(result["outbound"][0].product_code, "M1003")
 
-    def test_repair_hardware_collapses_lower_rail_pair_rows(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            config = Config(state_dir=root / "state")
-            config.prepare_storage()
-            catalog_path = config.state_dir / "inventory" / "current-products.xlsx"
-            make_catalog(catalog_path)
-            workbook = load_workbook(catalog_path)
-            workbook.active.append(["Hardware", "M1003", "L-Rail", "", "启用", "件"])
-            workbook.save(catalog_path)
-
-            connection = connect_database(config.workflow_database)
-            seed_sku_products(connection)
-            connection.executemany(
-                """insert into hardware_items(
-                    order_id, factory_order, product_code, source_code, name,
-                    quantity, source_type, source_path, updated_at
-                ) values(?,?,?,?,?,?,?,?,?)""",
-                [
-                    ("PP0099", "F0099", "M1003", "L-Rail", "Lower Left Rail", 1, "aicnc", "/server/fittings.xlsx", "now"),
-                    ("PP0099", "F0099", "M1003", "L-Rail", "Lower Right Rail", 1, "aicnc", "/server/fittings.xlsx", "now"),
-                ],
-            )
-            connection.commit()
-            connection.close()
-
-            result = repair_hardware_inventory_codes(config)
-
-            self.assertEqual(result["rails_collapsed"], 1)
-            self.assertEqual(result["rail_rows_removed"], 1)
-            connection = sqlite3.connect(config.workflow_database)
-            rows = connection.execute(
-                "select name, product_code, quantity from hardware_items"
-            ).fetchall()
-            connection.close()
-            self.assertEqual(rows, [("Lower Left Rail", "M1003", 1.0)])
-
-    def test_ignoring_hardware_removes_existing_database_facts(self):
+    def test_ignoring_hardware_preserves_confirmed_sku_facts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = Config(state_dir=root / "state")
@@ -1709,40 +1672,33 @@ class InventoryTests(unittest.TestCase):
             connection = connect_database(config.workflow_database)
             seed_sku_products(connection)
             connection.executemany(
-                """insert into hardware_items(
-                    order_id, factory_order, product_code, source_code, name,
-                    quantity, source_type, updated_at
-                ) values(?,?,?,?,?,?,?,?)""",
-                [
-                    ("PP0099", "F0099", "M1013", "WJ-CBT", "Adjustable shelf holder", 2, "aicnc", "now"),
-                    ("PP0099", "F0099", "M1001", "71T950A", "TestFullHinge", 4, "aicnc", "now"),
-                    ("PP0099", "F0099", "M-LED", "WJ-CBD", "LED", 5, "aicnc", "now"),
-                ],
+                'insert into hardware_items(order_id,factory_order,product_code,quantity,source_type,updated_at) values(?,?,?,?,?,?)',
+                [('PP0099', 'F0099', 'M1013', 2, 'aicnc', 'now'), ('PP0099', 'F0099', 'M1001', 4, 'aicnc', 'now'), ('PP0099', 'F0099', 'M-LED', 5, 'aicnc', 'now')],
             )
             connection.commit()
             connection.close()
 
             result = set_ignored_mapping(config, "Shelf Holder", True, "不再采购")
-            self.assertEqual(result["removed_database_rows"], 1)
+            self.assertEqual(result["removed_database_rows"], 0)
             connection = sqlite3.connect(config.workflow_database)
             try:
-                self.assertEqual(connection.execute("select count(*) from hardware_items").fetchone()[0], 2)
+                self.assertEqual(connection.execute("select count(*) from hardware_items").fetchone()[0], 3)
             finally:
                 connection.close()
 
             result = set_ignored_mapping(config, "Hinge", True, "不再采购")
-            self.assertEqual(result["removed_database_rows"], 1)
+            self.assertEqual(result["removed_database_rows"], 0)
             connection = sqlite3.connect(config.workflow_database)
             try:
-                self.assertEqual(connection.execute("select count(*) from hardware_items").fetchone()[0], 1)
+                self.assertEqual(connection.execute("select count(*) from hardware_items").fetchone()[0], 3)
             finally:
                 connection.close()
 
             result = set_ignored_mapping(config, "LED", True, "不再采购")
-            self.assertEqual(result["removed_database_rows"], 1)
+            self.assertEqual(result["removed_database_rows"], 0)
             connection = sqlite3.connect(config.workflow_database)
             try:
-                self.assertEqual(connection.execute("select count(*) from hardware_items").fetchone()[0], 0)
+                self.assertEqual(connection.execute("select count(*) from hardware_items").fetchone()[0], 3)
             finally:
                 connection.close()
 
@@ -1913,8 +1869,7 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(reconcile_outbound_statuses(config), 2)
             connection = sqlite3.connect(config.workflow_database)
             statuses = connection.execute(
-                "select factory_order, outbound_status, outbound_document "
-                "from factory_orders where order_id='CS004' order by factory_order"
+                "select factory_order, (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status, outbound_document from factory_orders where order_id='CS004' order by factory_order"
             ).fetchall()
             connection.close()
             self.assertEqual(
@@ -1932,15 +1887,14 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(reconcile_outbound_statuses(config), 2)
             connection = sqlite3.connect(config.workflow_database)
             changed_statuses = connection.execute(
-                "select factory_order, outbound_status, outbound_document "
-                "from factory_orders where order_id='CS004' order by factory_order"
+                "select factory_order, (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status, outbound_document from factory_orders where order_id='CS004' order by factory_order"
             ).fetchall()
             connection.close()
             self.assertEqual(
                 changed_statuses,
                 [
-                    ("F-KITCHEN", "需要更新", "QTCK-001"),
-                    ("F-VANITY", "需要更新", "QTCK-001"),
+                    ("F-KITCHEN", "未出库", "QTCK-001"),
+                    ("F-VANITY", "未出库", "QTCK-001"),
                 ],
             )
 
@@ -2007,7 +1961,7 @@ class InventoryTests(unittest.TestCase):
             # A fresh store must not recreate shipment links before final commit.
             sync = InventorySyncStore(config.workflow_database, config.backup_root)
             with sqlite3.connect(config.workflow_database) as connection:
-                self.assertEqual(connection.execute("select count(*) from manual_production_batches").fetchone()[0], 0)
+                self.assertEqual(connection.execute("select count(*) from production_records").fetchone()[0], 0)
                 self.assertEqual(connection.execute("select count(*) from outbound_document_factories").fetchone()[0], 0)
                 self.assertEqual(connection.execute("select document_type from outbound_documents").fetchone()[0], "production_materials")
             sync.save_success(
@@ -2022,11 +1976,10 @@ class InventoryTests(unittest.TestCase):
                 "where document_number='QTCK-PRODUCTION'"
             ).fetchall()
             status = connection.execute(
-                "select outbound_status, outbound_document from factory_orders "
-                "where factory_order='F-PRODUCTION'"
+                "select (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status, outbound_document from factory_orders where factory_order='F-PRODUCTION'"
             ).fetchone()
             batch = connection.execute(
-                "select status from manual_production_batches where batch_number='MP-PRODUCTION-001'"
+                "select status from production_records"
             ).fetchone()
             connection.close()
             self.assertEqual(links, [])
@@ -2085,7 +2038,7 @@ class InventoryTests(unittest.TestCase):
                 "batch_number": "MP-PRODUCTION-001",
                 "order_id": "PP0063-2",
                 "selected_factory_orders": ["F-PRODUCTION"],
-                "materials": [{"product_code": "M0004", "material_type": "plywood", "color": "", "thickness": "18", "edge": "", "unit": "张", "quantity": 2}],
+                "materials": [{"key": "M0004", "material_type": "plywood", "color": "", "thickness": "18", "edge": "", "unit": "张", "quantity": 2}],
             }
             browser_result = SimpleNamespace(returncode=0, stdout=json.dumps({
                 "remark": "PP0063-2", "saved": True, "documentNumber": "QTCK-PRODUCTION"
@@ -2098,7 +2051,7 @@ class InventoryTests(unittest.TestCase):
                  patch("traveler_assistant.inventory.subprocess.Popen", return_value=_FakeNodeProcess(browser_result)):
                 result = run_jdy(config, "outbound", confirm_save=True, order_id="PP0063-2",
                                  selected_factory_orders=["F-PRODUCTION"],
-                                 production_batch_number=production_draft["batch_number"],
+                                 production_request_id=production_draft["batch_number"],
                                  production_materials=production_draft["materials"])
             self.assertTrue(result["productionCompleted"])
             with sqlite3.connect(config.workflow_database) as connection:
@@ -2110,12 +2063,12 @@ class InventoryTests(unittest.TestCase):
                 "where document_number='QTCK-PRODUCTION'"
             ).fetchall()
             status = connection.execute(
-                "select outbound_status, outbound_document from factory_orders "
-                "where factory_order='F-PRODUCTION'"
+                "select (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status, outbound_document from factory_orders where factory_order='F-PRODUCTION'"
             ).fetchone()
             batch = connection.execute(
-                "select status from manual_production_batches where batch_number='MP-PRODUCTION-001'"
+                "select status from production_records"
             ).fetchone()
+            self.assertEqual(connection.execute("select product_code, quantity from production_materials").fetchall(), [("M0004", 2)])
             connection.close()
             self.assertEqual(links, [])
             self.assertEqual(status, ("未出库", ""))
@@ -2195,7 +2148,7 @@ class InventoryTests(unittest.TestCase):
                 ("QTCK-PRODUCTION-SPLIT", "PP0057", "F-PRODUCTION-KITCHEN", "now", "now"),
             )
             connection.execute(
-                "update factory_orders set outbound_status='已出库', outbound_document='QTCK-PRODUCTION-SPLIT', outbound_mode='inventory' where order_id='PP0057'"
+                "update factory_orders set stage='已出货', outbound_document='QTCK-PRODUCTION-SPLIT', outbound_mode='inventory' where order_id='PP0057'"
             )
             connection.commit()
             connection.close()
@@ -2206,7 +2159,7 @@ class InventoryTests(unittest.TestCase):
                 "select factory_order from outbound_document_factories where document_number='QTCK-PRODUCTION-SPLIT'"
             ).fetchall()
             statuses = connection.execute(
-                "select factory_order, outbound_status, outbound_document from factory_orders where order_id='PP0057' order by factory_order"
+                "select factory_order, (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status, outbound_document from factory_orders where order_id='PP0057' order by factory_order"
             ).fetchall()
             kind = connection.execute(
                 "select document_type from outbound_documents where document_number='QTCK-PRODUCTION-SPLIT'"
@@ -2387,7 +2340,7 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(reconcile_outbound_statuses(config), 1)
             reopened = sqlite3.connect(config.workflow_database)
             row = reopened.execute(
-                "select outbound_status, outbound_document from factory_orders where factory_order='F2608190232'"
+                "select (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status, outbound_document from factory_orders where factory_order='F2608190232'"
             ).fetchone()
             reopened.close()
             self.assertEqual(row, ("已出库", "QTCK-HARDWARE"))

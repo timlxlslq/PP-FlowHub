@@ -551,8 +551,8 @@ def parse_order_materials(order_id: str, path: Path) -> tuple[str, list[Material
                     f"颜色 {source_color} 必须填写数字",
                 )
             fallback = detail_sum(8, source_color)
-            return _number(fallback, cell_label(row, column, label))
-        return _number(cell.value, cell_label(row, column, label))
+            return _display_number(fallback, cell.number_format, cell_label(row, column, label))
+        return _display_number(cell.value, cell.number_format, cell_label(row, column, label))
 
     def optional_total_number(row: int, column: int, label: str, integer: bool) -> float | None:
         cell = ws.cell(row, column)
@@ -573,7 +573,7 @@ def parse_order_materials(order_id: str, path: Path) -> tuple[str, list[Material
             )
         if integer:
             return _integer_cell(cell, cell_label(row, column, label))
-        return _number(value, cell_label(row, column, label))
+        return _display_number(value, cell.number_format, cell_label(row, column, label))
 
     plywood = []
     for label, thickness in zip(required, (18.0, 14.5, 5.4)):
@@ -1996,12 +1996,11 @@ def persist_preview(config: Config, preview: OrderPreview) -> None:
                 resolution_index += 1
                 if item.ignored or accepted.get("ignored") or ignored_hardware_reason(mappings, item.name, item.code) is not None:
                     continue
-                product_code = resolved_product_code(resolution, resolution_index - 1, item.code)
+                product_code = resolved_product_code(resolution, resolution_index - 1)
                 rows.append({"order_id": preview.order_id.upper(), "factory_order": factory.factory_order,
                     "product_code": product_code,
-                    "source_code": item.code, "name": item.name, "spec": item.size,
-                    **server_hardware_quantity(product_code, item.quantity, item.unit,
-                        factory_order=factory.factory_order, name=item.name)})
+                    "quantity": server_hardware_quantity(product_code, item.quantity, item.unit,
+                        factory_order=factory.factory_order, name=item.name)["quantity"]})
             replace_factory_hardware(connection, factory.factory_order, rows,
                 source_path=str(preview.folder), observed_at=observed,
                 reason="订单预览写入", allow_empty=bool(factory.fittings))
@@ -3008,12 +3007,10 @@ def add_manual_hardware(
             where order_id=?
               and factory_order=?
               and product_code=?
-              and spec=?
               and source_type='manual'
-              and active=1
             order by id
             """,
-            (order, preview["factory_order"], preview["product_code"], preview["spec"]),
+            (order, preview["factory_order"], preview["product_code"]),
         ).fetchall()
         saved_quantity = preview["quantity"]
         remarks = [preview["remarks"]]
@@ -3024,15 +3021,12 @@ def add_manual_hardware(
             connection.execute(
                 """
                 update hardware_items
-                set quantity=?, remarks=?, name=?, source_code=?, unit=?, updated_at=?
+                set quantity=?, remarks=?, updated_at=?
                 where id=?
                 """,
                 (
                     float(saved_quantity),
                     "；".join(dict.fromkeys(item for item in remarks if item)) or "人工添加",
-                    preview["product_name"],
-                    preview["product_code"],
-                    "pcs/个",
                     observed,
                     primary_id,
                 ),
@@ -3045,20 +3039,16 @@ def add_manual_hardware(
             connection.execute(
                 """
                 insert into hardware_items(
-                    order_id,factory_order,scope,product_code,source_code,name,spec,quantity,unit,
+                    order_id,factory_order,scope,product_code,quantity,
                     source_type,source_path,remarks,updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) values(?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     order,
                     preview["factory_order"],
                     "factory_order",
                     preview["product_code"],
-                    preview["product_code"],
-                    preview["product_name"],
-                    preview["spec"],
                     float(saved_quantity),
-                    "pcs/个",
                     "manual",
                     "",
                     preview["remarks"],
@@ -3075,11 +3065,9 @@ def add_manual_hardware(
             where order_id=?
               and factory_order=?
               and product_code=?
-              and spec=?
               and source_type='manual'
-              and active=1
             """,
-            (order, preview["factory_order"], preview["product_code"], preview["spec"]),
+            (order, preview["factory_order"], preview["product_code"]),
         ).fetchone()
         if verified[0] != 1 or verified[1] is None or abs(float(verified[1]) - saved_quantity) > EPSILON:
             raise RuleError("write_verification", "人工五金写入数据库后重新读取校验失败")
@@ -3400,7 +3388,7 @@ def main(
     stdin_text: str | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(prog="pp-flowhub order")
-    parser.add_argument("command", choices=("list", "list-index", "detail", "cost", "cost-export", "backup-status", "backup-now", "sync-index", "process-server-changes", "process-server-folder", "preview-server-changes", "confirm-server-preview", "confirm-server-material-preview", "confirm-server-preview-memory", "confirm-server-material-preview-memory", "sync-aimes", "scan-server", "mark-temporary-manual", "ignore-aimes", "restore-aimes-ignore", "assign-aimes-order", "restore-aimes-assignment", "auto-resolve-issue", "resolve-issue", "save-order-annotations", "production-preview", "prepare-production", "migrate-production-state", "preview", "preview-related", "refresh-aimes", "stock-check", "set-ignore", "generate", "generate-db", "temporary", "generate-material", "generate-material-from-travelers", "update", "update-related", "add-hardware", "add-factory", "assign-material", "create-test-data"))
+    parser.add_argument("command", choices=("list", "list-index", "detail", "cost", "cost-export", "backup-status", "backup-now", "sync-index", "process-server-changes", "process-server-folder", "preview-server-changes", "confirm-server-preview", "confirm-server-material-preview", "confirm-server-preview-memory", "confirm-server-material-preview-memory", "acknowledge-server-preview-memory", "sync-aimes", "scan-server", "mark-temporary-manual", "ignore-aimes", "restore-aimes-ignore", "assign-aimes-order", "restore-aimes-assignment", "auto-resolve-issue", "resolve-issue", "save-order-annotations", "abort-order", "production-preview", "prepare-production", "migrate-production-state", "preview", "preview-related", "refresh-aimes", "stock-check", "set-ignore", "generate", "generate-db", "temporary", "generate-material", "generate-material-from-travelers", "update", "update-related", "add-hardware", "manual-hardware", "save-manual-hardware", "search-hardware-products", "add-factory", "assign-material", "create-test-data"))
     parser.add_argument("--folder", type=Path)
     parser.add_argument("--server-folder", type=Path, action="append", default=[])
     parser.add_argument("--name", action="append", default=[])
@@ -3413,6 +3401,7 @@ def main(
     parser.add_argument("--target-root", type=Path)
     parser.add_argument("--order-id", default="")
     parser.add_argument("--note", default="")
+    parser.add_argument("--query", default="")
     parser.add_argument("--planned-installation-days", default="[]")
     parser.add_argument("--actual-installation-days", default="[]")
     parser.add_argument("--factory-name", default="")
@@ -3559,14 +3548,17 @@ def main(
                 )
             except ValueError as exc:
                 raise RuleError("invalid_arguments", str(exc)) from exc
-        elif args.command in {"confirm-server-preview-memory", "confirm-server-material-preview-memory"}:
+        elif args.command in {"confirm-server-preview-memory", "confirm-server-material-preview-memory", "acknowledge-server-preview-memory"}:
             try:
                 payload = json.loads((stdin_text if stdin_text is not None else sys.stdin.read()) or "{}")
             except json.JSONDecodeError as exc:
                 raise RuleError("invalid_arguments", "内存预览不是有效 JSON") from exc
             if not isinstance(payload, dict):
                 raise RuleError("invalid_arguments", "内存预览格式无效")
-            if args.command == "confirm-server-preview-memory":
+            if args.command == "acknowledge-server-preview-memory":
+                from .order_index import acknowledge_server_preview_memory
+                result = acknowledge_server_preview_memory(config, payload, confirm_write=args.confirm_write)
+            elif args.command == "confirm-server-preview-memory":
                 if not args.order_id or not args.factory_order:
                     raise RuleError("invalid_arguments", "确认 Server 工厂单需要订单号和工厂单号")
                 from .order_index import confirm_server_preview_memory
@@ -3652,6 +3644,9 @@ def main(
                 result = resolve_current_issue(config, args.issue_key, args.order_id, args.factory_name)
             except ValueError as exc:
                 raise RuleError("invalid_arguments", str(exc)) from exc
+        elif args.command == "abort-order":
+            from .order_index import abort_order
+            result = abort_order(config, args.order_id, confirmed=args.confirm_write)
         elif args.command == "save-order-annotations":
             if not args.order_id:
                 raise RuleError("invalid_arguments", "save-order-annotations 需要 --order-id")
@@ -3690,6 +3685,19 @@ def main(
                 "names": args.name,
                 "ignored": ignored,
             }
+        elif args.command in {"manual-hardware", "save-manual-hardware", "search-hardware-products"}:
+            from .manual_hardware import list_manual_hardware, save_manual_hardware
+            if args.command == "manual-hardware":
+                result = list_manual_hardware(config, args.order_id)
+            elif args.command == "search-hardware-products":
+                from .inventory import search_inventory_products
+                result = search_inventory_products(config, args.query)
+            else:
+                try:
+                    payload = json.loads((stdin_text if stdin_text is not None else sys.stdin.read()) or "{}")
+                except json.JSONDecodeError as exc:
+                    raise RuleError("invalid_arguments", "人工五金保存内容不是有效 JSON") from exc
+                result = save_manual_hardware(config, args.order_id, payload, confirm_write=args.confirm_write)
         elif args.command == "add-hardware":
             if not args.order_id or not args.factory_name or not args.product_code or args.quantity is None:
                 raise RuleError(

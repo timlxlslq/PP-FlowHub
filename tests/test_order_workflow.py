@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import time
 import unittest
+import json
 import zipfile
 from contextlib import redirect_stdout
 from datetime import date
@@ -235,6 +236,21 @@ def picking_layout_snapshot(sheet):
 
 
 class OrderWorkflowTests(unittest.TestCase):
+    def test_no_change_acknowledgement_routes_preview_without_business_write(self):
+        with tempfile.TemporaryDirectory() as temp:
+            payload = {"orders": [], "source_folders": ["/server/PP0064"]}
+            with patch("traveler_assistant.order_index.acknowledge_server_preview_memory",
+                       return_value={"server_no_changes_confirmed": True}) as acknowledge, \
+                 patch("traveler_assistant.order_index.confirm_server_material_preview_memory") as write, \
+                 redirect_stdout(StringIO()):
+                result = order_workflow_main([
+                    "acknowledge-server-preview-memory", "--confirm-write", "--state-dir", temp,
+                ], stdin_text=json.dumps(payload))
+            self.assertEqual(result, 0)
+            self.assertEqual(acknowledge.call_args.args[1], payload)
+            self.assertTrue(acknowledge.call_args.kwargs['confirm_write'])
+            write.assert_not_called()
+
     def test_memory_server_confirmation_command_reads_json_from_stdin(self):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp) / "state"
@@ -282,7 +298,7 @@ class OrderWorkflowTests(unittest.TestCase):
                 ("PP9999", "owned", "/server/PP9999", "2026-08-15T10:00:00"),
             )
             store.connection.execute(
-                "insert into factory_orders(factory_order, order_id, factory_name, ownership_status, optimized, updated_at) values(?,?,?,?,?,?)",
+                "insert into factory_orders(factory_order,order_id,factory_name,ownership_status,updated_at,stage) select v.factory_order,v.order_id,v.factory_name,v.ownership_status,v.updated_at,case when '未出库'='已出库' then '已出货' when v.optimized then '已优化' else '已拆单' end from (select ? as factory_order,? as order_id,? as factory_name,? as ownership_status,? as optimized,? as updated_at) v",
                 ("F9999", "PP9999", "PP9999-KITCHEN", "已确认", 1, "2026-08-15T10:00:00"),
             )
             store.connection.execute(
@@ -298,8 +314,8 @@ class OrderWorkflowTests(unittest.TestCase):
                 ("PP9999", "M-EDGE", 12.5, "aihouse", "2026-08-15T10:00:00"),
             )
             store.connection.execute(
-                "insert into hardware_items(order_id, factory_order, scope, product_code, name, spec, quantity, unit, source_type, updated_at) values(?,?,?,?,?,?,?,?,?,?)",
-                ("PP9999", "F9999", "factory_order", "71T950A", "Hinge", "Full", 6, "pcs/个", "aicnc", "2026-08-15T10:00:00"),
+                'insert into hardware_items(order_id,factory_order,scope,product_code,quantity,source_type,updated_at) values(?,?,?,?,?,?,?)',
+                ('PP9999', 'F9999', 'factory_order', '71T950A', 6, 'aicnc', '2026-08-15T10:00:00'),
             )
             store.connection.commit()
             store.close()
@@ -362,7 +378,7 @@ class OrderWorkflowTests(unittest.TestCase):
                 ("PP0070", "owned", "/server/PP0070", "2026-08-25T10:00:00"),
             )
             store.connection.execute(
-                "insert into factory_orders(factory_order, order_id, factory_name, ownership_status, optimized, updated_at) values(?,?,?,?,?,?)",
+                "insert into factory_orders(factory_order,order_id,factory_name,ownership_status,updated_at,stage) select v.factory_order,v.order_id,v.factory_name,v.ownership_status,v.updated_at,case when '未出库'='已出库' then '已出货' when v.optimized then '已优化' else '已拆单' end from (select ? as factory_order,? as order_id,? as factory_name,? as ownership_status,? as optimized,? as updated_at) v",
                 ("F0070", "PP0070", "PP0070-KITCHEN", "已确认", 1, "2026-08-25T10:00:00"),
             )
             store.connection.execute(
@@ -371,15 +387,9 @@ class OrderWorkflowTests(unittest.TestCase):
             )
             store.connection.executemany(
                 """
-                insert into hardware_items(
-                    order_id, factory_order, scope, product_code, name, spec,
-                    quantity, unit, source_type, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?)
+                insert into hardware_items(order_id,factory_order,scope,product_code,quantity,source_type,updated_at) values(?,?,?,?,?,?,?)
                 """,
-                [
-                    ("PP0070", "F0070", "factory_order", code, name, "", 1, "pcs/个", "aicnc", "2026-08-25T10:00:00")
-                    for code, name in hardware
-                ],
+                [('PP0070', 'F0070', 'factory_order', code, 1, 'aicnc', '2026-08-25T10:00:00') for code, name in hardware],
             )
             store.connection.commit()
             store.close()
@@ -436,7 +446,7 @@ class OrderWorkflowTests(unittest.TestCase):
                 ("PP0070", "owned", "/server/PP0070", "2026-08-25T10:00:00"),
             )
             store.connection.execute(
-                "insert into factory_orders(factory_order, order_id, factory_name, ownership_status, optimized, updated_at) values(?,?,?,?,?,?)",
+                "insert into factory_orders(factory_order,order_id,factory_name,ownership_status,updated_at,stage) select v.factory_order,v.order_id,v.factory_name,v.ownership_status,v.updated_at,case when '未出库'='已出库' then '已出货' when v.optimized then '已优化' else '已拆单' end from (select ? as factory_order,? as order_id,? as factory_name,? as ownership_status,? as optimized,? as updated_at) v",
                 ("F0070", "PP0070", "PP0070-KITCHEN", "已确认", 1, "2026-08-25T10:00:00"),
             )
             store.connection.execute(
@@ -445,19 +455,9 @@ class OrderWorkflowTests(unittest.TestCase):
             )
             store.connection.executemany(
                 """
-                insert into hardware_items(
-                    order_id, factory_order, scope, product_code, name, spec,
-                    quantity, unit, source_type, remarks, updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,?)
+                insert into hardware_items(order_id,factory_order,scope,product_code,quantity,source_type,remarks,updated_at) values(?,?,?,?,?,?,?,?)
                 """,
-                [
-                    ("PP0070", "F0070", "factory_order", "M1001", "Hinge", "", 32, "pcs/个", "aicnc", "", "2026-08-25T10:00:00"),
-                    ("PP0070", "F0070", "factory_order", "M1002", "H-Rail", "", 3, "set/套", "aicnc", "", "2026-08-25T10:00:00"),
-                    ("PP0070", "F0070", "factory_order", "M1003", "L-Rail", "", 7, "set/套", "aicnc", "", "2026-08-25T10:00:00"),
-                    ("PP0070", "F0070", "factory_order", "M1013", "Shelf Holder", "", 48, "pcs/个", "aicnc", "", "2026-08-25T10:00:00"),
-                    ("PP0070", "F0070", "factory_order", "M1014", "15寸垃圾桶(TB18用)", "", 1, "pcs/个", "manual", "TB18", "2026-08-25T10:00:00"),
-                    ("PP0070", "F0070", "factory_order", "M1093", "BLS36", "", 1, "pcs/个", "manual", "", "2026-08-25T10:00:00"),
-                ],
+                [('PP0070', 'F0070', 'factory_order', 'M1001', 32, 'aicnc', '', '2026-08-25T10:00:00'), ('PP0070', 'F0070', 'factory_order', 'M1002', 3, 'aicnc', '', '2026-08-25T10:00:00'), ('PP0070', 'F0070', 'factory_order', 'M1003', 7, 'aicnc', '', '2026-08-25T10:00:00'), ('PP0070', 'F0070', 'factory_order', 'M1013', 48, 'aicnc', '', '2026-08-25T10:00:00'), ('PP0070', 'F0070', 'factory_order', 'M1014', 1, 'manual', 'TB18', '2026-08-25T10:00:00'), ('PP0070', 'F0070', 'factory_order', 'M1093', 1, 'manual', '', '2026-08-25T10:00:00')],
             )
             store.connection.commit()
             store.close()
@@ -546,7 +546,7 @@ class OrderWorkflowTests(unittest.TestCase):
                 ("panel", 19.1, "Test Oak", 3.0),
                 [(item.kind, item.thickness, item.color, item.quantity) for item in materials],
             )
-            self.assertEqual(edges, {"Test Oak": 12.5})
+            self.assertEqual(edges, {"Test Oak": 13.0})
             updated = load_workbook(traveler, data_only=False, read_only=True)
             self.assertEqual(updated.sheetnames[:3], ["WorkOrderTraveler", "Usage List", "Picking List"])
             self.assertEqual(parse_traveler(traveler).documents["CS001"][0].name, "19.1mm--Test Oak")
@@ -564,7 +564,7 @@ class OrderWorkflowTests(unittest.TestCase):
                 {(item.kind, item.thickness, item.color): item.quantity for item in materials if item.quantity},
                 {("plywood", 18.0, ""): 2, ("panel", 19.1, "Test Oak"): 3},
             )
-            self.assertEqual(edges, {"Test Oak": 12.5})
+            self.assertEqual(edges, {"Test Oak": 13.0})
             generated = load_workbook(created, data_only=False).active
             self.assertEqual(generated["A14"].value, "Total Qty:")
             self.assertEqual(generated["C16"].value, "Test Oak")
@@ -616,7 +616,7 @@ class OrderWorkflowTests(unittest.TestCase):
                 next(item.quantity for item in materials if item.kind == "panel" and item.color == "Test Oak"),
                 7,
             )
-            self.assertEqual(edges, {"Test Oak": 19.75})
+            self.assertEqual(edges, {"Test Oak": 20.0})
 
     def test_complex_report_generation_requests_manual_material(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1268,7 +1268,7 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(quantities[("plywood", 14.5)], 1)
             self.assertEqual(quantities[("plywood", 5.4)], 3)
             self.assertEqual(quantities[("panel", 19.1)], 6)
-            self.assertEqual(edges, {"Basalto SM": 319.64})
+            self.assertEqual(edges, {"Basalto SM": 320.0})
 
     def test_material_detail_quantity_requires_color(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1334,7 +1334,51 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(quantities[("plywood", 5.4)], 9)
             self.assertEqual(quantities[("panel", 19.1)], 4)
             self.assertEqual(quantities[("panel", 8.0)], 1)
-            self.assertEqual(edges, {"Basalto SM": 319.64})
+            self.assertEqual(edges, {"Basalto SM": 320.0})
+
+    def test_edge_summary_format_with_and_without_formula_cache(self):
+        # Two detail rows must be summed before applying the summary format.
+        from xml.etree import ElementTree as ET
+
+        for cached in (False, True):
+            for number_format, expected in (("0", 320.0), ("0.00", 319.64), ("General", 319.64)):
+                with self.subTest(cached=cached, number_format=number_format), tempfile.TemporaryDirectory() as temp:
+                    path = Path(temp) / "PP0072 materials.xlsx"
+                    make_materials(path, order_id="PP0072", edge=159.82)
+                    wb = load_workbook(path)
+                    ws = wb.active
+                    ws["H4"], ws["I4"] = 159.82, "Basalto SM"
+                    ws["C19"] = "=SUMIF($I$3:$I$13,C$16,$H$3:$H$13)"
+                    ws["C19"].number_format = number_format
+                    ws["H14"] = 319.64
+                    ws["H14"].number_format = number_format
+                    wb.save(path)
+                    if cached:
+                        with zipfile.ZipFile(path) as archive:
+                            entries = {name: archive.read(name) for name in archive.namelist()}
+                        root = ET.fromstring(entries["xl/worksheets/sheet1.xml"])
+                        ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+                        root.find(".//s:c[@r='C19']/s:v", ns).text = "319.64"
+                        entries["xl/worksheets/sheet1.xml"] = ET.tostring(root)
+                        with zipfile.ZipFile(path, "w") as archive:
+                            for name, content in entries.items():
+                                archive.writestr(name, content)
+                    original = path.read_bytes()
+                    self.assertEqual(parse_order_materials("PP0072", path)[2], {"Basalto SM": expected})
+                    self.assertEqual(path.read_bytes(), original)
+
+    def test_edge_display_rounding_preserves_real_summary_mismatch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "PP0072 materials.xlsx"
+            make_materials(path, order_id="PP0072", edge=319.64)
+            wb = load_workbook(path)
+            ws = wb.active
+            ws["C19"].number_format = "0"
+            ws["H14"], ws["H14"].number_format = 318.5, "0"
+            wb.save(path)
+            with self.assertRaises(RuleError) as raised:
+                parse_order_materials("PP0072", path)
+            self.assertEqual(raised.exception.code, "material_summary_mismatch")
 
     def test_integer_display_format_is_also_used_for_room_rows(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1694,15 +1738,9 @@ class OrderWorkflowTests(unittest.TestCase):
             try:
                 connection.execute(
                     """
-                    insert into hardware_items(
-                        order_id,factory_order,scope,product_code,source_code,name,spec,quantity,unit,
-                        source_type,source_path,remarks,updated_at
-                    ) values(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    insert into hardware_items(order_id,factory_order,scope,product_code,quantity,source_type,source_path,remarks,updated_at) values(?,?,?,?,?,?,?,?,?)
                     """,
-                    (
-                        "PP9999", "F100", "factory_order", "M2000", "M2000", "Manual Handle", "Black", 1,
-                        "pcs/个", "manual", "", "历史重复", "2026-08-25T00:00:00",
-                    ),
+                    ('PP9999', 'F100', 'factory_order', 'M2000', 1, 'manual', '', '历史重复', '2026-08-25T00:00:00'),
                 )
                 connection.commit()
             finally:

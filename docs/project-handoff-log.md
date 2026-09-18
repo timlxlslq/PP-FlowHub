@@ -1,5 +1,32 @@
 # 项目交接记录
 
+## 2026-09-17 AIMES 仅核验未生产工厂单
+
+- 用户确认：最近 50 条照常读取；仅对窗口之外、本地尚未生产的有效工厂单逐单核验。生产完成后以本地生产事实为准。
+- 修改：`_active_aimes_factory_orders` 用与看板相同的已完成生产批次证据筛选，同一订单号和工厂单号共同匹配；手动 AIMES 同步、综合索引同步及删除核验共用筛选。准备中或失败批次不排除；删除结果落库前再次筛选，保留已生产事实。
+- 只读现场统计：有效候选 108 个，已完成生产 63 个，剩余 45 个；浏览器还会排除最近 50 条中已读到的工厂单。此数量不是实际逐单查询次数，也不是实测提速。
+- 验证：新增 5 项隔离回归通过；完整 Python 回归 389 项通过、跳过 1 项。沙盒 Swift 宏启动失败后，普通权限下 macOS UI、AIMES 离线表格、PP0067 workbook 和差异检查全部通过。一次串行构建成功，普通 Terminal/Aqua 执行正式 install-app 返回 0，Apple Development 签名、安装和 helper probe 成功。
+- 安装版核验：打包 Python 使用隔离数据库跑过同样 5 项回归，安装版 order_index.py 与工作区逐字节一致。可执行 SHA-256：`cdd33b68c650a1396027b53544725f836c50f763f0341cc36a803542de714dcf`；order_index.py SHA-256：`4f89976b2a7384db81240ac0774e5890edb03c149d5c29b7ff03e97fa78234c7`。已请求打开安装版，但电脑锁屏阻止窗口检查，随后退出验证 App；未确认窗口与真实 AIMES 耗时。安装 Terminal 命令已自行 exit，锁屏下未另行确认窗口关闭。
+- 本次不修改真实生产、库存、材料或出货事实，也未重新执行真实 AIMES 同步。
+
+## 2026-09-16 PP0072 Color Table 封边显示值修复
+
+- 现场根因：material 的 Color Table C19 缓存为 319.64，整数格式显示 320；封边解析直接读原值，与已确认 M0022=320 比较后误报变化。安装版与源码一致。
+- 修复：封边 Color Table 有缓存和无缓存路径均按汇总格格式读取；无缓存时先按颜色汇总原始明细再取整。Total Qty 封边校验使用相同显示值规则，真实不一致仍报错，General/小数格式保留原精度。源 Excel 不被重写。
+- 回归：补充缓存有/无、汇总后取整、格式精度、源文件字节不变和真实不一致；校正旧测试及 workbook 专项中的原始小数断言。现场只读解析 PP0072 得 Rosales 3=320、Picasso 3=10。
+- 发布验证：359 项 Python 回归（跳过 1 项）、macOS UI、AIMES 离线表格、PP0067 workbook 专项和完整门禁通过。Swift 宏沙盒限制在普通权限下重跑排除；一次串行构建成功。Terminal UI 被工具禁止，经审批直接执行正式 install-app，Apple Development 签名、安装与 helper 校验通过。安装包修复源码与工作区一致；本次未确认真实材料/五金写入。
+
+- 安装版现场验收：PP0072 确认弹窗为 2 项材料变化，仅 Picasso 3 Panel=1 SHT、edge=10 M；Rosales 3 变化行消失，SKU 校验通过，5 个已出货工厂单仍排除。已取消预览并退出 App，原材料行和源工作簿 SHA-256 与验收前一致。安装版可执行 SHA-256：`1f4613eb3238a1392f0ae9754e15db5f99ad62fb24d97ed8d8a03b50cb2b7c90`。
+
+## 2026-09-16 PP0086 生产外部成功、本地提交失败
+
+- 根因：Swift 生产草稿以 `key` 传 SKU；累计库存预览补出了 `product_code`，但生产完成写入仍直接读取原草稿的 `product_code`，触发 `CHECK constraint failed: trim(product_code) <> ''`。数据库副本已复现，原库完整性和外键检查正常。
+- 修复：Python 在累计校验和生产完成写入中统一解析 SKU，接受当前 App 的 `key`，拒绝冲突身份；保留原恢复载荷和指纹，避免改变操作身份。回归用真实 App 字段形状验证生产完成和材料写入。
+- 恢复证据：原操作日志在 11:48:50 确认历史单据回读成功，单据 `QTCK20260917001`；副本演练后通过现有本地事务补记生产批次 `MP-20260916-114736-049D12`，关联 F2609140249、F2609140250。M0002=5、M0003=1、M0004=12、M1121=9、M1170=263.95；库存单封边按原规则为 264，未修改外部单据或再次扣库存，工厂单出货状态未变。
+- 备份：`data/database-backups/pp0086-production-recovery-20260916/before-recovery.sqlite3`；恢复后 `integrity_check=ok`、`foreign_key_check=[]`，Journal 已为 `local_committed`，操作日志追加恢复记录。
+- 验证：354 项 Python 测试通过（跳过 1 项），macOS UI、AIMES 离线表格与 workbook E2E 全部门禁通过；沙箱 Swift 宏编译器异常已通过普通 macOS 环境重跑排除。一次串行构建成功，产物 `/tmp/pp-flowhub-build/PP FlowHub.app`，打包 Python 修复源码一致。
+- 安装限制：电脑控制工具明确拒绝访问 com.apple.Terminal，未执行签名安装，保留未签名产物；现有安装版重开已回读 PP0086 为“已生产”、生产 2/2、出货 0/2，验证后退出。该回读只验证数据恢复，不代表修复版已安装。启动时 Server 目录不可访问是独立警告。
+
 ## 2026-09-13 文档规则与当前源码边界整理
 
 - 本次范围：重构 `AGENTS.md` 导航，并同步整理 README、系统架构、静态上下文、ADR-001、业务/库存规则、发布验收、学习索引、历史原型/计划/迁移说明和 WeCom 学习状态。
@@ -1659,3 +1686,178 @@ PYTHONPATH=".:vendor" .venv/bin/python3 -m unittest discover -s tests -v
 - 已验证：`./scripts/pp-flowhub order --help` 与 `./scripts/pp-flowhub inventory --help` 均正常退出；使用项目 `.venv/bin/python` 对隔离的 `traveler_assistant/wecom_service.py` 执行 `compile(source, path, "exec")` 通过，未导入模块、未写入 pyc。
 - 已验证：AGENTS、README 和 `docs/**/*.md` 共 32 个 Markdown 文件的代码围栏外链接与锚点检查通过；生成索引、历史计划和历史证据按各自范围分类，未把历史内容当作当前授权或运行事实。
 - 已验证：文档 `git diff --check` 通过；本轮未运行测试、构建、安装、App、Server、AIMES 或库存业务。代码/脚本/测试/资源等 116 个基线文件中，唯一哈希变化项为基线中已存在的未跟踪文件 `traveler_assistant/wecom_service.py`，该同期变化不属于本任务，已保留；其余 115 项未变。
+
+### 2026-09-16 Server 确认页五金映射后刷新
+
+- 原因：映射/忽略成功回调只移除待映射要求，保留旧 orders 与 payload，导致五金明细未更新。
+- 修复：保存规则后按当前文件夹及所选五金来源重新运行只读预览，同时替换展示与确认 payload；刷新中、失败或无效返回均阻止确认，提供重试。修正成功提示的 Swift 字符串插值。未确认真实材料、五金或库存写入。
+- 回归：Python 354 项通过（跳过 1）；沙箱 Swift 宏进程报 sandbox_apply Operation not permitted，沙箱外重跑 macOS UI（含映射刷新/失败/忽略回归）、AIMES 离线、PP0067 workbook 和 diff 检查全部通过。
+- 一次串行 build-app 成功：`/tmp/pp-flowhub-build/PP FlowHub.app`，版本 0.4.1 (5)，Bundle ID `com.pacificpride.ppflowhub`，可执行文件 SHA-256 `1dcd46e478228e6ae175d8218ce9e68456c0f322a11b0fbe9bc95e5ed7947d7c`；打包 Node v24.19.0 和 Playwright 检查通过。
+- 正式签名安装未完成：电脑控制工具明确拒绝访问 com.apple.Terminal，理由为 safety reasons；保留未签名构建产物，未绕过限制或降级签名。安装版现场映射刷新尚未验收。日志：`/tmp/pp-hardware-refresh-{release,ui,aimes,workbook,build}.log`。
+- 保留进入任务时已有的 production.py、Python 测试、学习文档、材料 SKU 计划和交接记录修改。
+
+## 2026-09-16 PP0072 历史材料恢复与来源清理保护
+
+- 用户逐项确认前五个工厂单材料用量，并确认薄 Rosales 3 使用原 SKU M1134（8 mm）3 张。8 月 31 日较早备份六项数量与当前生产批次消耗一致；后续备份材料已为空，同期出现 asdsdfs 来源缺材料错误。来源清理机制与该变化吻合，但缺少逐条删除审计，历史具体调用仍属高置信推断。
+- 已恢复 `material_items`：M0004 22、M0003 5、M0002 9、M0021 18、M1134 3、M0022 320。只写此六行，保留原来源路径，按现行 SKU 指纹保存；新 BATH 单不继承旧生产状态。
+- 可恢复备份、副本演练、正式审计位于 `data/database-backups/pp0072-material-recovery-20260916/`。恢复事务验证其他全部表和其他订单材料摘要不变；完整性与外键检查通过。六项需求减已生产消耗均为零，重复恢复被拒绝。
+- 来源清理现在只删除已有完整等量替代集的旧路径，按订单隔离；缺失材料文件不再删除需求和分配。空替代、部分替代、数量差异、混单隔离、重复执行及真实同步文件缺失已有隔离回归。
+- 本地材料出库单仍记录生产数量的两倍；本轮未修改单据、生产消耗、五金、工厂单状态或外部库存，未将该本地单据差异认定为实时金蝶数量。
+- 发布完成：357 项 Python（跳过 1 项）、macOS UI、AIMES 离线表格、PP0067 工作簿与 diff 检查通过；首次 Swift 宏被沙盒拒绝，普通权限重跑通过。一次串行构建，Terminal UI 工具禁止访问，随后获准直接执行正式安装脚本，Apple Development 签名安装成功（TeamIdentifier ZF64PZKWMD）。安装版详情六项数量正确，生产/出货为 5/6，启动扫描后材料仍完整；证据位于恢复目录 release-verification.json。
+
+- 验收收尾：已退出本次 PP FlowHub，进程检查确认无 PPFlowHub 进程；没有新开或关闭用户 Terminal 窗口。
+
+### 2026-09-16 Server 材料预览布局（实现、门禁与构建完成；安装受阻）
+
+按用户确认草图修改 `ServerWriteConfirmationSheet`：移除标题长说明，材料类型与颜色／规格分列，变化标签靠近数量，标题分别偏移 +10pt / -5pt；工厂单五金默认展开、可独立折叠，编码／数量／单位列对齐，空单位显示破折号。保留原有 SKU 校验、刷新失败阻断、首次五金明细与已有事实变化区分和最终确认入口。未执行真实材料或五金确认写入。
+
+完整 `test-release` 通过：Python 359 项、跳过 1 项，Swift UI、AIMES 离线、PP0067 workbook 与 diff 检查通过。初次受限会话编译插件失败且编译中有源码变动，该次结果作废；源码固定后在获准环境重跑完整门禁通过。随后一次串行构建成功，打包 Node v24.19.0。产物 `/tmp/pp-flowhub-build/PP FlowHub.app`，Bundle `com.pacificpride.ppflowhub`，版本 0.4.1，可执行文件 SHA-256 `e02f2a26e2d91e4a82e3eae527540463a575d1fad4681f67197145887d7885e2`。
+
+电脑控制工具明确拒绝访问 `com.apple.Terminal`，未执行普通 Aqua 会话 Apple Development 签名安装。构建产物保留，安装版新布局、折叠交互和视觉比较均未验证；详见根目录 `design-qa.md`（blocked）。本次检查启动的旧安装版已退出。下一步在普通 Terminal 执行 `/Users/lantian/Documents/pp-flowhub/scripts/install-app`，再进行只读预览验收。
+
+
+## 2026-09-16 Server 预览确认无变化
+
+- 已实现：完整材料/五金预览没有待写入差异且校验正常时，主按钮显示“确认无变化”。专用 CLI/API 仅更新预览版本的 `server_scan_xml_state`；成功关闭预览并刷新待处理列表，失败保留预览。材料、五金、优化证据与工厂单业务状态不重写。
+- 业务边界：允许 PP0064 这种部分优化订单确认本次无变化；未优化工厂单不随之变为已优化。预览单独保留 XML 监控快照，后续新 XML 或文件修改仍重新提示。材料/五金/工厂单差异、未决映射/来源、未校验或本地业务事实变化均拒绝；普通刷新时间不构成业务变化。
+- 离线验证：最终 `./scripts/test-release` 通过，Python 364 项，1 项因 Desktop CS004/PP0072 夹具缺失跳过；Swift UI、AIMES 离线和 PP0067 workbook 专项通过。新增回归覆盖仅基线变化、重复操作、失败回滚、旧预览、部分优化后新 XML 提醒、CLI 路由及 UI 成功关闭/失败保留。日志：`/tmp/pp-no-change-release.log`。
+- 构建与安装：首次构建后实际窗口检查发现部分优化场景需要修正，完成回归后串行重建最终产物。最终构建、Node/Playwright 检查和 Apple Development 正式签名安装成功。电脑工具禁止控制 Terminal；获准主机会话可访问有效签名身份，因此直接运行绝对路径安装脚本成功，没有降级签名。Bundle `com.pacificpride.ppflowhub`，版本 `0.4.1 (5)`，Team `ZF64PZKWMD`，安装版可执行文件 SHA-256 `e528acb33903eb0039e66a466eb327955e61639934b1ad15d1e6f1e1c58fb4e4`；安装脚本验证签名、安装 hash 和钥匙串 helper，安装版两份变更 Python 文件与源码逐字一致。日志：`/tmp/pp-no-change-build.log`、`/tmp/pp-no-change-install.log`。
+- 安装版实际验收：重开 `/Applications/PP FlowHub.app`，从待处理中心选择 PP0064 并只读预览，实际看到可用的“确认无变化”按钮及监控状态说明；PP0064 仍为部分优化 3/7。没有点击真实确认，关闭/持久化操作由隔离测试验证，不冒充现场业务确认。验收后选择稍后处理并退出 App；未启动安装 Terminal。
+- 教学入口：`docs/learning/09-user-operation-call-chains.md` 新增按钮到专用 API 的调用链，说明监控基线与业务事实、事务回滚及旧预览检查。
+
+## 2026-09-16 订单人工五金编辑入口
+
+- 用户确认无备注的分组草图后实施：计算成本右侧增加人工五金按钮；弹窗按本订单工厂单列出人工记录，支持 SKU/名称搜索、正整数数量、新增、待删除/撤销及统一保存。
+- `manual_hardware.py` 提供列表、基线校验及原子保存；CLI/order-service 暴露 manual-hardware、search-hardware-products、save-manual-hardware。已出库/失效工厂单只读，新增归属必须属于当前订单；删除只停用 manual 行，不影响自动五金、Traveler 或外部库存。
+- 9 项新增 Python 专项通过；完整 `scripts/test-release`：373 项 Python 测试通过（1 项跳过），macOS UI、AIMES 离线及 PP0067 workbook E2E 全通过。安装人输入框原源码断言误覆盖新分组箭头，已限定到其本身的 Sheet。
+- 发布限制：电脑控制工具明确拒绝访问 com.apple.Terminal。未绕过限制，正式 Apple Development 签名安装、安装版新入口和视觉验收未完成。现有其他工作树修改原样保留，测试未向真实订单新增或删除人工五金。
+
+- 本次一次串行 `scripts/build-app` 已成功；产物 `/tmp/pp-flowhub-build/PP FlowHub.app`，Bundle `com.pacificpride.ppflowhub`，版本 0.4.1 / 5，主程序 SHA-256 `625204dfabbded8e97841ceca6599c4d7448b5c2054b607d6ffb28728a5ecbbc`。打包 Node v24.19.0 和 Playwright 检查由构建脚本通过；打包的新增 Python 模块及 CLI 源码与工作区逐字一致。`codesign -dv` 确认尚未签名，未替换 `/Applications`。
+
+- 用户完成安装后追加验收：`codesign --verify --deep --strict` 通过，Apple Development 签名、TeamIdentifier ZF64PZKWMD；签名时间 2026-09-16 17:36:31。安装主程序 SHA-256 `413dc606b92a0f0bca1ebee35e83ffa2c88548ecebce1dee3a159bcffc66fecc`（签名改变二进制哈希）；本次构建归档原哈希与上文一致，打包的两个 Python 源码与工作区一致。
+- 安装版实测：PP0087 按钮在计算成本右侧；空列表、工厂单自动选择、SKU M0144/M1001 检索、名称 Hinge 检索（8 项）、商品选择和单位、添加到未保存草稿均正常。取消弹出放弃确认，放弃后 SQLite 只读回查 PP0087 有效人工五金仍为 0。PP0070 两条已有人工五金（M1093、M1014）正确显示，已出库工厂单显示仅查看、删除和保存禁用。验收 App 已发送退出命令；未操作用户 Terminal。真实保存/删除没有执行。
+
+
+## 2026-09-17 人工五金紧凑布局与直接删除
+
+- 用户明确要求：人工五金缩窄、工厂单与搜索输入左对齐、回车检索，移除常驻重新载入；异常才显示恢复入口。人工删除直接移除，删除 hardware_items.active，并清理 PP0064 两条旧失效记录。
+- 实现：820×620，收紧列宽和标题；搜索输入接收 Return；读取失败重试、保存失败重新载入且草稿需确认放弃。删除、新增、重复合并处于同一事务；全链路去掉 active 查询/写入，自动五金指纹沿用原格式避免虚假变更。
+- 正式库：118→116，仅移除旧 KITCHEN 的 M1068/M1069；ADU KITCHEN 各 12 ea 保留。116 条有效行逐字段、其他业务表、完整性与外键全部一致。PP0064、PP0077 在旧/新代码隔离副本的详情（除废弃 active 键）、成本、库存需求相同。
+- 备份：`/Users/lantian/Documents/pp-flowhub/data/database-backups/hardware-direct-delete-20260917-090524/workflow-before.sqlite3`；同目录 verification.json 保存迁移检查，workflow-rehearsal.sqlite3 是演练副本。
+- 发布门禁：378 项 Python、1 跳过，macOS UI、AIMES 离线表格、PP0067 workbook、diff check 通过；沙盒 Swift 宏启动失败后在正常执行环境复验通过。单次串行 build 成功，版本 0.4.1 (5)，Bundle com.pacificpride.ppflowhub，Node v24.19.0，8 个 Python 资源与源码匹配。
+- 安装待完成：Computer Use 明确禁止 Terminal 控制；后台 install-app 被自动审批拒绝，原因是实际替换 App 且未遵循普通 Terminal/Aqua。产物保留在 /tmp/pp-flowhub-build/PP FlowHub.app，SHA-256 `57634b4d83defb8c79d20984c9a254ca6effe68c97a7bd1fac89e4b9aa7ae52d`。已请用户在普通 Terminal 执行 `/Users/lantian/Documents/pp-flowhub/scripts/install-app`。当前没有本轮签名安装或安装版回车/布局的通过证据；旧 App 已退出，数据库升级后应先安装再重开。
+- 字段解释：自动五金 source_code/name/spec 是来源证据，unit 与数量口径绑定，不能凭 SKU 恢复来源内容；人工行复制商品属性确有快照性质，进一步改成仅 SKU 需要单独决定商品变动如何影响已确认订单，本轮未删这些列。教学说明补充到 12-database-map.md。
+
+- 后续闭环（同次任务）：用户已在普通 Terminal 完成安装。Codex 在正常 macOS 环境只读验证 Apple Development 完整签名、TeamIdentifier ZF64PZKWMD；安装版 SHA-256 `f094bfc1e4cea62593da0ea1ac1dd2206f88429d79593b05e4b7ef4093b7614d`，8 个相关 Python 资源一致。后台沙盒的 CSSMERR_TP_NOT_TRUSTED 在正常环境复核不再出现。
+- 安装版实际检查：820×620 截图，输入左对齐、常驻重新载入移除、M1068 回车搜索返回正确商品、删除草稿与撤销均通过。未保存验收草稿，116 条五金完全未变；App 已退出。异常恢复入口未在真实安装版注入故障验证，事务/迁移错误路径由隔离回归覆盖。本轮安装及正常交互验收完成。
+
+
+## 2026-09-17：人工与自动五金统一只保存商品 SKU
+
+用户确认无需历史报表恢复。`hardware_items` 移除 source_code/name/spec/unit，名称、规格、单位统一 JOIN products；新写入必须有有效 SKU，未映射/停用/目录缺失均在替换前阻断。现有 SKU 不随以后 mapping/ignore 修改而重绑或删除，旧反查修复 CLI 移除。人工同工厂单同 SKU 合并；单位更新在商品导入和 SQLite 两层保护。
+
+左右轨同区块且数量一致只计一边、M1094–M1097 报表偶数除二规则保留；人工输入、已确认记录及迁移不重复换算。自动来源指纹仅比较订单/工厂单/SKU 汇总数量。未新增报表历史表。
+
+本轮 384 项 Python 回归（1 skipped）、Swift UI、AIMES 离线、PP0067 workbook E2E 及完整发布门禁通过，一次串行构建成功。正式库迁移已完成，备份和验证在 `data/database-backups/hardware-sku-20260917-093812/`；116 条记录保留字段全部不变，其他业务表相同，来源版本仅指纹重算，完整性/外键通过。17 个有五金订单的详情业务字段、成本与库存需求在副本迁移前后等价（商品显示属性和生成时间除外）。
+
+普通 Terminal 控制和后台安装在本任务此前已被工具/自动审批拒绝；用户运行安装脚本后，本轮已验证 Apple Development 签名、八个包内 Python 文件与源码一致、安装版 0.4.1，SHA-256 为 `8a848c2bd57f97f44a5f310f5e079b3f5e2de8dec2a542a346bf8d57d6824d32`。安装版 PP0064 详情显示商品名称和原有数量；人工 M1068/M1069 各12 ea；Return 搜索 M1094 正确显示 TS30305H / Sets。验证后退出 App，五金事实仍与迁移后副本逐行一致。未提交真实业务保存、Server 确认或库存扣减；App 启动自动扫描仅更新发现元数据。未操作用户其他 Terminal 窗口。
+
+## 2026-09-17 订单安排方案一与详情按钮间距
+
+- 用户选定本会话第一个设计图：订单安排标题与订单号同排，上方订单说明，下方安排类型/开始日期/安装人三列。`OrderAnnotationsSheet` / `OrderAnnotationsEditor` 使用中性日期框、对齐表单和分隔线，去掉重复开始日期摘要；保留中文日期、原月历、安装人自由输入和历史下拉、清除草稿及原保存链。未填写时选择日期建立本地草稿并打开月历。
+- 详情五个按钮统一 label 内最小宽度，移除外部固定宽度造成的可见间距差异，保持 HStack 间距 8；工具栏至工厂单表格间距 12 → 7，缩短 5 SwiftUI pt。非自有订单的出库范围按钮也保持相同间距。
+- 仅更新既有库存源码断言以适配 Button label 写法；原入口与条件继续受检查。未修改 Python 业务实现或真实业务数据。
+- 发布：`test-release` 首次发现旧 Button 字符串断言，调整后 Python 384 项通过（跳过 1）。Swift 阶段遇 `sandbox_apply: Operation not permitted`；经授权在普通执行环境继续 `test-macos-ui`、`test-aimes-table`、`test-workbook-e2e` 和 `git diff --check`，全部通过。
+- 一次串行 `build-app` 成功；打包 Node v24.19.0 及 Playwright 检查成功。产物 `/tmp/pp-flowhub-build/PP FlowHub.app`，Bundle `com.pacificpride.ppflowhub`，版本 0.4.1 (5)，可执行文件 `PPFlowHub` SHA-256 `37782d6257593cef0c1efa6b619f3dd624943b1b700a4fe51084e83b948c25a7`。
+- 安装阻碍：Computer Use 明确拒绝操作 `com.apple.Terminal`，错误为 `Computer Use is not allowed to use the app 'com.apple.Terminal' for safety reasons.`。保留未签名构建产物，没有尝试绕过工具限制、降级签名或替换安装版。正式 Apple Development 签名安装及新安装版视觉/交互检查未完成；`design-qa.md` 此项为 blocked。下一步在普通 Terminal 执行绝对路径安装脚本，再检查订单安排和五按钮工具栏；不要使用真实订单保存来做验收。
+
+### 订单安排安装后验收与清除崩溃修复
+
+用户确认已安装。现场 `codesign --verify --deep --strict` 通过，Apple Development 签名与 TeamIdentifier ZF64PZKWMD 已确认；安装版 SHA-256 `7710df91bcef0220f9551982020dfe2b2aa7f02a683ce6bd872c0b6a8011c57f`。真实窗口已显示方案一，PP0064 草稿月历可改日期，安装人可手输及选择历史项；没有点击保存。
+
+清除草稿按钮触发崩溃，日志 `PPFlowHub-2026-09-17-154813.ips` 明确指向数组绑定下标读取。删除数组元素后读取 `day.id` 会访问失效绑定；已改为先捕获 `removedID`、关闭对应月历，最后删除。修复后 `test-release` 完整通过（Python 384 项，跳过 1；macOS UI、AIMES 离线、工作簿专项及 diff 检查均通过）。新构建仍需普通 Terminal 正式安装；清除、关闭丢弃草稿、五按钮可见间距和工具栏高度的安装版复验未完成，不把当前可见表单等同于全部验收通过。
+
+### 订单安排修复版安装验收完成
+
+用户第二次安装后已退出旧进程再启动验证。签名严格校验通过（Apple Development，Team ZF64PZKWMD，签名时间 15:52:16），可执行 SHA-256 `2726ffd6a57afbe0b8dee7583594fb06de703a4e3d7caa3869d43243c0407a69`。计划/实际日期草稿均可新增及清除，无崩溃；输入说明后关闭再打开，草稿未被保存。安装版截图已确认五按钮可见边缘等距和方案一表单布局；工具栏间距缩短 5 pt 的精确值来自代码。截图 `/tmp/pp-flowhub-arrangement-verified.png`、`/tmp/pp-flowhub-toolbar-verified.png`，QA 此项已 passed。未点击真实保存，验收完成后退出 App。启动时 Server 挂载不可访问，不影响本次本地 UI 验收，未声明外部系统通过。
+
+### 2026-09-17 助手看板连接线按阶段独立更新
+
+用户确认 PP0064 的生产数量已刷新，但阶段连接线未更新，并授权修改。原实现以首个未全部完成的阶段锁住后续阶段；现在 `assistantProgressSegmentState` 分别按各阶段完成数判断 pending / active / completed，连接线和节点共用该判断，部分完成节点标绿。只改显示逻辑，不改订单汇总状态、SQLite、库存或生产事实。
+
+回归覆盖 27 个工厂单、优化 3 个时生产从 0 变成 3 的状态变化，以及全完成与空订单。完整 `test-release` 已通过（Python 389 项，跳过 1；Swift UI、AIMES 离线、PP0067 workbook 和 diff 检查通过）。初次沙箱运行被 Swift 宏 `sandbox_apply: Operation not permitted` 阻止，非沙箱完整重跑成功。一次串行 `build-app` 已成功，未签名产物保留于 `/tmp/pp-flowhub-build/PP FlowHub.app`。
+
+正式安装受阻：电脑控制工具明确拒绝访问 `com.apple.Terminal`（Computer Use is not allowed to use the app for safety reasons）。没有改用其他 UI 通道绕过、没有降级签名，尚未执行正式安装或安装版线条视觉验收；当前运行 App 仍是旧版本。需普通 Terminal 运行 `/Users/lantian/Documents/pp-flowhub/scripts/install-app`，然后重开验收 PP0064 优化与生产均为绿色虚线、出货为灰线。测试日志 `/tmp/pp-flowhub-rail-test-unrestricted.log`，构建日志 `/tmp/pp-flowhub-rail-build.log`。
+
+### 助手看板连接线安装验收完成
+
+用户完成安装后，2026-09-17 17:28 退出旧 App 并从 `/Applications/PP FlowHub.app` 重开。非沙箱 `codesign --verify --deep --strict` 通过，Apple Development 签名时间 17:27:24、TeamIdentifier ZF64PZKWMD；可执行 SHA-256 `e2065a490f78b9b324a0a12b50b9a572c8689442c2c6801dd80ca9af917d2ca0`。沙箱内曾返回 CSSMERR_TP_NOT_TRUSTED，普通执行环境复验成功。
+
+真实窗口及截图确认：PP0064 拆单 27/27 为绿色实线，优化 3/27 与生产 3/27 均为绿色虚线且节点标绿，出货 0/27 保持灰色；PP0087 已完成的优化和生产为绿色实线；PP0072 生产和出货 5/6 均为绿色虚线。启动后待处理提示仅点击“稍后处理”，未执行确认写入或再次扣减库存。本次验证了安装版现有数量对应的视觉结果，未通过真实生产操作重放数量变化；该变化由 Swift 回归覆盖。验收后已退出 App，未打开安装 Terminal。
+
+
+## 2026-09-18 生产数据库精简（安装待完成）
+
+本次依用户确认的业务边界实施：工厂单只能生产一次；板材/封边按订单、五金按工厂单；来源批次无实际业务用途；正式订单不保存导入校验结果。详见 [实施计划](superpowers/plans/2026-09-18-production-schema-simplification.md)。
+
+副本精简 3 张表、27 个字段，50 生产记录/66 关联/62 消耗明细及其余业务事实保留，31 订单汇总阶段与生产/出货数不变。395 Python 测试（1 skipped）、SwiftUI、AIMES 离线与文件专项门禁通过。准备请求改为 request_id；数据库仅保存生产记录 ID；库存操作日志继续承担失败恢复，未发起真实外部出库。
+
+Terminal 电脑控制工具明确安全拒绝，正式安装尚未完成。为防止旧 App 读不了新 schema，正式库暂不迁移。新版本首次使用旧库时先创建 schema-migration-backups，再原子升级；安装后仍需核对备份、结构、订单材料/生产/出货读层和 App 实际入口。
+
+构建已完成：`/tmp/pp-flowhub-build/PP FlowHub.app`，Bundle `com.pacificpride.ppflowhub`、版本 `0.4.1 (5)`；可执行文件 SHA-256 `021fae37ca89ec1c3599697849c0ca1988e941d17726965ce6b098ae859e5deb`，四个核心 Python 模块与源码一致。签名安装和正式库迁移未执行，不能宣称正式交付或安装版验收通过。
+
+### 生产数据库精简：安装及正式库迁移核验
+
+用户安装后，2026-09-17 23:10 启动安装版，Apple Development 签名及普通执行环境深度严格验证通过（签名时间 23:07:39，TeamIdentifier ZF64PZKWMD）。四个核心 Python 模块与源码一致。正式库自动备份至 `data/schema-migration-backups/workflow-before-production-v1-20260917-231039-796319.sqlite3` 后升级为 30 表/268 列。50 生产记录、66 关联、62 消耗明细逐行一致；其他保留业务表、订单/工厂单/来源文件共用字段无差异；完整性及外键检查通过。
+
+安装版订单中心正常显示已生产及部分生产/出货状态。Server 目录未连接，不能验证真实扫描；后续订单详情验收时 Mac 锁屏，工具无法继续，详情验收和退出验证 App 等待解锁。未进行真实生产确认、库存扣减或外部写入。
+
+### 生产数据库精简：解锁后详情验收收尾
+
+安装版 PP0086 详情成功打开，显示已出货及优化/生产/出货均 2/2；Plywood 数量 12/1/5、White Oak Panel 9、封边 263.95 m，五金按 F2609140250/F2609140249 展示。工厂单行展开的 AX 点击未生效，窗口激活/坐标点击被工具 `noWindowsAvailable` 阻止，该控件未完成验收。已 Cmd-Q 退出，应用清单确认 isRunning=false。Server 共享目录未连接，真实扫描仍未验证。此次仅补充本地读取验收，未执行生产确认或外部库存写入。
+
+## 2026-09-18：订单中止
+
+新增“已中止”订单终态，生产/出库右侧增加“中止”按钮；确认框取消不写入，确认后保存整个订单终态。刷新、upsert、新工厂单和临时投影清理不覆盖中止；默认未完成列表及助手进行中排除中止订单，仍能筛选查回。后台生产、出库前也阻断中止订单；已有业务事实保留，不退库存。本次未提供恢复功能。
+
+完整门禁通过（401 Python，1 skip；Swift UI、AIMES 离线、workbook 专项通过），一次串行构建成功。电脑操作工具明确禁止访问 Terminal，故 Apple Development 签名安装及安装版视觉验收未完成；未签名产物保留在 `/tmp/pp-flowhub-build/PP FlowHub.app`，当前安装版未更新。后续从普通 Terminal 执行 `/Users/lantian/Documents/pp-flowhub/scripts/install-app`，再验证按钮位置与打开/取消确认框。未对真实订单执行中止。详细证据见 [实施记录](superpowers/plans/2026-09-18-order-abort.md)。
+
+### 订单中止安装验收补记
+
+用户已完成安装。安装资源与源码一致，Apple Development 签名及深度严格验证通过；安装版确认“中止”按钮位于生产/出货右侧，二次确认框正确显示订单号与影响，取消后 PP0089 状态未变，真实中止数仍为 0；筛选菜单含“已中止”。签名后可执行文件哈希和详细证据见订单中止实施记录。此前安装阻碍已由用户安装解决。
+
+### 2026-09-18：生产、出货、中止按钮等宽
+
+按用户要求，三个按钮统一为原生产按钮宽度减 5：标签固定 67 pt，使用相同 glassProminent 样式和 regular 控件大小，保持系统内边距一致。仅调整布局，动作和确认逻辑不变。用户明确要求不用测试，本次未运行测试或 UI 验收；一次串行构建成功，产物位于 `/tmp/pp-flowhub-build/PP FlowHub.app`。此前 Terminal 工具访问限制仍未解除，待用户通过普通终端执行安装脚本；前一次订单中止版本的安装验收不覆盖本次宽度微调。
+
+### 2026-09-18：动作按钮再缩窄与状态筛选诊断
+
+生产、出货、中止标签宽度由 67 改为 57，三者等宽，操作区 HStack spacing 仍为 8，其他按钮不改。沿用用户免测试要求，未运行测试；一次构建成功，待用户普通 Terminal 安装。
+
+只读核对现有链路与真实库：orders 共 38 条，无 temporary 订单，也无待人工处理/待确认/数据异常 stage。当前 summaries 不产生后两种 stage；待人工处理仅保留临时订单旧分支，正常列表读取前清理旧投影。Swift 按 stage 直接显示/筛选，不以 validation_status 替代；返回数据异常的旧 UI helper 仅测试引用。因此三个筛选项可作为显示残留清理，但归属问题与校验结果仍有真实用途。本次未获删除要求，保留状态列表与业务逻辑。
+
+### 2026-09-18：移除四个订单筛选项
+
+已从状态菜单移除已设计、待人工处理、待确认、数据异常，其他选项与 57 pt 按钮标签宽度、8 pt 操作间距保持不变。同步业务规则、数据模型边界、学习说明和 Swift 菜单断言。只读查询当前 38 个订单，无上述四种 stage；未改 schema 或真实数据，后台已设计初始值及旧迁移、工厂单归属、临时任务和校验功能保留。历史原型本来标明非现行规则，不改写历史记录。
+
+沿用用户免测试要求，本次未运行测试；一次串行构建成功，未签名 App 保留在 `/tmp/pp-flowhub-build/PP FlowHub.app`。Terminal 电脑操作工具此前明确禁止访问，待用户在普通终端执行安装脚本；本次菜单清理尚未安装验收。
+
+### 2026-09-18：成本按钮按材料启用与动作宽度再次调整
+
+生产、出货、中止标签宽度由 57 pt 减到 37 pt，按钮 HStack spacing 保持 8。计算成本按钮及请求入口共同使用 canCalculateOrderCost：当前订单有正数量材料且不在读取/等待详情时启用；无材料、零数量材料和读取中均禁用。切换订单在排队之前清空材料，数据库详情回调核对订单身份，避免迟到响应覆盖当前选择。无需数据库迁移或真实数据修改。
+
+用户恢复正常测试，本次完整 test-release 通过：401 Python（1 skip）、Swift UI（含新增成本门槛回归）、AIMES 离线、PP0067 workbook。一次串行构建成功，未签名产物 `/tmp/pp-flowhub-build/PP FlowHub.app`，可执行文件 SHA-256 `197473a704766b3d2ca1f8ee3fea12f1ad1a90a3b529f0757859e2e046920997`。此前 Terminal 电脑操作工具禁止访问，仍需普通 Terminal 安装；本次安装版灰色/启用状态与 37 pt 宽度视觉验收未执行，不能沿用旧版验收结论。
+
+
+## 2026-09-18：订单展开性能与消息区隔离（待正式安装）
+
+用户授权执行 PP0064 卡顿/崩溃修复，并要求下方列表的展开状态与顶部消息区隔离。路径名称和父目录显示改用字符串解析，消除重绘时的 URL 目录探测；订单列表独立持有展开/选择/订单弹窗状态，消息区接收可比较的相关值输入；点击容器改为 SwiftUI 内容加透明普通 NSView 接收手势，不再嵌套 NSHostingView。无新缓存、无 Python 业务修改。教学说明补入 `docs/learning/09-user-operation-call-chains.md`。
+
+完整发布门禁通过（401 Python、1 跳过；Swift UI、AIMES 离线、PP0067 workbook、diff）。新增实际挂载测试确认无关模型变化不重算消息 body，进度/失败仍更新；点击层无子视图和固有尺寸，保留单/双击优先级。一次串行构建完成，产物 `/tmp/pp-flowhub-build/PP FlowHub.app`，版本 0.4.1 (5)，未签名可执行文件 SHA-256 `6d4614d03b4ba1898d60848e5216bece93252d6f3e60730bb5c441e509733a64`。
+
+电脑工具明确禁止访问 com.apple.Terminal，未运行安装脚本，不绕过限制或降级签名。正式安装与 PP0064 实机展开/收起/滚动/双击以及性能、系统异常日志复测仍待完成；不能宣称现场耗时已经改善或历史崩溃已完全消失。用户可在普通 Terminal 运行 `/Users/lantian/Documents/pp-flowhub/scripts/install-app`，安装后继续验收。详细进度见 `docs/superpowers/plans/2026-09-18-order-expansion-performance.md`。
+
+
+### 2026-09-18：订单展开修复正式安装验收完成
+
+用户已安装后核对归档构建哈希、安装/归档 UUID 和 Apple Development 正式签名均通过；退出旧进程并重开安装版完成 PP0064 四次展开、多次收起、滚动、勾选取消、双击详情、订单安排取消、助手卡片跳转及 PP0089 小订单回归。四次展开请求到主线程完成记录为 0.002–0.100 秒（非完整绘制时间），旧版记录为 4.35 / 11.74 秒。20 秒采样未采到 lstat；本次进程没有新增布局循环异常，崩溃报告无新增。材料、五金、生产材料和出库相关五表逐行摘要不变。验收 App 已退出，详细证据见 `docs/superpowers/plans/2026-09-18-order-expansion-performance.md`。

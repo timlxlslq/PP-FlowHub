@@ -164,7 +164,7 @@ class ReportSelectionTests(unittest.TestCase):
                 reopened = Config(state_dir=config.state_dir, source_root=config.source_root)
                 self.assertNotIn('hardware_source_selection', preview_server_changes(reopened, [folder]))
                 connection = sqlite3.connect(config.workflow_database)
-                self.assertEqual(connection.execute("select quantity from hardware_items where factory_order='F100' and active=1 and source_type='aicnc'").fetchall(), [(2.0,)])
+                self.assertEqual(connection.execute("select quantity from hardware_items where factory_order='F100' and source_type='aicnc'").fetchall(), [(2.0,)])
                 connection.close()
                 make_fittings(b, [('F100', 9)])
                 changed = preview_server_changes(config, [folder])['hardware_source_selection']['conflicts'][0]
@@ -173,7 +173,7 @@ class ReportSelectionTests(unittest.TestCase):
                 confirm_server_material_preview_memory(config, updated, confirm_write=True)
                 self.assertEqual(load_source_decisions(config)['F100']['selected']['path'], str(b.resolve()))
                 connection = sqlite3.connect(config.workflow_database)
-                self.assertEqual(connection.execute("select quantity from hardware_items where factory_order='F100' and active=1 and source_type='aicnc'").fetchall(), [(9.0,)])
+                self.assertEqual(connection.execute("select quantity from hardware_items where factory_order='F100' and source_type='aicnc'").fetchall(), [(9.0,)])
                 connection.close()
                 with self.assertRaises(RuleError):
                     confirm_server_material_preview_memory(config, payload, confirm_write=True)

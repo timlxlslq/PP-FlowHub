@@ -156,19 +156,15 @@ class WorkflowDatabaseTests(unittest.TestCase):
             self.assertTrue(list((state / "migration-archives").rglob("*.sqlite3")))
             self.assertTrue(legacy_inventory.is_file())
 
-    def test_one_factory_order_gets_one_batch_and_conflict_raises_open_issue(self):
+    def test_source_batches_do_not_create_production_or_conflicts(self):
         with tempfile.TemporaryDirectory() as temp:
-            config = Config(state_dir=Path(temp) / "state")
-            config.prepare_storage()
-            store = OrderIndexStore(config.workflow_database)
+            store = OrderIndexStore(Path(temp) / 'workflow.sqlite3')
             store.upsert_aimes_factory("F1", order_id="PP9999", factory_name="PP9999-KITCHEN", sales_order_name="PP9999", split_time="", seen_at="now")
-            store.update_source_file_identity(Path("/tmp/PC124429962607080001/report.xlsx"), order_id="PP9999", factory_order="F1")
-            store.record_batch_evidence("F1", "PC124429962607080001", Path("/tmp/PC124429962607080001/report.xlsx"), "PP9999")
-            store.record_batch_evidence("F1", "PC124429962606270001", Path("/tmp/PC124429962606270001/report.xlsx"), "PP9999")
-            store.commit()
-            row = store.connection.execute("select production_batch_id from factory_orders where factory_order='F1'").fetchone()
-            self.assertIsNone(row[0])
-            self.assertTrue(any(item["kind"] == "batch_conflict" for item in store.active_issues()))
+            for number in ('PC124429962607080001','PC124429962606270001'):
+                store.update_source_file_identity(Path('/tmp') / number / 'report.xlsx', order_id='PP9999', factory_order='F1')
+            self.assertIsNone(store.connection.execute("select production_record_id from factory_orders where factory_order='F1'").fetchone()[0])
+            self.assertFalse(any(i['kind']=='batch_conflict' for i in store.active_issues()))
+            self.assertFalse(store.connection.execute("select 1 from sqlite_master where name in ('production_batches','batch_evidence')").fetchall())
             store.close()
 
     def test_backup_status_requires_user_action_without_successful_record(self):

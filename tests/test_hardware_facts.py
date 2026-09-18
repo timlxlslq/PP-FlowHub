@@ -42,6 +42,15 @@ class HardwareFactsTests(unittest.TestCase):
             self.assertEqual(reopened.execute('select count(*),sum(quantity) from hardware_items').fetchone(), (1,24))
         self.assertEqual(self.c.execute("select count(*) from sync_changes where kind='hardware_projection_replaced'").fetchone()[0],1)
 
+    def test_source_labels_do_not_change_canonical_fingerprint(self):
+        replace_factory_hardware(self.c, 'F100', [self.row])
+        self.c.commit()
+        old_fingerprint = self.c.execute("select fingerprint from hardware_source_versions where factory_order='F100'").fetchone()[0]
+        changed_labels = {**self.row, 'name': 'Renamed source', 'source_code': 'other', 'spec': 'new', 'unit': 'Piece'}
+        self.assertFalse(replace_factory_hardware(self.c, 'F100', [changed_labels]))
+        self.assertEqual(self.c.execute("select fingerprint from hardware_source_versions where factory_order='F100'").fetchone()[0], old_fingerprint)
+        self.assertTrue(replace_factory_hardware(self.c, 'F100', [{**changed_labels, 'quantity': 25}]))
+
     def test_duplicate_legacy_paths_replaced_and_manual_preserved(self):
         for source in ['/test/a.xlsx','/server/a.xlsx']:
             self.c.execute("insert into hardware_items(order_id,factory_order,product_code,quantity,source_type,source_path,updated_at) values('PP9999','F100','M1001',24,'aicnc',?,'old')",(source,))
@@ -86,16 +95,16 @@ class HardwareFactsTests(unittest.TestCase):
         replace_factory_hardware(self.c,'F100',[{**self.row,'quantity':48}])
         self.c.commit()
         reconcile_outbound_statuses(self.config,self.store)
-        self.assertEqual(self.c.execute("select outbound_status,outbound_document from factory_orders where factory_order='F100'").fetchone(),('已出库','DOC'))
+        self.assertEqual(self.c.execute("select (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status,outbound_document from factory_orders where factory_order='F100'").fetchone(),('已出库','DOC'))
         self.assertEqual(self.c.execute("select count(*) from active_issues where kind='outbound_hardware_difference' and status='open'").fetchone()[0],1)
-        self.c.execute("update factory_orders set outbound_status='未出库',outbound_completed_at=''")
+        self.c.execute("update factory_orders set stage='已优化',outbound_completed_at=''")
         preserve_confirmed_shipment(self.c,'F100')
-        self.assertEqual(self.c.execute("select outbound_status from factory_orders").fetchone()[0],'已出库')
+        self.assertEqual(self.c.execute("select (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status from factory_orders").fetchone()[0],'已出库')
         self.c.execute("delete from hardware_items")
         self.c.execute("update factory_orders set factory_name='P9999-RENAMED'")
         self.c.commit()
         reconcile_outbound_statuses(self.config,self.store)
-        self.assertEqual(self.c.execute("select outbound_status from factory_orders").fetchone()[0],'已出库')
+        self.assertEqual(self.c.execute("select (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status from factory_orders").fetchone()[0],'已出库')
         replace_factory_hardware(self.c,'F100',[self.row])
         self.assertEqual(self.c.execute("select status from active_issues where kind='outbound_hardware_difference'").fetchone()[0],'resolved')
 

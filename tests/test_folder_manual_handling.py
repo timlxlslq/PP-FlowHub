@@ -51,12 +51,12 @@ class FolderManualHandlingTests(unittest.TestCase):
         )
         for order, factory in [('PP0008', 'F100'), ('PP0035', 'F101')]:
             store.upsert_aimes_factory(factory, order_id=order, factory_name=order+' KITCHEN', sales_order_name=order, split_time='2026-09-01T08:00:00', seen_at='2026-09-01T08:00:00')
-            store.connection.execute("update factory_orders set outbound_status='已出库', outbound_document='OLD-DOC', outbound_completed_at='2026-09-10T10:00:00' where factory_order=?", (factory,))
+            store.connection.execute("update factory_orders set stage='已出货', outbound_document='OLD-DOC', outbound_completed_at='2026-09-10T10:00:00' where factory_order=?", (factory,))
             store.save_server_scan_policy(order, policy='permanent', aimes_fingerprint='', updated_at='2026-09-10T10:00:00')
         store.connection.execute("insert into material_items(order_id,product_code,quantity,source_type,source_path,source_fingerprint,updated_at) values('PP0008','M-WHITE',2,'aihouse','/old/report','old','2026-09-10')")
-        store.connection.execute("insert into hardware_items(order_id,factory_order,product_code,name,spec,quantity,unit,source_type,source_path,active,updated_at) values('PP0008','F100','HINGE','Hinge','',2,'pcs','aicnc','/old/fittings',1,'2026-09-10')")
-        store.connection.execute("insert into manual_production_batches(batch_id,batch_number,order_id,production_time,source,status,created_at,updated_at) values(1,'MP-OLD','PP0008','2026-09-10','manual','completed','2026-09-10','2026-09-10')")
-        store.connection.execute("insert into manual_production_batch_factories(batch_id,order_id,factory_order) values(1,'PP0008','F100')")
+        store.connection.execute("insert into hardware_items(order_id,factory_order,product_code,quantity,source_type,source_path,updated_at) values('PP0008','F100','HINGE',2,'aicnc','/old/fittings','2026-09-10')")
+        store.connection.execute("insert into production_records(batch_id,production_time,source,status,created_at,updated_at) values(1,'2026-09-10','manual','completed','2026-09-10','2026-09-10')")
+        store.connection.execute("update factory_orders set production_record_id=1 where order_id='PP0008' and factory_order='F100'")
         store.commit(); store.close()
 
     def record(self, folder):
@@ -69,7 +69,7 @@ class FolderManualHandlingTests(unittest.TestCase):
         store = OrderIndexStore(self.config.workflow_database)
         result = {name: store.connection.execute('select * from '+name).fetchall() for name in [
             'orders', 'factory_orders', 'material_items', 'hardware_items',
-            'manual_production_batches', 'manual_production_batch_factories', 'outbound_documents',
+            'production_records', 'outbound_documents',
         ]}
         store.close()
         return result

@@ -1,16 +1,16 @@
 # 订单材料以 SKU 关联商品主资料
 
 - 目标：`material_items` 保存订单、SKU、数量及来源元数据，以真实外键关联 `products(code)`；颜色、材料类型、厚度、单位、封边等商品属性从商品层读取。同步调整确认写入、详情、生产、库存、成本和 Traveler。
-- 状态：实现、独立副本验收、全部发布测试阶段和一次串行构建已完成；等待用户手动解锁 Mac 后执行正式签名安装、正式库备份/迁移与安装版验收。GPT-6 负责规划、审查、最终测试和安装验收；GPT-5.6 Sol / high 负责实现及开发回归。正式库仍为旧结构，尚未应用 White Oak 映射或 SKU 迁移，不能将本状态视为正式交付。
+- 状态：已完成实现、全部发布测试阶段、串行构建、Apple Development 签名安装、正式库备份/迁移及安装版验收。GPT-6 负责规划、审查、最终测试和安装验收；GPT-5.6 Sol / high 负责实现及开发回归。因桌面工具禁止控制 Terminal，安装命令由用户在普通 Terminal 执行，随后主代理独立验证签名及安装结果。正式库已应用 White Oak → M1170 与五表 SKU 迁移。
 - 约束：保留开始时所有未提交修改；不重建真实数据库、不改变订单数量或生产/出货状态、不执行外部库存操作；迁移先在数据库副本演练，再备份并事务迁移正式库。无法唯一匹配时整体停止并给出逐项诊断。
 - 步骤：审计商品属性与引用者 → 明确商品属性契约及迁移方案 → Sol 修改 schema、读写、关联和回归 → 主代理审查/独立验收 → 完整发布门禁 → 串行构建、正式签名安装及安装版读写验收。
 - 验证：旧库迁移、幂等、失败回滚、非法 SKU/父商品删除被外键阻止；材料确认写入并重开读取；商品属性 JOIN；映射改变不重绑已确认材料；生产剩余量、Server 预览/取消/重复确认、目录更新、成本和 Traveler；真实库副本与迁移前后按订单/SKU/来源核对。
-- 剩余决策：无待用户选择的材料映射；唯一未匹配的 White Oak 封边已由用户确认 M1170。剩余工作是实现、错误路径验证和正式交付，不把副本通过当作正式库或安装版验收。
+- 剩余决策：无。唯一未匹配的 White Oak 封边已由用户确认 M1170 并正式迁移；要求范围内的实现、错误路径验证和正式交付已完成，现场外部系统的未验证边界见末节。
 
 ## 已确认的设计要求
 
 1. `material_items.product_code` 必填且不得为空，引用 `products.code`；保留 `id/order_id/quantity/source_type/source_path/source_fingerprint/updated_at`。商品字段从材料表物理移除，读取层输出需要的属性，Swift 可继续消费相同字段名。
-2. `products` 当前只有 `category/name/spec/unit`，需在商品层提供可明确解释的结构化材料属性。原始商品名称和规格保持可追溯；工作流名义厚度与外部规格差异须明确区分，不能使 Traveler 列分类或历史消耗失效。
+2. 改造前 `products` 只有 `category/name/spec/unit` 等原始属性字段，需在商品层提供可明确解释的结构化材料属性。原始商品名称和规格保持可追溯；工作流名义厚度与外部规格差异须明确区分，不能使 Traveler 列分类或历史消耗失效。
 3. SKU 只在源文件解析/确认和一次性旧数据迁移时确定。已确认材料的库存/成本读取使用保存的 SKU；全局映射变化不会重绑已有订单材料。
 4. SQLite 外键在每条相关应用连接建立时启用，必须在事务开始前执行。仅在 DDL 声明外键不足以保证约束。参考 <https://www.sqlite.org/foreignkeys.html>。
 5. 商品同步不能继续 `DELETE FROM products` 后全量插入。采用按 SKU 更新/插入；被订单或历史消耗引用的缺失商品保留并标明不可用于新库存写入，历史详情仍可读取。具体缺失状态需与现有启用校验一致。
@@ -49,10 +49,25 @@
 - 桌面工具报告 Mac 锁定且不能自动解锁，已向用户请求手动解锁。没有尝试绕过锁屏，没有执行 `install-app`，没有变更正式库。再次只读确认正式 `material_items` 仍 113 行且没有 `product_code` 列。
 - 日志与可复现实验脚本位于 `/tmp/pp-flowhub-material-sku.BSIt8J/`：`release-gate.log`、`release-macos-ui.log`、`release-aimes.log`、`release-workbook.log`、`build-app.log`、`packaged-contract.log`、各 migration/read/outbound 审计脚本及 JSON。
 
-### 解锁后的剩余步骤
+### 当时解锁后的剩余步骤（已执行，见下节）
 
 1. 确认旧 App 已退出，保留当前通过门禁的构建产物；在普通 Terminal/Aqua 运行绝对路径 `scripts/install-app`，验证 Apple Development 签名、helper 和包一致性。不要用 ad-hoc 签名。
 2. 正式迁移前重新读取现场状态并创建项目本地可恢复 SQLite Online Backup；冻结旧代码对新备份重新审计，在副本应用用户批准的 White Oak → M1170 并演练，不能假设旧审计期间现场无变化。
 3. 正式库应用已批准的映射与事务迁移；核对五表 FK、数量/来源/生产消耗、其余业务事实、完整性与关键订单读层。不得执行真实库存扣减或确认新业务材料。
 4. 用签名安装版查看 PP0086（M1170 封边 263.95）和有已完成生产的订单，验证材料/消耗投影。写入通过隔离夹具执行，不能把副本测试称为真实业务确认。
 5. 验收结束退出本次 App 与安装 Terminal，更新本计划的正式证据和完成状态。
+
+## 正式交付验收（2026-09-16）
+
+- 解锁后只读确认 App 未运行；Computer Use 明确禁止控制 Terminal，因此没有改用其他 UI 自动化绕过限制。用户在普通 Terminal 执行绝对路径 `/Users/lantian/Documents/pp-flowhub/scripts/install-app` 并报告成功。
+- 主代理在获准的普通 macOS 环境独立核验安装 App 和 keychain helper：`codesign --verify --deep --strict` / helper strict 校验通过，Authority 为 Apple Development，TeamIdentifier 为 `ZF64PZKWMD`，Bundle Identifier 为 `com.pacificpride.ppflowhub`。沙盒内首次信任链检查失败，不作为签名失败结论；普通环境复验通过。
+- 已安装 `/Applications/PP FlowHub.app` 可执行文件 SHA-256：`f891e09dd8ab0ef5420440a5e27fccc535e07ac29e398506caa25319046f6451`；签名导致其与未签名 hash 不同，业务 Python 源码逐文件与已测试工作树一致。
+- 正式迁移前重新生成持久备份：`data/database-backups/material-sku-20260916-101551/workflow-before.sqlite3`，SHA-256：`8736ad439ececf114f8e47b7bba08a068c78f76888fee54a22eefb44cd1b7a47`。该目录另存开始时源码快照及恢复说明，避免仅依赖临时目录。
+- 冻结旧解析器重新审计最新备份，并仅在隔离副本应用用户批准的 M1170：113 行材料、48 行生产消耗、36 个材料 SKU 全部可唯一解析；最新副本迁移/幂等及 534 项核对、28 表逐行保护检查全部通过。
+- 执行正式迁移前，在写事务中核对正式库完整 dump 与最新备份相同，拒绝未审计的数据漂移；保存明确批准的 White Oak 映射，再调用已验收的事务迁移。正式库五表 FK、完整性、数量/身份/来源/历史消耗的 534 项核对通过；非迁移数据表 28 张逐行相同。
+- 正式安装包自带 Python runtime/业务代码执行 15 项隔离材料读写与历史出库契约测试，全部通过。该证据是安装包后端读写，不是对真实订单新增材料或扣库存。
+- 已打开真实签名安装版，订单中心本地数据库读取正常。PP0086 详情显示：Plywood 18/14.5/5.4mm 数量 12/1/5；White Oak 19.1mm 数量 9；White Oak Edge Banding 263.95m。SQL JOIN 同时验证对应 M1170 与商品属性。
+- PP0008 显示原有生产/出货进度 2/4，详情正常显示 Plywood 4/3/2、Walnut 19.1mm 20、Walnut 8mm 7、Walnut Edge Banding 324m，未因 SKU 迁移重复计入历史消耗。
+- 恢复空搜索后退出本次验收 App，应用清单确认 `isRunning=false`；没有触碰用户手动打开的安装 Terminal（工具禁止控制该应用）。退出后再次核对正式库 534 项全部通过。
+- 限制：现场 `/Volumes/server/Optimized Orders` 不可访问，App 正确显示警告；未验证真实 Server 文件的新增确认、实时库存扣减或外部业务写入。Server 解析/确认与错误路径由隔离回归覆盖；没有将离线测试表述为现场外部系统验收。
+- 代码、当前文档及生成索引已更新，最后 `git diff --check` 通过；没有提交 Git，也没有修改原有 WeCom 学习实验。

@@ -495,7 +495,7 @@ def mark_customer_supplied_outbound(
     try:
         placeholders = ",".join("?" for _ in factory_ids)
         rows = connection.execute(
-            f"select factory_order, outbound_status from factory_orders "
+            f"select factory_order, case when stage='已出货' then '已出库' else '未出库' end as outbound_status from factory_orders "
             f"where order_id=? and factory_order in ({placeholders}) and aimes_status='active'",
             [normalized_order_id, *sorted(factory_ids)],
         ).fetchall()
@@ -522,7 +522,7 @@ def mark_customer_supplied_outbound(
             connection.execute(
                 """
                 update factory_orders
-                set outbound_status='已出库', outbound_document='',
+                set stage='已出货', outbound_document='',
                     outbound_mode='customer_supplied', outbound_fingerprint=?, updated_at=?
                 where order_id=? and factory_order=? and aimes_status='active'
                 """,
@@ -586,7 +586,7 @@ def mark_no_hardware_outbound(
     try:
         placeholders = ",".join("?" for _ in factory_ids)
         rows = connection.execute(
-            f"select factory_order, outbound_status from factory_orders "
+            f"select factory_order, case when stage='已出货' then '已出库' else '未出库' end as outbound_status from factory_orders "
             f"where order_id=? and factory_order in ({placeholders}) and aimes_status='active'",
             [normalized_order_id, *sorted(factory_ids)],
         ).fetchall()
@@ -613,7 +613,7 @@ def mark_no_hardware_outbound(
             connection.execute(
                 """
                 update factory_orders
-                set outbound_status='已出库', outbound_document='',
+                set stage='已出货', outbound_document='',
                     outbound_mode='no_hardware', outbound_fingerprint=?, updated_at=?
                 where order_id=? and factory_order=? and aimes_status='active'
                 """,
@@ -636,7 +636,7 @@ def database_document_items(
     order_id: str,
     selected_factory_orders: Iterable[str] | None = None,
     *,
-    production_batch_number: str = "",
+    production_request_id: str = "",
     production_materials: Iterable[dict] | None = None,
     shipment_only: bool = False,
 ) -> tuple[str, dict[str, list[TravelerItem]], list[TravelerItem], dict[str, dict]]:
@@ -685,36 +685,12 @@ def database_document_items(
     order_type = str(detail.get("order", {}).get("order_type", "")).strip()
     scope = outbound_scope_decisions(config, normalized_order_id, requested)
     material_requirement = scope["material"]["requirement"]
-    production_mode = production_materials is not None or bool(production_batch_number)
+    if production_request_id and production_materials is None:
+        raise RuleError("production_materials", "生产请求必须包含本次确认的材料明细，请重新预览")
+    production_mode = production_materials is not None or bool(production_request_id)
     materials = [] if shipment_only else list(detail.get("materials", []))
     if production_materials is not None:
         materials = [dict(row) for row in production_materials]
-    elif production_batch_number:
-        connection = connect_database(config.workflow_database)
-        connection.row_factory = sqlite3.Row
-        try:
-            batch = connection.execute(
-                "select batch_id, order_id, status from manual_production_batches where batch_number=?",
-                (production_batch_number.strip(),),
-            ).fetchone()
-            if batch is None or str(batch["order_id"]).upper() != normalized_order_id:
-                raise RuleError("production_batch_unknown", f"找不到订单 {normalized_order_id} 的生产批次：{production_batch_number}")
-            if batch["status"] not in {"prepared", "completed"}:
-                raise RuleError("production_batch_status", "生产批次当前不能出库")
-            materials = [dict(row) for row in connection.execute(
-                """select m.product_code, p.material_kind as material_type,
-                          p.material_color as color,
-                          p.material_thickness as thickness,
-                          m.quantity, p.unit,
-                          case when p.material_kind='edge' then p.material_color else '' end as edge
-                   from manual_production_batch_materials m
-                   join products p on p.code=m.product_code
-                   where m.batch_id=? order by p.material_kind, p.material_color,
-                                                p.material_thickness, m.product_code""",
-                (batch["batch_id"],),
-            ).fetchall()]
-        finally:
-            connection.close()
     documents: dict[str, list[TravelerItem]] = {normalized_order_id: []}
     zero_items: list[TravelerItem] = []
     row_number = 1
@@ -767,15 +743,7 @@ def database_document_items(
         remark = str(factory.get("factory_name", "")).strip() or factory_order
         documents.setdefault(remark, [])
         product_code = str(row.get("product_code", "")).strip()
-        source_code = str(row.get("source_code", "")).strip()
-        name = (
-            product_code
-            if product_code and (
-                product_code.upper().startswith("M")
-                or (source_code and source_code != product_code)
-            )
-            else str(row.get("name", "")).strip() or product_code
-        )
+        name = product_code
         item = _with_product_code(
             TravelerItem(
                 row_number, "五金", name, float(row.get("quantity", 0) or 0), remark
@@ -936,7 +904,7 @@ def build_database_preview(
     order_id: str,
     selected_factory_orders: Iterable[str] | None = None,
     *,
-    production_batch_number: str = "",
+    production_request_id: str = "",
     production_materials: Iterable[dict] | None = None,
     shipment_only: bool = False,
 ) -> InventoryPreview:
@@ -944,7 +912,7 @@ def build_database_preview(
     _assert_single_server_material_source(config, order_id)
     normalized_order_id, documents, zero_items, _ = database_document_items(
         config, order_id, selected_factory_orders,
-        production_batch_number=production_batch_number,
+        production_request_id=production_request_id,
         production_materials=production_materials,
         shipment_only=shipment_only,
     )
@@ -1243,12 +1211,7 @@ def build_factory_room_preview(
         if quantity <= 0:
             continue
         product_code = str(row.get("product_code", "")).strip()
-        source_code = str(row.get("source_code", "")).strip()
-        name = (
-            product_code
-            if product_code and (product_code.upper().startswith("M") or (source_code and source_code != product_code))
-            else str(row.get("name", "")).strip() or product_code
-        )
+        name = product_code
         documents[factory_name].append(_with_product_code(
             TravelerItem(row_number, "五金", name, quantity, factory_name),
             product_code,
@@ -1919,7 +1882,7 @@ def _replace_product_database(path: Path, products: list[Product]) -> None:
         reference_tables = [
             table for table in (
                 "material_items",
-                "manual_production_batch_materials",
+                "production_materials",
                 "server_material_allocations",
             )
             if connection.execute(
@@ -1946,6 +1909,14 @@ def _replace_product_database(path: Path, products: list[Product]) -> None:
             ).fetchall()
             if str(row[0] or "").strip().upper() in referenced_codes
         }
+        if connection.execute("select 1 from sqlite_master where name='hardware_items'").fetchone():
+            hardware_units = dict(connection.execute(
+                "select p.code,p.unit from products p where exists "
+                "(select 1 from hardware_items h where h.product_code=p.code)"))
+            for product in products:
+                if product.code in hardware_units and hardware_units[product.code] != product.unit:
+                    raise RuleError('hardware_product_unit_locked',
+                        f"商品 {product.code} 已被五金记录引用，不能将单位从 {hardware_units[product.code]} 改为 {product.unit}；请先核对数量换算")
         connection.execute("update products set catalog_present=0")
         connection.executemany(
             """
@@ -2335,40 +2306,6 @@ def ignored_hardware_reason(
     return None
 
 
-def remove_ignored_hardware_records(config: Config, names: Iterable[str]) -> int:
-    """Remove persisted hardware facts that the user has globally ignored."""
-    if not config.storage_prepared:
-        return 0
-    ignored_names = {_normalize_name(name) for name in names if _normalize_name(name)}
-    if not ignored_names or not config.workflow_database.is_file():
-        return 0
-    connection = connect_database(config.workflow_database)
-    try:
-        rows = connection.execute(
-            "select id, name, product_code, source_code from hardware_items"
-        ).fetchall()
-        ids = [
-            row[0]
-            for row in rows
-            if any(
-                _normalize_name(candidate) in ignored_names
-                for candidate in (
-                    row[1],
-                    row[2],
-                    row[3],
-                    HARDWARE_NAME_DISPLAY_NAMES.get(_normalize_name(row[1]), ""),
-                    HARDWARE_DISPLAY_NAMES.get(_normalize_name(row[3] or row[2]), ""),
-                )
-            )
-        ]
-        if ids:
-            connection.executemany("delete from hardware_items where id=?", ((row_id,) for row_id in ids))
-            connection.commit()
-        return len(ids)
-    finally:
-        connection.close()
-
-
 FIXED_CODES = {
     "18MMPLYWOOD": "M0004",
     "14.5MMPLYWOOD": "M0003",
@@ -2496,8 +2433,8 @@ def resolve_inventory_items(
 ) -> dict:
     """Resolve order materials/hardware before they become active database facts.
 
-    ``source_code`` is retained for hardware because AICNC codes such as
-    ``WJ-CBD`` are source identifiers, not necessarily inventory SKUs.  An
+    ``source_code`` is used transiently for matching because AICNC codes such
+    as ``WJ-CBD`` are source identifiers, not necessarily inventory SKUs.  An
     item is accepted only when it is explicitly ignored or resolves to a
     unique enabled catalog product through the normal mapping rules.
     """
@@ -2514,7 +2451,7 @@ def resolve_inventory_items(
             source_code = _text(source_code)
             # Known source codes have a stable display name in the workflow.
             # Use that name only for catalog matching; keep the original
-            # source code on the resolution record and in persisted facts.
+            # source code only in the transient resolution record, not SKU facts.
             match_item_value = item
             display_name = (
                 HARDWARE_NAME_DISPLAY_NAMES.get(_normalize_name(item.name))
@@ -2566,19 +2503,14 @@ def resolve_inventory_items(
     return {"outbound": outbound, "ignored": ignored, "missing": missing, "accepted": accepted}
 
 
-def resolved_product_code(resolution: dict, index: int, fallback: str = "") -> str:
-    """Return the canonical inventory SKU for one input item.
-
-    The fallback keeps older test doubles and historical preview payloads
-    readable; all real Server writes go through ``accepted`` and therefore
-    persist the catalog SKU, not the source report code.
-    """
+def resolved_product_code(resolution: dict, index: int) -> str:
+    """Require one confirmed catalog SKU; never fall back to a report code."""
     accepted = resolution.get("accepted", []) if isinstance(resolution, dict) else []
-    if index < len(accepted):
+    if 0 <= index < len(accepted):
         codes = accepted[index].get("product_codes", []) or []
-        if len(codes) == 1:
+        if len(codes) == 1 and str(codes[0]).strip():
             return str(codes[0]).strip()
-    return str(fallback or "").strip()
+    raise RuleError("hardware_mapping_required", "写入前必须明确映射到唯一商品 SKU", item_index=index)
 
 
 def confirm_product_material_attributes(
@@ -2617,7 +2549,7 @@ def confirm_product_material_attributes(
         ).fetchone() is not None
         for table in (
             "material_items",
-            "manual_production_batch_materials",
+            "production_materials",
             "server_material_allocations",
         )
         if connection.execute(
@@ -2649,109 +2581,6 @@ def confirm_product_material_attributes(
            where code=?""",
         (kind, color, thickness, code),
     )
-
-
-def repair_hardware_inventory_codes(config: Config) -> dict:
-    """Backfill canonical SKUs and collapse historical rail-pair rows.
-
-    Older rows used ``product_code`` for the AICNC source code.  The repaired
-    shape is ``product_code=<inventory SKU>`` and ``source_code=<AICNC code>``;
-    raw display text remains in ``name``.  Rows that still cannot resolve are
-    left untouched and returned for explicit review.
-    """
-    ensure_schema(config.workflow_database)
-    connection = connect_database(config.workflow_database)
-    connection.row_factory = sqlite3.Row
-    unresolved: list[dict] = []
-    canonicalized = 0
-    rails_collapsed = 0
-    rail_rows_removed = 0
-    try:
-        rows = connection.execute(
-            "select id, order_id, factory_order, product_code, source_code, name, spec, quantity, unit "
-            "from hardware_items where active=1 order by id"
-        ).fetchall()
-        with ProductDatabase(bootstrap_product_database(config)) as catalog:
-            for row in rows:
-                current_code = _text(row["product_code"])
-                source_code = _text(row["source_code"]) or current_code
-                try:
-                    product = catalog.require_code(current_code)
-                except RuleError:
-                    product = None
-                if product is not None:
-                    if _text(row["source_code"]) != source_code:
-                        connection.execute(
-                            "update hardware_items set source_code=? where id=?",
-                            (source_code, row["id"]),
-                        )
-                    continue
-                item = TravelerItem(
-                    row=int(row["id"]),
-                    section="五金",
-                    name=_text(row["name"]) or current_code,
-                    quantity=float(row["quantity"] or 0),
-                    document_remark="",
-                )
-                resolution = resolve_inventory_items(config, [(item, source_code)])
-                codes = (resolution.get("accepted", [{}])[0].get("product_codes", [])
-                         if resolution.get("accepted") else [])
-                if len(codes) != 1:
-                    unresolved.append({
-                        "id": int(row["id"]),
-                        "order_id": _text(row["order_id"]),
-                        "factory_order": _text(row["factory_order"]),
-                        "name": _text(row["name"]),
-                        "source_code": source_code,
-                    })
-                    continue
-                connection.execute(
-                    "update hardware_items set product_code=?, source_code=? where id=?",
-                    (str(codes[0]), source_code, row["id"]),
-                )
-                canonicalized += 1
-
-        refreshed = connection.execute(
-            "select id, order_id, factory_order, source_path, name, product_code, source_code, quantity "
-            "from hardware_items where active=1 order by id"
-        ).fetchall()
-        groups: dict[tuple[str, str, str], list[sqlite3.Row]] = defaultdict(list)
-        for row in refreshed:
-            groups[(_text(row["order_id"]).upper(), _text(row["factory_order"]).upper(), _text(row["source_path"]))].append(row)
-        for group_rows in groups.values():
-            for left_name, right_name in (
-                ("LEFTRAIL", "RIGHTRAIL"),
-                ("LOWERLEFTRAIL", "LOWERRIGHTRAIL"),
-            ):
-                left = [row for row in group_rows if _normalize_name(row["name"]) == left_name]
-                right = [row for row in group_rows if _normalize_name(row["name"]) == right_name]
-                left_total = sum(float(row["quantity"] or 0) for row in left)
-                right_total = sum(float(row["quantity"] or 0) for row in right)
-                if not left or not right or left_total != right_total:
-                    continue
-                keep = left[0]
-                connection.execute(
-                    "update hardware_items set quantity=? where id=?",
-                    (left_total, keep["id"]),
-                )
-                delete_ids = [row["id"] for row in left[1:] + right]
-                if delete_ids:
-                    connection.executemany(
-                        "delete from hardware_items where id=?",
-                        ((row_id,) for row_id in delete_ids),
-                    )
-                    rail_rows_removed += len(delete_ids)
-                rails_collapsed += 1
-        connection.commit()
-    finally:
-        connection.close()
-    return {
-        "ok": True,
-        "canonicalized": canonicalized,
-        "rails_collapsed": rails_collapsed,
-        "rail_rows_removed": rail_rows_removed,
-        "unresolved": unresolved,
-    }
 
 
 def build_preview(
@@ -2840,7 +2669,7 @@ def set_ignored_mapping(config: Config, name: str, ignored: bool, reason: str = 
     mappings = InventoryMappings(config.workflow_database)
     if ignored:
         mappings.save_ignored(name, reason)
-        removed_database_rows = remove_ignored_hardware_records(config, [name])
+        removed_database_rows = 0  # Ignore rules apply to future imports, never confirmed SKU facts.
     else:
         mappings.remove_ignored(name)
         removed_database_rows = 0
@@ -2853,7 +2682,7 @@ def set_ignored_mapping(config: Config, name: str, ignored: bool, reason: str = 
 
 
 def update_ignored_mapping(config: Config, old_name: str, name: str, reason: str = "") -> dict:
-    """Rename or edit one global ignore entry and clean matching facts."""
+    """Rename or edit an import ignore rule without changing confirmed facts."""
     mappings = InventoryMappings(config.workflow_database)
     old_normalized = _normalize_name(old_name)
     new_normalized = _normalize_name(name)
@@ -2862,7 +2691,7 @@ def update_ignored_mapping(config: Config, old_name: str, name: str, reason: str
     if old_normalized != new_normalized:
         mappings.remove_ignored(old_name)
     mappings.save_ignored(name, reason)
-    removed_database_rows = remove_ignored_hardware_records(config, [name])
+    removed_database_rows = 0  # Ignore rules apply to future imports, never confirmed SKU facts.
     return {
         "ok": True,
         "old_name": old_name,
@@ -2978,7 +2807,8 @@ class InventoryOperationJournal:
             # A fresh in-memory batch number is generated for every safe retry.
             # It must not hide an already-confirmed external save for the same
             # order, factories, and material quantities.
-            identity_draft.pop("batch_number", None)
+            identity_draft.pop("batch_number", None)  # previously saved recovery payloads
+            identity_draft.pop("request_id", None)
             identity_draft.pop("production_time", None)
         identity_payload_json = self._canonical(identity_payload)
         payload_fingerprint = hashlib.sha256(identity_payload_json.encode("utf-8")).hexdigest()
@@ -4040,9 +3870,16 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
             selected_factory_orders: Iterable[str] | None = None,
             order_id: str = "",
             room_material: bool = False,
-            production_batch_number: str = "",
+            production_request_id: str = "",
             production_materials: Iterable[dict] | None = None,
             shipment_only: bool = False) -> dict:
+    if action == "outbound" and order_id.strip():
+        from .production import assert_order_active
+        connection = connect_database(config.workflow_database)
+        try:
+            assert_order_active(connection, order_id)
+        finally:
+            connection.close()
     operation_started = time.perf_counter()
     progress(f"库存系统：开始准备 {action} 操作")
     current_production_materials = (
@@ -4097,7 +3934,7 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
             else:
                 preview = build_database_preview(
                     config, order_id, selected_factory_orders,
-                    production_batch_number=production_batch_number,
+                    production_request_id=production_request_id,
                     production_materials=inventory_production_materials,
                     shipment_only=shipment_only,
                 )
@@ -4110,6 +3947,12 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                 config.workflow_database,
                 selected_document_remarks=selected_document_remarks,
             )
+        from .production import assert_order_active
+        connection = connect_database(config.workflow_database)
+        try:
+            assert_order_active(connection, preview.traveler.order_id)
+        finally:
+            connection.close()
         if not preview.ready:
             names = sorted({
                 str(item.get("name", "")).strip()
@@ -4198,7 +4041,7 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
 
         if current_production_materials is not None:
             production_draft = {
-                "batch_number": production_batch_number,
+                "request_id": production_request_id,
                 "order_id": preview.traveler.order_id,
                 "selected_factory_orders": list(preview.selected_factory_orders),
                 "materials": current_production_materials,
@@ -4539,17 +4382,11 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                 ) from exc
             if production_draft is not None:
                 response["production"] = {
-                    "batch_number": production_draft["batch_number"],
+                    "request_id": production_draft.get("request_id", ""),
                     "order_id": production_draft["order_id"],
                     "factory_orders": sorted(set(production_draft["selected_factory_orders"])),
                     "status": "completed",
                 }
-                response["productionCompleted"] = True
-            elif production_batch_number:
-                # Compatibility for old prepared batches created before the
-                # inventory-first flow was introduced.
-                from .production import complete_production_batch
-                response["production"] = complete_production_batch(config, production_batch_number)
                 response["productionCompleted"] = True
             response["syncRecorded"] = True
             try:
@@ -4663,7 +4500,7 @@ def inventory_main(argv: list[str] | None = None) -> int:
     parser.add_argument("action", choices=(
         "list", "list-names", "preview", "order-preview", "get-outbound-scope", "import-products", "preflight", "outbound",
         "find-outbound", "reconcile-folder", "ignore-item", "unignore-item",
-        "search-products", "set-mapping", "update-mapping", "remove-mapping", "list-mappings", "update-ignore", "set-outbound-scope", "update-products", "stock-check", "repair-hardware", "open-chrome", "close-chrome",
+        "search-products", "set-mapping", "update-mapping", "remove-mapping", "list-mappings", "update-ignore", "set-outbound-scope", "update-products", "stock-check", "open-chrome", "close-chrome",
     ))
     parser.add_argument("--traveler", type=Path)
     parser.add_argument("--order-id", default="")
@@ -4689,7 +4526,7 @@ def inventory_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--display-name", default="")
     parser.add_argument("--include-hardware", action="store_true")
     parser.add_argument("--room-material", action="store_true")
-    parser.add_argument("--production-batch", default="")
+    parser.add_argument("--production-request", default="")
     parser.add_argument("--production-materials-json", default="")
     parser.add_argument("--shipment-only", action="store_true")
     args = parser.parse_args(argv)
@@ -4717,7 +4554,7 @@ def inventory_main(argv: list[str] | None = None) -> int:
                 raise RuleError("inventory_argument", "order-preview 必须提供 --order-id")
             result = build_database_preview(
                 config, args.order_id, args.factory_order,
-                production_batch_number=args.production_batch,
+                production_request_id=args.production_request,
                 shipment_only=args.shipment_only,
             ).payload()
         elif args.action == "get-outbound-scope":
@@ -4751,8 +4588,6 @@ def inventory_main(argv: list[str] | None = None) -> int:
             if not args.traveler:
                 raise RuleError("inventory_argument", "stock-check 必须提供 --traveler")
             result = check_stock(config, args.traveler, args.include_hardware)
-        elif args.action == "repair-hardware":
-            result = repair_hardware_inventory_codes(config)
         elif args.action == "find-outbound":
             if not args.order_name:
                 raise RuleError("inventory_argument", "查询出库单必须提供 --order-name")
@@ -4815,7 +4650,7 @@ def inventory_main(argv: list[str] | None = None) -> int:
                 selected_factory_orders=args.factory_order,
                 order_id=args.order_id,
                 room_material=args.room_material,
-                production_batch_number=args.production_batch,
+                production_request_id=args.production_request,
                 production_materials=production_materials,
                 shipment_only=args.shipment_only,
             )

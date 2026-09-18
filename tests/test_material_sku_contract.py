@@ -229,14 +229,14 @@ class MaterialSkuContractTests(unittest.TestCase):
                 )
 
             connection.execute(
-                """insert into manual_production_batches(
-                       batch_number, order_id, production_time, source, status,
+                """insert into production_records(
+                       production_time, source, status,
                        created_at, updated_at
-                   ) values('B-HISTORY','CS901','','manual','completed','now','now')"""
+                   ) values('','manual','completed','now','now')"""
             )
             batch_id = connection.execute("select last_insert_rowid()").fetchone()[0]
             connection.execute(
-                """insert into manual_production_batch_materials(
+                """insert into production_materials(
                        batch_id, order_id, product_code, quantity
                    ) values(?,?,?,?)""",
                 (batch_id, "CS901", "M-PANEL-A", 1),
@@ -359,6 +359,7 @@ class MaterialSkuContractTests(unittest.TestCase):
                     "source_order_id": "CS901",
                     "source_path": source_path,
                     "product_code": "M1042",
+                    "source_quantity": 2,
                     "material_type": preview_attributes[0],
                     "color": preview_attributes[1],
                     "thickness": preview_attributes[2],
@@ -496,7 +497,7 @@ class MaterialSkuContractTests(unittest.TestCase):
         self._import_standard_catalog()
         tables = {
             "material_items",
-            "manual_production_batch_materials",
+            "production_materials",
             "server_material_allocations",
             "hardware_items",
             "inventory_resolution_rules",
@@ -515,7 +516,7 @@ class MaterialSkuContractTests(unittest.TestCase):
                 <= {row[1] for row in connection.execute("pragma table_info(products)")}
             )
             required_quantity_column = {
-                "manual_production_batch_materials": "quantity",
+                "production_materials": "quantity",
                 "server_material_allocations": "allocated_quantity",
             }
             for table, quantity_column in required_quantity_column.items():
@@ -537,10 +538,10 @@ class MaterialSkuContractTests(unittest.TestCase):
                 self.assertEqual(product_key[0][6].upper(), "RESTRICT", table)
 
             connection.execute(
-                """insert into manual_production_batches(
-                       batch_number, order_id, production_time, source, status,
+                """insert into production_records(
+                       production_time, source, status,
                        created_at, updated_at
-                   ) values('B-SKU-FK','CS901','','manual','completed','now','now')"""
+                   ) values('','manual','completed','now','now')"""
             )
             batch_id = connection.execute("select last_insert_rowid()").fetchone()[0]
             invalid_statements = [
@@ -552,7 +553,7 @@ class MaterialSkuContractTests(unittest.TestCase):
                     (),
                 ),
                 (
-                    """insert into manual_production_batch_materials(
+                    """insert into production_materials(
                            batch_id, order_id, product_code, quantity
                        ) values(?,?,?,?)""",
                     (batch_id, "CS901", "M-MISSING", 1),
@@ -567,9 +568,9 @@ class MaterialSkuContractTests(unittest.TestCase):
                 ),
                 (
                     """insert into hardware_items(
-                           order_id, factory_order, product_code, source_code, name,
+                           order_id, factory_order, product_code,
                            quantity, updated_at
-                       ) values('CS901','F901','M-MISSING','RAW','Raw fitting',1,'now')""",
+                       ) values('CS901','F901','M-MISSING',1,'now')""",
                     (),
                 ),
                 (
@@ -626,10 +627,7 @@ class MaterialSkuContractTests(unittest.TestCase):
                 "insert into orders(order_id, order_type, updated_at) values('CS990','cutToSize','now')"
             )
             store.connection.execute(
-                """insert into factory_orders(
-                       factory_order, order_id, factory_name, optimized,
-                       outbound_status, updated_at
-                   ) values('F990','CS990','CS990-KITCHEN',1,'未查询','now')"""
+                "insert into factory_orders(factory_order,order_id,factory_name,updated_at,stage) select v.factory_order,v.order_id,v.factory_name,v.updated_at,case when v.outbound_status='已出库' then '已出货' when v.optimized then '已优化' else '已拆单' end from (select 'F990' as factory_order,'CS990' as order_id,'CS990-KITCHEN' as factory_name,1 as optimized,'未查询' as outbound_status,'now' as updated_at) v"
             )
             store.commit()
         finally:
@@ -683,13 +681,13 @@ class MaterialSkuContractTests(unittest.TestCase):
             columns = {
                 row[1]
                 for row in connection.execute(
-                    "pragma table_info(manual_production_batch_materials)"
+                    "pragma table_info(production_materials)"
                 )
             }
             self.assertEqual(columns, {"batch_id", "order_id", "product_code", "quantity"})
             self.assertEqual(
                 connection.execute(
-                    "select count(*) from manual_production_batch_materials"
+                    "select count(*) from production_materials"
                 ).fetchone()[0],
                 0,
             )
@@ -790,7 +788,7 @@ class MaterialSkuContractTests(unittest.TestCase):
                 ).fetchall(),
                 "production": connection.execute(
                     """select batch_id, order_id, product_code, quantity
-                       from manual_production_batch_materials
+                       from production_materials
                        order by batch_id, product_code"""
                 ).fetchall(),
                 "foreign_key_check": connection.execute(

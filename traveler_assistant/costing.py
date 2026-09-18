@@ -215,13 +215,13 @@ def calculate_order_cost(config: Config, order_id: str) -> dict:
         ).fetchone() is not None
         hardware_rows = connection.execute(
             """
-            select factory_order, product_code, name, spec, quantity, unit, source_path
-            from hardware_items
-            where order_id=? and active=1
+            select h.factory_order, h.product_code, p.name, p.spec, h.quantity, p.unit, h.source_path
+            from hardware_items h join products p on p.code=h.product_code
+            where h.order_id=?
               and exists (
                   select 1 from factory_orders
-                  where factory_orders.order_id=hardware_items.order_id
-                    and factory_orders.factory_order=hardware_items.factory_order
+                  where factory_orders.order_id=h.order_id
+                    and factory_orders.factory_order=h.factory_order
                     and factory_orders.aimes_status='active'
               )
             order by factory_order, product_code, name

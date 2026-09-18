@@ -410,7 +410,7 @@ struct AssistantStockComparisonView: View {
                     .fontWeight(.semibold)
                     .foregroundColor(shortages == 0 ? AppPalette.success : AppPalette.warning)
             }
-            Text(URL(fileURLWithPath: traveler).lastPathComponent)
+            Text(displayPathName(traveler))
                 .font(.caption).foregroundColor(.secondary).lineLimit(1)
 
             HStack(spacing: 10) {
@@ -696,10 +696,16 @@ private enum AssistantDashboardTypography {
     static let stageEmerald = Color(red: 0.08, green: 0.68, blue: 0.38)
 }
 
-private enum AssistantProgressSegmentState {
+enum AssistantProgressSegmentState: Equatable {
     case completed
     case active
     case pending
+}
+
+// Each phase reflects its own facts: factory orders can advance in separate batches.
+func assistantProgressSegmentState(completedCount: Int, totalCount: Int) -> AssistantProgressSegmentState {
+    guard totalCount > 0, completedCount > 0 else { return .pending }
+    return completedCount >= totalCount ? .completed : .active
 }
 
 struct AssistantView: View {
@@ -945,14 +951,6 @@ struct AssistantView: View {
             ("生产", item.producedCount, item.factoryCount, assistantProgressValue(item.productionProgress), "scissors"),
             ("出货", item.shippedCount, item.factoryCount, assistantProgressValue(item.outboundProgress), "truck.box.fill"),
         ]
-        let isComplete: (Int, Int) -> Bool = { completedCount, totalCount in
-            totalCount > 0 && completedCount >= totalCount
-        }
-        let allStagesComplete = stages.allSatisfy { isComplete($0.completedCount, $0.totalCount) }
-        let firstIncompleteIndex = stages.firstIndex {
-            !isComplete($0.completedCount, $0.totalCount)
-        } ?? stages.count
-
         return GeometryReader { geometry in
             let columnWidth = geometry.size.width / CGFloat(stages.count)
             let iconDiameter: CGFloat = 64
@@ -970,9 +968,9 @@ struct AssistantView: View {
                         : columnWidth * (CGFloat(index - 1) + 0.5) + CGFloat(index) * stageStep + iconRadius + 10
                     let endX = index == 0 ? baseCenterX - iconRadius - 10 : centerX - iconRadius - 10
                     let segmentMidpoint = (startX + endX) / 2
-                    let segmentState: AssistantProgressSegmentState = allStagesComplete || index < firstIncompleteIndex
-                        ? .completed
-                        : (index == firstIncompleteIndex ? .active : .pending)
+                    let segmentState = assistantProgressSegmentState(
+                        completedCount: stage.completedCount, totalCount: stage.totalCount
+                    )
                     let connector = Path { path in
                         path.move(to: CGPoint(x: startX, y: centerY))
                         path.addLine(to: CGPoint(x: endX, y: centerY))
@@ -1035,10 +1033,12 @@ struct AssistantView: View {
                     HStack(spacing: 0) {
                         ForEach(Array(stages.enumerated()), id: \.offset) { index, stage in
                             let stageShift = CGFloat(index + 1) * stageStep
-                            let completed = allStagesComplete || index < firstIncompleteIndex
+                            let state = assistantProgressSegmentState(
+                                completedCount: stage.completedCount, totalCount: stage.totalCount
+                            )
                             assistantStageIcon(
-                                completed: completed,
-                                current: !completed && index == firstIncompleteIndex,
+                                completed: state == .completed,
+                                current: state == .active,
                                 fallbackSymbol: stage.fallbackSymbol
                             )
                             .frame(width: columnWidth, height: 100, alignment: .center)
@@ -1058,7 +1058,7 @@ struct AssistantView: View {
         current: Bool,
         fallbackSymbol: String
     ) -> some View {
-        let iconColor = completed ? AssistantDashboardTypography.stageEmerald : Color.secondary.opacity(0.62)
+        let iconColor = completed || current ? AssistantDashboardTypography.stageEmerald : Color.secondary.opacity(0.62)
         return ZStack {
             Circle()
                 .fill(
@@ -1127,7 +1127,7 @@ struct AssistantView: View {
 
     private var ongoingOrders: [OrderDashboardItem] {
         effectiveOrders
-            .filter { $0.stage != "已出货" }
+            .filter { !orderDashboardIsCompleted($0.stage) }
             .sorted { ($0.latestSplitTime, $0.orderId) > ($1.latestSplitTime, $1.orderId) }
     }
 

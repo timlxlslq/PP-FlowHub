@@ -1,5 +1,6 @@
 """Server discovery must not be mistaken for a committed material write."""
 import json
+import copy
 import os
 import sqlite3
 import tempfile
@@ -12,6 +13,7 @@ from traveler_assistant.order_index import (
     OrderIndexStore, preview_server_changes, scan_server_changes,
     confirm_server_material_preview_memory, confirm_server_preview_memory,
     list_order_index,
+    acknowledge_server_preview_memory,
 )
 from tests.test_order_workflow import make_materials, make_board, make_product_catalog
 
@@ -45,14 +47,110 @@ class ConfirmedMaterialOptimizationTests(unittest.TestCase):
     def state(self):
         with sqlite3.connect(self.config.workflow_database) as c:
             return {
-                'factories': c.execute('select factory_order,optimized,optimization_source_path,optimization_first_completed_at,optimization_latest_completed_at from factory_orders order by factory_order').fetchall(),
+                'factories': c.execute("select factory_order,(stage<>'已拆单') as optimized,optimization_source_path,optimization_first_completed_at,optimization_latest_completed_at from factory_orders order by factory_order").fetchall(),
                 **{t: c.execute('select * from ' + t).fetchall() for t in (
                     'material_items', 'hardware_items', 'optimization_artifacts', 'server_scan_xml_state',
-                    'manual_production_batches', 'outbound_documents')},
+                    'production_records', 'outbound_documents')},
             }
 
     def preview(self):
         return preview_server_changes(self.config, [self.folder], include_hardware=False)['server_write_preview']
+
+    def unchanged_preview(self):
+        confirm_server_material_preview_memory(self.config, self.preview(), confirm_write=True)
+        modified = self.xml.stat().st_mtime + 10
+        os.utime(self.xml, (modified, modified))
+        self.assertTrue(scan_server_changes(self.config)['server']['changed'])
+        payload = preview_server_changes(self.config, [self.folder], include_hardware=True)['server_write_preview']
+        self.assertTrue(payload['can_acknowledge_no_changes'])
+        return payload
+
+    def all_business_tables(self):
+        with sqlite3.connect(self.config.workflow_database) as connection:
+            return {table: connection.execute('select * from ' + table).fetchall() for table in (
+                'orders', 'factory_orders', 'material_items', 'hardware_items',
+                'optimization_artifacts', 'source_files', 'hardware_source_decisions',
+                'hardware_source_versions', 'server_material_allocations',
+                'production_records', 'outbound_documents')}
+
+    def test_acknowledge_updates_only_preview_baseline_and_future_changes_still_notify(self):
+        payload = self.unchanged_preview()
+        before = self.all_business_tables()
+        for _ in range(2):
+            result = acknowledge_server_preview_memory(self.config, payload, confirm_write=True)
+            self.assertTrue(result['server_no_changes_confirmed'])
+            self.assertEqual(before, self.all_business_tables())
+        with patch('traveler_assistant.order_index._now', return_value='2099-01-01T00:00:00'):
+            self.assertFalse(scan_server_changes(self.config)['server']['changed'])
+        # A post-preview change must not be silently accepted, even on retry.
+        modified = self.xml.stat().st_mtime + 10
+        os.utime(self.xml, (modified, modified))
+        with sqlite3.connect(self.config.workflow_database) as connection:
+            connection.execute("update orders set updated_at='2099-01-01' where order_id='PP9999'")
+        before = self.all_business_tables()
+        acknowledge_server_preview_memory(self.config, payload, confirm_write=True)
+        self.assertEqual(before, self.all_business_tables())
+        self.assertTrue(scan_server_changes(self.config)['server']['changed'])
+
+    def test_acknowledge_failure_rolls_back_and_keeps_folder_pending(self):
+        payload = self.unchanged_preview()
+        before = self.state()
+        original = OrderIndexStore.save_server_scan_xml_baseline
+        def fail_after_write(store, *args, **kwargs):
+            original(store, *args, **kwargs)
+            raise RuntimeError('baseline write failed')
+        with patch.object(OrderIndexStore, 'save_server_scan_xml_baseline', fail_after_write):
+            with self.assertRaisesRegex(RuntimeError, 'baseline write failed'):
+                acknowledge_server_preview_memory(self.config, payload, confirm_write=True)
+        self.assertEqual(before, self.state())
+        self.assertTrue(scan_server_changes(self.config)['server']['changed'])
+
+    def test_acknowledge_partial_optimization_does_not_optimize_unrepresented_factories(self):
+        self.unchanged_preview()
+        self.add_factory('F200', 'OFFICE')
+        payload = preview_server_changes(self.config, [self.folder], include_hardware=True)['server_write_preview']
+        self.assertTrue(payload['can_acknowledge_no_changes'])
+        before = self.all_business_tables()
+        acknowledge_server_preview_memory(self.config, payload, confirm_write=True)
+        self.assertEqual(before, self.all_business_tables())
+        self.assertEqual({row[0]: row[1] for row in self.state()['factories']}, {'F100': 1, 'F200': 0})
+        self.assertFalse(scan_server_changes(self.config)['server']['changed'])
+        # New optimization work still reopens the folder when its XML appears.
+        new_xml = self.folder / 'Office' / 'New Nesting' / 'Optimize file' / 'layout file' / 'nesting_result.xml'
+        new_xml.parent.mkdir(parents=True)
+        new_xml.write_text('<Nesting><BoardControl OrderID="F200" /></Nesting>')
+        self.assertTrue(scan_server_changes(self.config)['server']['changed'])
+
+    def test_acknowledge_rejects_incomplete_changed_and_stale_previews(self):
+        payload = self.unchanged_preview()
+        before = self.state()
+        with self.assertRaises(RuleError):
+            acknowledge_server_preview_memory(self.config, payload)
+        variants = []
+        for key in ('material_changes', 'hardware_changes', 'factories'):
+            changed = copy.deepcopy(payload)
+            changed['orders'][0][key] = [{'quantity': 1}]
+            changed['has_business_changes'] = False  # Summary cannot hide a real diff.
+            variants.append(changed)
+        for key, value in (
+            ('include_hardware', False), ('validation_recomputed', False),
+            ('hardware_mapping_requirements', [{'name': 'Hinge'}]),
+            ('hardware_source_decisions', {'F100': {'new': 'source'}}),
+            ('orders', []), ('source_folders', []),
+        ):
+            variants.append(dict(payload, **{key: value}))
+        invalid = copy.deepcopy(payload)
+        invalid['orders'][0]['validation_status'] = '数据异常'
+        variants.append(invalid)
+        for variant in variants:
+            with self.subTest(variant=variant.keys()):
+                with self.assertRaises(RuleError):
+                    acknowledge_server_preview_memory(self.config, variant, confirm_write=True)
+                self.assertEqual(before, self.state())
+        with sqlite3.connect(self.config.workflow_database) as connection:
+            connection.execute("update material_items set quantity=quantity+1 where order_id='PP9999'")
+        with self.assertRaisesRegex(RuleError, '本地订单事实已变化'):
+            acknowledge_server_preview_memory(self.config, payload, confirm_write=True)
 
     def test_repeat_scan_and_cancel_preview_leave_no_optimization_information(self):
         before = self.state()
@@ -87,7 +185,7 @@ class ConfirmedMaterialOptimizationTests(unittest.TestCase):
         confirm_server_material_preview_memory(self.config, self.preview(), confirm_write=True)
         self.assertEqual(len(committed['material_items']), len(self.state()['material_items']))
         self.assertEqual(list_order_index(self.config)['orders'][0]['stage'], '已优化')
-        self.assertEqual(self.state()['manual_production_batches'], [])
+        self.assertEqual(self.state()['production_records'], [])
         self.assertEqual(self.state()['outbound_documents'], [])
 
     def test_material_confirmation_without_xml_can_complete_optimization(self):
@@ -129,13 +227,24 @@ class ConfirmedMaterialOptimizationTests(unittest.TestCase):
         changes = scan_server_changes(self.config)['server']['changes']
         self.assertTrue(any(c['path'] == str(self.xml) and c['change_type'] == 'modified' for c in changes))
 
+    def test_missing_material_workbook_preserves_confirmed_facts(self):
+        from traveler_assistant.order_index import sync_order_index
+        confirm_server_material_preview_memory(self.config, self.preview(), confirm_write=True)
+        before = self.state()['material_items']
+        self.assertTrue(before)
+        (self.folder / 'PP9999 materials.xlsx').unlink()
+        for _ in range(2):
+            with patch('traveler_assistant.order_index.load_aimes_order_cache', return_value=[]):
+                sync_order_index(self.config, include_hardware=False)
+            self.assertEqual(self.state()['material_items'], before)
+
     def test_factory_confirmation_cannot_claim_optimization_without_material_rows(self):
         payload = self.preview()
         payload['write_records']['material_items'] = []
         before = self.state()
         with self.assertRaises(RuleError) as error:
             confirm_server_preview_memory(self.config, payload, 'PP9999', 'F100', confirm_write=True)
-        self.assertEqual(error.exception.code, 'missing_confirmed_material')
+        self.assertEqual(error.exception.code, 'material_allocation')
         self.assertEqual(before, self.state())
 
 

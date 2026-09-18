@@ -252,7 +252,7 @@ func dashboardOrderRows(from object: [String: Any]) -> [[String: Any]]? {
     object["orders"] as? [[String: Any]]
 }
 
-struct ServerChangePreview: Identifiable {
+struct ServerChangePreview: Identifiable, Equatable {
     let id: String
     let changeType: String
     let kind: String
@@ -534,7 +534,6 @@ struct ServerWriteFactoryPreview: Identifiable {
     let ownershipStatus: String
     let reportState: String
     let outboundDocument: String
-    let batchID: String
     let hardware: [ServerWriteHardwarePreview]
     let hasExistingHardware: Bool
     let changeType: String
@@ -551,7 +550,6 @@ struct ServerWriteFactoryPreview: Identifiable {
         self.ownershipStatus = row["ownership_status"] as? String ?? ""
         self.reportState = row["report_state"] as? String ?? ""
         self.outboundDocument = row["outbound_document"] as? String ?? ""
-        self.batchID = row["production_batch_id"] as? String ?? (row["production_batch_id"] as? NSNumber)?.stringValue ?? ""
         self.hardware = (row["hardware"] as? [[String: Any]] ?? []).enumerated().compactMap {
             ServerWriteHardwarePreview(row: $0.element, index: $0.offset)
         }
@@ -639,6 +637,13 @@ struct ServerWritePreview {
     let orders: [ServerWriteOrderPreview]
     let hardwareMappingRequirements: [ServerHardwareMappingRequirement]
 
+    var canAcknowledgeNoChanges: Bool {
+        payload["can_acknowledge_no_changes"] as? Bool == true &&
+        !orders.isEmpty && !sourceFolders.isEmpty && hardwareMappingRequirements.isEmpty &&
+        orders.allSatisfy { $0.validationStatus == "正常" && $0.materialChanges.isEmpty &&
+            $0.factories.isEmpty && $0.hardwareChanges.isEmpty }
+    }
+
     init(payload: [String: Any], sourceFolders: [String], materials: [ServerWriteMaterialPreview], orders: [ServerWriteOrderPreview], hardwareMappingRequirements: [ServerHardwareMappingRequirement] = []) {
         self.payload = payload
         self.sourceFolders = sourceFolders
@@ -697,9 +702,18 @@ struct PendingCenterItem: Identifiable {
     let aimesFormatWarnings: [AimesReviewItem]
 }
 
+// Display-only path parsing must never query SMB/file attributes on the UI thread.
+func displayPathName(_ path: String) -> String {
+    (path as NSString).lastPathComponent
+}
+
+func displayParentPath(_ path: String) -> String {
+    (path as NSString).deletingLastPathComponent
+}
+
 func serverFolderChangeGroups(_ changes: [ServerChangePreview]) -> [ServerFolderChangeGroup] {
     let grouped = Dictionary(grouping: changes) { change in
-        change.sourceFolder.isEmpty ? URL(fileURLWithPath: change.path).deletingLastPathComponent().path : change.sourceFolder
+        change.sourceFolder.isEmpty ? displayParentPath(change.path) : change.sourceFolder
     }
     return grouped.map { folderPath, rows in
         let sorted = rows.sorted { lhs, rhs in lhs.path.localizedStandardCompare(rhs.path) == .orderedAscending }
@@ -707,7 +721,7 @@ func serverFolderChangeGroups(_ changes: [ServerChangePreview]) -> [ServerFolder
         return ServerFolderChangeGroup(
             id: folderPath,
             folderPath: folderPath,
-            folderName: URL(fileURLWithPath: folderPath).lastPathComponent,
+            folderName: displayPathName(folderPath),
             orderId: orderID,
             changes: sorted,
             manualOnly: sorted.allSatisfy(\.manualOnly)
@@ -776,8 +790,8 @@ func buildPendingCenterItems(
     }
 
     for issue in currentIssues where !attachedIssueIDs.contains(issue.id) {
-        let location = issue.path.isEmpty ? "" : URL(fileURLWithPath: issue.path).deletingLastPathComponent().path
-        let folderName = location.isEmpty ? "" : URL(fileURLWithPath: location).lastPathComponent
+        let location = issue.path.isEmpty ? "" : displayParentPath(issue.path)
+        let folderName = location.isEmpty ? "" : displayPathName(location)
         result.append(PendingCenterItem(
             id: "issue:\(issue.id)",
             title: issue.factoryOrder.isEmpty ? (issue.orderId.isEmpty ? "当前问题" : issue.orderId) : issue.factoryOrder,
@@ -981,7 +995,7 @@ func dashboardActivitySteps(
         }
         var detail = businessFriendlyMessage(rawMessage, operation: "处理订单数据")
         if !path.isEmpty {
-            let fileName = URL(fileURLWithPath: path).lastPathComponent
+            let fileName = displayPathName(path)
             if !fileName.isEmpty && !detail.contains(fileName) {
                 detail += "（文件：\(fileName)）"
             }
@@ -1017,7 +1031,7 @@ func serverChangePreviews(_ rows: [[String: Any]]) -> [ServerChangePreview] {
             path: path,
             oldPath: row["old_path"] as? String ?? "",
             message: businessFriendlyMessage(
-                row["message"] as? String ?? URL(fileURLWithPath: path).lastPathComponent,
+                row["message"] as? String ?? displayPathName(path),
                 operation: "扫描 Server"
             ),
             manualOnly: row["manual_only"] as? Bool ?? false,
@@ -1042,7 +1056,7 @@ func serverChangesExcludingFolders(
     let folders = folderPaths.filter { !$0.isEmpty }
     return changes.filter { change in
         let sourceFolder = change.sourceFolder.isEmpty
-            ? URL(fileURLWithPath: change.path).deletingLastPathComponent().path
+            ? displayParentPath(change.path)
             : change.sourceFolder
         return !folders.contains { folderPath in
             let prefix = folderPath.hasSuffix("/") ? folderPath : folderPath + "/"
@@ -1320,7 +1334,7 @@ struct InventoryManualMapping: Identifiable {
     let displayName: String
 }
 
-struct InventoryStep: Identifiable {
+struct InventoryStep: Identifiable, Equatable {
     let id: UUID
     let time: String
     let title: String
@@ -1799,6 +1813,7 @@ final class AppModel: ObservableObject {
     private var hardwareSourceIncludeHardware = true
     private var resumeAfterHardwareSourceDismissal = false
     @Published var serverWritePreview: ServerWritePreview?
+    @Published var serverWritePreviewNeedsRefresh = false
     @Published var serverHardwareMappingRequirements: [ServerHardwareMappingRequirement] = []
     @Published var showServerWriteConfirmation = false
     @Published var serverWriteConfirmationNotice = ""
@@ -1927,7 +1942,7 @@ final class AppModel: ObservableObject {
             let groups = serverFolderChangeGroups(pendingServerChanges)
             return ["待处理 Server 变化 \(groups.count) 个文件夹："] + groups.map {
                 let handling = $0.manualOnly ? "（临时文件夹）" : ""
-                let names = $0.changes.map { URL(fileURLWithPath: $0.path).lastPathComponent }.joined(separator: "、")
+                let names = $0.changes.map { displayPathName($0.path) }.joined(separator: "、")
                 return "\($0.folderName)\(handling)：\(names)"
             }
         default:
@@ -2027,6 +2042,11 @@ final class AppModel: ObservableObject {
 
     var orderPreviewReady: Bool {
         !selectedOrderId.isEmpty && !orderMaterials.isEmpty
+    }
+
+    var canCalculateOrderCost: Bool {
+        !selectedOrderId.isEmpty && !orderRunning && !orderDetailWaiting
+            && orderMaterials.contains { $0.quantity > 0 }
     }
 
     var orderCanGenerateTraveler: Bool {
@@ -2546,6 +2566,7 @@ final class AppModel: ObservableObject {
             return
         }
         serverWritePreview = preview
+        serverWritePreviewNeedsRefresh = false
         serverHardwareMappingRequirements = preview.hardwareMappingRequirements
         serverWriteConfirmationNotice = ""
         serverWriteConfirmationNoticeIsError = false
@@ -2673,6 +2694,10 @@ final class AppModel: ObservableObject {
             label: label,
             startedAtUptime: ProcessInfo.processInfo.systemUptime
         )
+    }
+
+    var dashboardOperationStartUptimes: [String: TimeInterval] {
+        dashboardOperationStartedAt.mapValues(\.startedAtUptime)
     }
 
     func dashboardElapsedTime(_ source: String) -> TimeInterval? {
@@ -3207,8 +3232,45 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func acknowledgeServerPreview() {
+        guard let preview = serverWritePreview, preview.canAcknowledgeNoChanges,
+              !orderRunning, !inventoryRunning, !serverWritePreviewNeedsRefresh,
+              !serverWriteConfirmationFinished else { return }
+        guard let input = try? JSONSerialization.data(withJSONObject: preview.payload) else {
+            serverWriteConfirmationNotice = "预览数据无法编码，请重新读取文件夹"
+            serverWriteConfirmationNoticeIsError = true
+            return
+        }
+        beginDashboardOperation("server", label: "确认 Server 无变化")
+        dashboardServerStatus = "正在更新文件夹监控状态…"
+        runOrder(["acknowledge-server-preview-memory", "--confirm-write"], input: input,
+                 failureStatus: "更新文件夹监控状态失败", onFailure: {
+            self.finishDashboardOperation("server")
+            self.serverWriteConfirmationNotice = businessFriendlyMessage(self.orderError, operation: "确认无变化")
+            self.serverWriteConfirmationNoticeIsError = true
+        }) { object in
+            self.finishDashboardOperation("server", using: object)
+            guard object["server_no_changes_confirmed"] as? Bool == true else {
+                self.serverWriteConfirmationNotice = "未收到监控状态更新成功的结果，请重新预览"
+                self.serverWriteConfirmationNoticeIsError = true
+                return
+            }
+            self.serverWriteConfirmationFinished = true
+            self.serverWriteConfirmationNoticeIsError = false
+            self.showServerWriteConfirmation = false
+            self.serverWritePreview = nil
+            self.dashboardServerStatus = "✅ 已确认无变化，文件夹监控状态已更新"
+            self.dashboardActivity.insert(InventoryStep(
+                time: dashboardClockTime(), title: "Server 无变化确认完成",
+                detail: "已更新预览版本的监控基线；材料、五金和订单事实未修改",
+                state: "success", paths: preview.sourceFolders
+            ), at: 0)
+            self.refreshDashboardAfterServerWrite(processedFolders: preview.sourceFolders)
+        }
+    }
+
     func confirmServerMaterialPreview(skipHardwareOrderIDs: Set<String> = []) {
-        guard let preview = serverWritePreview, !orderRunning else { return }
+        guard let preview = serverWritePreview, !orderRunning, !inventoryRunning, !serverWritePreviewNeedsRefresh else { return }
         beginDashboardOperation("server", label: "确认写入 Server 材料")
         dashboardServerStatus = "正在写入 Server 订单材料和五金…"
         dashboardSyncStatus = dashboardServerStatus
@@ -3359,7 +3421,7 @@ final class AppModel: ObservableObject {
         guard let referenceData = try? JSONSerialization.data(withJSONObject: referenceOrderIDs),
               let referenceJSON = String(data: referenceData, encoding: .utf8) else { return }
         beginDashboardOperation("server", label: "登记临时文件夹人工处理")
-        dashboardServerStatus = "正在登记人工处理：\(URL(fileURLWithPath: folderPath).lastPathComponent)…"
+        dashboardServerStatus = "正在登记人工处理：\(displayPathName(folderPath))…"
         dashboardSyncStatus = dashboardServerStatus
         runOrder(
             ["mark-temporary-manual", "--folder", folderPath,
@@ -3405,7 +3467,7 @@ final class AppModel: ObservableObject {
             self.selectedInventoryPaths = self.selectedInventoryPaths.intersection(Set(self.inventoryTravelers.map(\.id)))
             let errors = object["errors"] as? [[String: Any]] ?? []
             self.inventoryErrors = errors.map {
-                let file = URL(fileURLWithPath: $0["path"] as? String ?? "").lastPathComponent
+                let file = displayPathName($0["path"] as? String ?? "")
                 let message = businessFriendlyMessage(
                     $0["message"] as? String ?? "Traveler 格式异常，请检查文件内容后重试。",
                     operation: "读取 Traveler"
@@ -3813,7 +3875,7 @@ final class AppModel: ObservableObject {
         for factoryOrder in selectedInventoryFactoryOrders.sorted() {
             arguments += ["--factory-order", factoryOrder]
         }
-        if !productionBatchNumber.isEmpty { arguments += ["--production-batch", productionBatchNumber] }
+        if !productionBatchNumber.isEmpty { arguments += ["--production-request", productionBatchNumber] }
         if shipmentOnly { arguments += ["--shipment-only"] }
         runInventory(arguments) { object in
             self.applyInventoryPreviewObject(object, accumulated: [])
@@ -3879,7 +3941,7 @@ final class AppModel: ObservableObject {
         runOrder(arguments, onFailure: {
             completion(nil, self.orderError.isEmpty ? "生产准备校验未通过，请检查材料数量后重试" : self.orderError)
         }) { object in
-            completion(object["batch_number"] as? String, nil)
+            completion(object["request_id"] as? String, nil)
         }
     }
 
@@ -3887,7 +3949,7 @@ final class AppModel: ObservableObject {
         orderID: String,
         factoryOrders: [String],
         materials: [ProductionMaterialDraft],
-        batchNumber: String,
+        requestID: String,
         completion: @escaping (ProductionOperationResult) -> Void = { _ in }
     ) {
         let materialObjects: [[String: Any]] = materials.compactMap { material in
@@ -3904,7 +3966,7 @@ final class AppModel: ObservableObject {
         }
         guard let encodedMaterials = try? JSONSerialization.data(withJSONObject: materialObjects),
               let materialsJSON = String(data: encodedMaterials, encoding: .utf8),
-              !batchNumber.isEmpty else {
+              !requestID.isEmpty else {
             let message = "生产操作数据无效，未操作库存系统；本次未写入本地生产完成记录"
             dashboardSyncStatus = "❌ \(message)"
             completion(ProductionOperationResult(
@@ -3940,7 +4002,7 @@ final class AppModel: ObservableObject {
         dashboardSyncStatus = "正在库存系统执行生产出库：\(orderID)…"
         var arguments = [
             "outbound", "--order-id", orderID,
-            "--production-batch", batchNumber,
+            "--production-request", requestID,
             "--production-materials-json", materialsJSON,
             "--confirm-save",
         ]
@@ -4170,7 +4232,7 @@ final class AppModel: ObservableObject {
         for factoryOrder in selectedInventoryFactoryOrders.sorted() {
             arguments += ["--factory-order", factoryOrder]
         }
-        if !inventoryProductionBatchNumber.isEmpty { arguments += ["--production-batch", inventoryProductionBatchNumber] }
+        if !inventoryProductionBatchNumber.isEmpty { arguments += ["--production-request", inventoryProductionBatchNumber] }
         if inventoryShipmentOnly { arguments += ["--shipment-only"] }
         arguments.append("--confirm-save")
         runInventory(arguments, onFailure: { reason in
@@ -4465,45 +4527,58 @@ final class AppModel: ObservableObject {
     func saveServerHardwareMapping(name: String, productCode: String) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedCode = productCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        guard !trimmedName.isEmpty, !trimmedCode.isEmpty else { return }
+        guard !trimmedName.isEmpty, !trimmedCode.isEmpty, !orderRunning, !inventoryRunning else { return }
         beginInventoryOperation("保存本次五金映射")
         runInventory([
             "set-mapping", "--item-name", trimmedName,
             "--product-code", trimmedCode,
         ]) { _ in
-            self.removeServerHardwareMappingRequirement(trimmedName)
-            self.serverWriteConfirmationNotice = "✅ 已完成五金 SKU 映射：(trimmedName) → (trimmedCode)；请继续核对并确认写入"
-            self.serverWriteConfirmationNoticeIsError = false
+            self.refreshServerHardwarePreview(successNotice: "✅ 已完成五金 SKU 映射：\(trimmedName) → \(trimmedCode)；预览已更新，请核对后确认写入")
         }
     }
 
     func saveServerHardwareIgnoredMapping(name: String, reason: String) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else { return }
+        guard !trimmedName.isEmpty, !orderRunning, !inventoryRunning else { return }
         let trimmedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
         beginInventoryOperation("保存本次五金忽略")
         runInventory([
             "ignore-item", "--item-name", trimmedName,
             "--reason", trimmedReason.isEmpty ? "用户在 Server 订单材料确认中选择忽略五金" : trimmedReason,
         ]) { _ in
-            self.removeServerHardwareMappingRequirement(trimmedName)
-            self.serverWriteConfirmationNotice = "✅ 已忽略五金：(trimmedName)；请继续核对并确认写入"
-            self.serverWriteConfirmationNoticeIsError = false
+            self.refreshServerHardwarePreview(successNotice: "✅ 已忽略五金：\(trimmedName)；预览已更新，请核对后确认写入")
         }
     }
 
-    private func removeServerHardwareMappingRequirement(_ name: String) {
-        serverHardwareMappingRequirements.removeAll {
-            $0.name.caseInsensitiveCompare(name) == .orderedSame
+    func refreshServerHardwarePreview(successNotice: String = "✅ 五金预览已更新，请核对后确认写入") {
+        guard let preview = serverWritePreview, !orderRunning else { return }
+        serverWritePreviewNeedsRefresh = true
+        serverWriteConfirmationNotice = "映射规则已保存，正在刷新五金预览…"
+        serverWriteConfirmationNoticeIsError = false
+        var arguments = ["preview-server-changes", "--include-hardware", "true"]
+        for folder in preview.sourceFolders { arguments += ["--server-folder", folder] }
+        if let choices = preview.payload["hardware_source_choices"] as? [String: String],
+           !choices.isEmpty,
+           let data = try? JSONSerialization.data(withJSONObject: choices, options: [.sortedKeys]),
+           let json = String(data: data, encoding: .utf8) {
+            arguments += ["--hardware-source-choices", json]
         }
-        guard let preview = serverWritePreview else { return }
-        serverWritePreview = ServerWritePreview(
-            payload: preview.payload,
-            sourceFolders: preview.sourceFolders,
-            materials: preview.materials,
-            orders: preview.orders,
-            hardwareMappingRequirements: serverHardwareMappingRequirements
-        )
+        beginDashboardOperation("server", label: "刷新五金预览")
+        runOrder(arguments, failureStatus: "五金预览刷新失败", onFailure: {
+            self.finishDashboardOperation("server")
+            self.serverWriteConfirmationNotice = "映射规则已保存，但预览刷新失败：\(self.orderError)。请重试刷新后再确认写入。"
+            self.serverWriteConfirmationNoticeIsError = true
+        }) { object in
+            self.finishDashboardOperation("server", using: object)
+            guard ServerWritePreview(object: object) != nil,
+                  object["hardware_source_selection"] == nil else {
+                self.serverWriteConfirmationNotice = "映射规则已保存，但未取得完整预览。请稍后处理并重新打开文件夹预览，核对五金来源。"
+                self.serverWriteConfirmationNoticeIsError = true
+                return
+            }
+            self.presentServerWritePreview(object)
+            self.serverWriteConfirmationNotice = successNotice
+        }
     }
 
     @discardableResult
@@ -4614,7 +4689,7 @@ final class AppModel: ObservableObject {
         }
         addInventoryStep(
             "读取 Traveler \(index + 1)/\(paths.count)",
-            URL(fileURLWithPath: paths[index]).lastPathComponent,
+            displayPathName(paths[index]),
             "running"
         )
         var previewArguments = ["preview", "--traveler", paths[index]]
@@ -4953,6 +5028,53 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func abortOrder(orderID: String) {
+        guard !orderRunning, !inventoryRunning else { return }
+        logUserAction("确认中止订单", details: ["order_id": orderID])
+        runOrder(["abort-order", "--order-id", orderID, "--confirm-write"],
+                 failureStatus: "中止订单失败") { object in
+            self.applyDashboardObject(object, includeChanges: false)
+            if self.selectedOrderId == orderID { self.selectedOrderIsCompleted = true }
+            self.dashboardSyncStatus = "订单 \(orderID) 已中止"
+            self.orderStatus = self.dashboardSyncStatus
+        }
+    }
+
+    func loadManualHardware(orderID: String, completion: @escaping ([String: Any]?) -> Void) {
+        runOrder(["manual-hardware", "--order-id", orderID],
+                 onFailure: { completion(nil) }, completion: completion)
+    }
+
+    func searchManualHardware(_ query: String, completion: @escaping ([String: Any]?) -> Void) {
+        runOrder(["search-hardware-products", "--query", query],
+                 onFailure: { completion(nil) }, completion: completion)
+    }
+
+    func saveManualHardware(orderID: String, payload: [String: Any], completion: @escaping (Bool) -> Void) {
+        guard let input = try? JSONSerialization.data(withJSONObject: payload) else {
+            orderError = "人工五金编辑内容无法编码"
+            completion(false)
+            return
+        }
+        runOrder(["save-manual-hardware", "--order-id", orderID, "--confirm-write"], input: input,
+                 onFailure: { completion(false) }) { object in
+            guard object["saved"] as? Bool == true else {
+                self.orderError = "未收到人工五金保存成功的结果，请重新载入核对"
+                completion(false)
+                return
+            }
+            completion(true)
+            // Reload both dashboard and selected detail from the committed facts.
+            self.runOrder(["list-index"], failureStatus: "人工五金已保存，订单列表刷新失败") { result in
+                self.applyDashboardObject(result, includeChanges: false)
+                if self.selectedOrderId == orderID,
+                   let item = self.dashboardOrders.first(where: { $0.orderId == orderID }) {
+                    self.loadOrderDetailFromDatabase(item)
+                }
+            }
+        }
+    }
+
     private func runOrder(
         _ arguments: [String],
         input: Data? = nil,
@@ -5274,6 +5396,9 @@ final class AppModel: ObservableObject {
         selectedOrderId = item.orderId
         selectedOrderIsOptimized = item.stage == "已优化"
         selectedOrderIsCompleted = orderDashboardIsCompleted(item.stage)
+        // Discard the previous order's materials even when detail loading is queued.
+        orderMaterials = []
+        orderEdgeBanding = [:]
         if orderRunning {
             pendingOrderDetailItem = item
             orderDetailWaiting = true
@@ -5293,6 +5418,7 @@ final class AppModel: ObservableObject {
         runOrder(["detail", "--order-id", item.orderId], onFailure: {
             self.orderDetailWaiting = false
         }) { object in
+            guard self.selectedOrderId == item.orderId else { return }
             let materialRows = object["materials"] as? [[String: Any]] ?? []
             let hardwareRows = object["hardware"] as? [[String: Any]] ?? []
             let factories = item.factories.map { factory -> [String: Any] in
@@ -5527,7 +5653,10 @@ final class AppModel: ObservableObject {
 
     func calculateSelectedOrderCost(export: Bool = false) {
         let orderID = selectedOrderId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !orderID.isEmpty else { return }
+        guard canCalculateOrderCost else {
+            orderCostStatus = "请等待订单材料读取完成；暂无材料数据时不能计算成本"
+            return
+        }
         logUserAction(export ? "导出订单成本" : "计算订单成本", details: ["order_id_present": true])
         orderCostStatus = export ? "正在生成成本 Excel…" : "正在读取数据库成本…"
         addOrderStep(export ? "导出成本 Excel" : "计算成本", "按数据库材料、五金和 cost_price 计算", "running")
@@ -6201,7 +6330,7 @@ struct OrderWorkflowView: View {
                                             summaryCard(
                                                 title: hasRelatedOrders ? "关联订单（\(relatedOrderIDs.count) 个）" : "订单号",
                                                 value: model.selectedOrderId,
-                                                detail: URL(fileURLWithPath: model.orderMaterialsFile).lastPathComponent,
+                                                detail: displayPathName(model.orderMaterialsFile),
                                                 color: hasRelatedOrders ? AppPalette.warning : AppPalette.accent,
                                                 warning: hasRelatedOrders
                                             )
@@ -6222,7 +6351,7 @@ struct OrderWorkflowView: View {
                                                 value: model.orderExistingTravelerPath.isEmpty ? "未生成" : "已存在",
                                                 detail: model.orderExistingTravelerPath.isEmpty
                                                     ? "生成后保存在订单目录"
-                                                    : URL(fileURLWithPath: model.orderExistingTravelerPath).lastPathComponent,
+                                                    : displayPathName(model.orderExistingTravelerPath),
                                                 color: model.orderExistingTravelerPath.isEmpty ? .secondary : AppPalette.accent
                                             )
                                         }
@@ -8464,7 +8593,6 @@ enum AppSection: String, CaseIterable, Identifiable {
 struct TopNavigationBar: View {
     @Binding var selection: AppSection
     @ObservedObject var model: AppModel
-    @State private var showDesignNotes = false
 
     var body: some View {
         HStack(spacing: 26) {
@@ -8514,35 +8642,12 @@ struct TopNavigationBar: View {
                 )
                 .help("打开待处理中心，查看待处理项目")
             }
-            Button { showDesignNotes = true } label: {
-                Image(systemName: "info.circle")
-                    .font(.system(size: 16, weight: .semibold))
-                    .frame(width: AppLayout.headerActionSize, height: AppLayout.headerActionSize)
-                    .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            .help("界面设计说明")
+
         }
         .padding(.horizontal, 24)
         .frame(height: AppLayout.headerHeight)
         .glassEffect(.regular, in: Rectangle())
         .overlay(Divider().opacity(0.45), alignment: .bottom)
-        .sheet(isPresented: $showDesignNotes) {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack {
-                    Text("界面设计说明").font(.title2).fontWeight(.semibold)
-                    Spacer()
-                    Button("关闭") { showDesignNotes = false }.appActionButton(minWidth: 72)
-                }
-                designNote("信息架构", "助手页面显示订单统计和文字、语音操作入口；订单中心保留筛选、详情和业务操作；待办与设置保留独立导航。")
-                designNote("响应式策略", "桌面保留高信息密度的列表与详情工作台；窗口变窄时优先保留主任务区域并允许内容滚动。")
-                designNote("安全处理", "映射缺失继续作为阻断错误，库存不足继续明确警告；写文件与写库存仍使用原有本机确认边界。")
-                designNote("视觉语言", "温暖浅灰背景、白色细边框卡片、冷蓝主操作色；琥珀与红色只用于风险和不可逆操作。")
-            }
-            .padding(24)
-            .frame(width: 560)
-            .background(LiquidGlassPreviewBackdrop())
-        }
         .sheet(isPresented: $model.showPendingCenterPrompt) {
             PendingCenterSheet(model: model)
                 .frame(minWidth: 980, minHeight: 620)
@@ -8552,7 +8657,7 @@ struct TopNavigationBar: View {
         }
         .sheet(isPresented: $model.showServerWriteConfirmation) {
             ServerWriteConfirmationSheet(model: model)
-                .frame(width: 820, height: 650)
+                .frame(width: 720, height: 650)
         }
         .sheet(isPresented: $model.showInventoryMappingWorkspace, onDismiss: model.inventoryMappingWorkspaceDidDismiss) {
             PendingInventoryMappingWorkspace(model: model)
@@ -8605,13 +8710,7 @@ struct TopNavigationBar: View {
         .buttonStyle(.plain)
     }
 
-    private func designNote(_ title: String, _ text: String) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.headline)
-            Text(text).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
+
 }
 
 @main
