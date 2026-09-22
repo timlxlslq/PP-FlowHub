@@ -4395,7 +4395,8 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                     record_temporary_outbound,
                     reconcile_outbound_statuses,
                 )
-                reconcile_outbound_statuses(config)
+                reconcile_outbound_statuses(config, order_ids=[preview.traveler.order_id],
+                                            factory_orders=preview.selected_factory_orders or None)
                 record_temporary_outbound(config, preview.traveler.path, response)
                 response["serverBaselineRecorded"] = record_standard_outbound_baseline(
                     config, preview.traveler.order_id

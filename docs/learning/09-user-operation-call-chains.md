@@ -4,6 +4,10 @@
 
 本文回答一个固定问题：**用户在 App 里做了一件事后，代码从哪里开始、传入什么、下一步调用谁、最终读写什么？**
 
+### 2026-09-18：消息区共用圆角玻璃轮廓
+
+当前操作行与下方历史消息属于同一张 `AppSurfaceCard`。外层使用 22 pt 圆角玻璃，顶部再叠加 14 pt 圆角玻璃会形成不一致的轮廓，内层圆弧外仍能看到外层底色。消息区现在只保留外层玻璃，并用相同的 `AppLayout.cardCornerRadius` 裁剪整个内容；顶部保持 44 pt 高度和下方分隔线。`glassEffect` 定义玻璃形状，`clipShape` 限定整个视图的绘制范围，两者职责不同。实际边缘渲染仍需通过安装版窗口检查。
+
 ### 2026-09-18：展开订单为何不应拖慢消息区
 
 订单中心由 `OrderDashboardView` 组合工具栏、`OrderDashboardActivityView` 和 `OrderDashboardListView`。展开订单、选中工厂单及订单弹窗状态归列表所有；详情仍经 `loadOrderDetailFromDatabase` → `runOrder(detail)` 读取本地数据库。消息视图不观察整个 `AppModel`，只接收 `OrderDashboardActivityInput` 值输入，并通过 `.equatable()` 在消息数据未变化时跳过 body 重算。该输入是临时传值，不是业务缓存；新消息、进度、失败和计时起点仍会改变输入。消息自己的悬停、宽度和计时更新仍正常工作。
@@ -857,3 +861,20 @@ Excel 将公式计算结果和数字格式分别保存。例如 Color Table 的�
 发布验证：完整 `test-release` 在普通执行环境通过（Python 401 项，跳过 1；Swift UI、AIMES 离线、PP0067 workbook 均通过）。一次串行构建成功；Computer Use 禁止操作 Terminal，但普通执行环境能访问有效 Apple Development identity，直接执行现有 `scripts/install-app` 成功完成签名、helper 验证及正式替换。安装版 0.4.1 (5) 的 SHA-256 为 `c2c0055e79b35018455ff3c91e26ce248bd58559dd10cc25e4b686c21727fbb6`。退出旧进程重开后，主界面已确认说明按钮消失、待处理入口移到右侧，三行历史消息和更多订单同时可见。
 
 现场预览验收限制：安装版选择 PP0064 只读预览后，等待超过 127 秒仍停在读取材料/核对工厂单阶段；尚未取得新预览截图，列间距、长名称和底部按钮的视觉验收未完成，详见根目录 design-qa.md。未执行 SKU 映射、忽略或最终业务写入。
+
+## 临时文件夹：忽略与已人工处理（2026-09-18）
+
+“忽略此文件夹” → 确认框 → `AppModel.ignoreServerFolder` → `order ignore-server-folder --folder …` → `ignore_server_folder` → SQLite `server_folder_ignores`。它表达“以后不自动提醒这个路径”，没有观察期；不会调用库存或把订单标成出库。失败保留当前待处理列表，成功只移除该文件夹。
+
+“已人工处理”仍走 `mark_temporary_folder_manual`：先有外部完成事实，再登记并观察 XML 三天。两个按钮表达不同事实，所以分开存储；界面共用一个小按钮视图，Python 负责路径校验、事务和扫描排除。
+
+操作区布局：说明文字独占一行区域，使用纵向自适应换行；下方 `HStack(spacing: 8)` 将两个按钮靠右并排。两个按钮共用 112 点标签宽度和 regular 控件尺寸，让不同字数的动作也有一致轮廓；不把说明文字夹在按钮之间。待处理中心与 Server 变化窗口保持一致。
+
+
+### 2026-09-21：出库范围、保存点与人工处理版本
+
+出库成功后传入 `preview.traveler.order_id` 和 `selected_factory_orders` → `reconcile_outbound_statuses` → 只核对该范围的出货状态/五金差异。读取同订单的兄弟工厂单身份仅用于判定旧订单级出库单是否有歧义，不逐个审计无关工厂单。列表/AIMES 刷新不调用该核对；全库审计只由维护命令主动调用。
+
+SQLite 保存点（SAVEPOINT）允许“本份报表全部成功或全部撤销”，即使外层捕获错误继续处理其他报表，也不能提交本份的半成品。映射初始化在保存点之前完成，避免另一连接的 schema 检查与写锁互相等待。内存预览/正式确认仍遵守发现、预览、用户确认三层边界。
+
+人工处理入口：先运行 `order preview-hardware-manual --order-id ORDER --factory-order FACTORY` 获取预览及 token，确认业务意图后运行 `order confirm-hardware-manual --order-id ORDER --factory-order FACTORY --preview-token TOKEN --confirm-write`。这两个入口不由 App 启动或出库自动触发。token 是预览版本指纹，用于阻止旧预览覆盖期间变化的本地事实或报表。

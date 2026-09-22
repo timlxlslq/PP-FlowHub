@@ -15,40 +15,53 @@ extension Notification.Name {
 
 private let inventoryInactivityTimeoutSeconds: TimeInterval = 150
 
+func diagnosticMessage(_ error: [String: Any], operation: String) -> String {
+    let raw = error["message"] as? String ?? "本地处理未完成"
+    var details = [businessFriendlyMessage(raw, operation: operation)]
+    for (key, label) in [("source", "来源"), ("order_id", "订单"), ("order_ids", "订单"),
+                         ("factory_order", "工厂单"), ("factory_orders", "工厂单"),
+                         ("path", "文件"), ("source_path", "文件"), ("source_paths", "文件"),
+                         ("document_numbers", "已返回单据")] {
+        let value = (error[key] as? String) ?? (error[key] as? [String])?.joined(separator: "、") ?? ""
+        if !value.isEmpty { details.append("\(label)：\(value)") }
+    }
+    return details.joined(separator: "\n")
+}
+
 func businessFriendlyMessage(_ raw: String, operation: String) -> String {
     let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     let fallback = "\(operation)未完成。请重试；如果仍然失败，请检查相关文件、网络和登录状态后再操作。"
     guard !text.isEmpty else { return fallback }
     let lowered = text.lowercased()
     if lowered.contains("permission denied") || lowered.contains("not permitted") {
-        return "\(operation)未完成：App 没有访问所需文件或目录的权限。请在系统设置中允许访问后重试。"
+        return "\(operation)未完成：App 没有访问所需文件或目录的权限。请在系统设置中允许访问后重试。" + "\n详情：\(text)"
     }
     if lowered.contains("no such file") || lowered.contains("file doesn’t exist") || lowered.contains("file doesn't exist") {
-        return "\(operation)未完成：找不到所需文件或目录。请确认文件没有被移动或删除后重试。"
+        return "\(operation)未完成：找不到所需文件或目录。请确认文件没有被移动或删除后重试。" + "\n详情：\(text)"
     }
     if text.contains("左侧“仓库”菜单未在等待时间内加载完成") {
-        return "\(operation)未完成：库存业务工作台已打开，但左侧“仓库”菜单还没有加载完成。请保持库存系统页面可见后重试。"
+        return "\(operation)未完成：库存业务工作台已打开，但左侧“仓库”菜单还没有加载完成。请保持库存系统页面可见后重试。" + "\n详情：\(text)"
     }
     if text.contains("左侧“商品”菜单未在等待时间内加载完成") {
-        return "\(operation)未完成：库存业务工作台已打开，但左侧“商品”菜单还没有加载完成。请保持库存系统页面可见后重试。"
+        return "\(operation)未完成：库存业务工作台已打开，但左侧“商品”菜单还没有加载完成。请保持库存系统页面可见后重试。" + "\n详情：\(text)"
     }
     if lowered.contains("otheroutbound_menu") || text.contains("仓库菜单已打开，但找不到") {
-        return "\(operation)未完成：已找到左侧“仓库”菜单，但“其他出库单”入口没有出现。请保持库存系统页面可见后重试。"
+        return "\(operation)未完成：已找到左侧“仓库”菜单，但“其他出库单”入口没有出现。请保持库存系统页面可见后重试。" + "\n详情：\(text)"
     }
     if text.contains("找不到其他出库单记录列表") || text.contains("记录列表控件未加载完成") {
-        return "\(operation)未完成：已进入“其他出库单”，但记录列表还没有加载完成。请保持库存系统页面可见后重试。"
+        return "\(operation)未完成：已进入“其他出库单”，但记录列表还没有加载完成。请保持库存系统页面可见后重试。" + "\n详情：\(text)"
     }
     if text.contains("内嵌表单") || text.contains("编辑表单未加载完成") {
-        return "\(operation)未完成：已进入“其他出库单”，但出库表单还没有加载完成。请保持库存系统页面可见后重试。"
+        return "\(operation)未完成：已进入“其他出库单”，但出库表单还没有加载完成。请保持库存系统页面可见后重试。" + "\n详情：\(text)"
     }
     if lowered.contains("timed out") || lowered.contains("timeout") || lowered.contains("network") || lowered.contains("connection refused") {
-        return "\(operation)未完成：网络或业务系统暂时没有响应。请确认网络连接正常，稍后重试。"
+        return "\(operation)未完成：网络或业务系统暂时没有响应。请确认网络连接正常，稍后重试。" + "\n详情：\(text)"
     }
     if lowered.contains("database is locked") {
-        return "\(operation)未完成：订单数据库正在被其他任务使用。请等待当前任务结束后重试。"
+        return "\(operation)未完成：订单数据库正在被其他任务使用。请等待当前任务结束后重试。" + "\n详情：\(text)"
     }
-    if lowered.contains("keychain") || lowered.contains("osstatus") || text.contains("状态码") {
-        return "\(operation)未完成：macOS 钥匙串没有成功保存或读取账号信息。请重新输入密码并保存；仍失败时检查 App 的钥匙串访问权限。"
+    if lowered.contains("keychain") || lowered.contains("osstatus") {
+        return "\(operation)未完成：macOS 钥匙串没有成功保存或读取账号信息。请重新输入密码并保存；仍失败时检查 App 的钥匙串访问权限。" + "\n详情：\(text)"
     }
     let technicalMarkers = [
         "traceback", "error domain=", "nsposixerrordomain", "sqlite3.", "file \"",
@@ -63,7 +76,7 @@ func businessFriendlyMessage(_ raw: String, operation: String) -> String {
     let hasChinese = text.unicodeScalars.contains { scalar in
         (0x4E00...0x9FFF).contains(Int(scalar.value))
     }
-    return hasChinese ? text : fallback
+    return hasChinese ? text : fallback + "\n详情：\(text)"
 }
 
 func inventoryMappingSourceFolderPath(_ path: String) -> String {
@@ -2572,7 +2585,7 @@ final class AppModel: ObservableObject {
         serverWriteConfirmationNoticeIsError = false
         serverWriteConfirmationFinished = false
         showServerWriteConfirmation = true
-        dashboardServerStatus = "Server 数据已解析，请核对预览内容后确认材料"
+        dashboardServerStatus = "✅ Server 预览已完成，请核对内容后确认材料"
         dashboardSyncStatus = dashboardServerStatus
     }
 
@@ -2583,7 +2596,7 @@ final class AppModel: ObservableObject {
         hardwareSourceConflicts = (request["conflicts"] as? [[String: Any]] ?? []).compactMap(HardwareSourceConflict.init)
         showPendingCenterPrompt = false
         showHardwareSourceSelection = true
-        dashboardServerStatus = "请确认五金来源或报表更新；已确认来源不会自动改变"
+        dashboardServerStatus = "⚠️ 预览需要确认五金来源或报表更新；已确认来源不会自动改变"
         dashboardSyncStatus = dashboardServerStatus
     }
 
@@ -3409,9 +3422,30 @@ final class AppModel: ObservableObject {
                 }
             }
         ) { object in
-            self.finishDashboardOperation("server")
+            self.finishDashboardOperation("server", using: object)
             if hasSecurityScope { folderURL.stopAccessingSecurityScopedResource() }
             self.presentServerWritePreview(object)
+        }
+    }
+
+    func ignoreServerFolder(_ folderPath: String) {
+        guard !orderRunning, !inventoryRunning else { return }
+        logUserAction("点击忽略 Server 临时文件夹")
+        beginDashboardOperation("server", label: "忽略临时文件夹")
+        dashboardServerStatus = "正在保存忽略记录：\(displayPathName(folderPath))…"
+        dashboardSyncStatus = dashboardServerStatus
+        runOrder(["ignore-server-folder", "--folder", folderPath], failureStatus: "忽略文件夹失败", onFailure: {
+            self.finishDashboardOperation("server")
+            self.dashboardServerStatus = "⚠️ \(businessFriendlyMessage(self.orderError, operation: "忽略文件夹"))"
+            self.dashboardSyncStatus = self.dashboardServerStatus
+        }) { object in
+            self.finishDashboardOperation("server")
+            self.applyCurrentIssues(from: object)
+            self.pendingServerChanges = serverChangesExcludingFolder(self.pendingServerChanges, folderPath: folderPath)
+            self.selectedServerFolderPaths.remove(folderPath)
+            self.closePendingCenterIfEmpty()
+            self.dashboardServerStatus = "✅ 已忽略文件夹；不再观察或自动提醒"
+            self.dashboardSyncStatus = self.dashboardServerStatus
         }
     }
 
@@ -4822,10 +4856,7 @@ final class AppModel: ObservableObject {
                         return
                     }
                     if let fatal = object["fatal"] as? [String: Any] {
-                        let reason = businessFriendlyMessage(
-                            fatal["message"] as? String ?? "库存操作未完成，请检查库存系统页面和本地订单数据后重试。",
-                            operation: "库存操作"
-                        )
+                        let reason = diagnosticMessage(fatal, operation: "库存操作")
                         self.inventoryStatus = "❌ \(reason)"
                         self.dashboardSyncStatus = "❌ \(reason)"
                         self.finishRunningInventoryStep(reason, "failure")
@@ -5142,10 +5173,7 @@ final class AppModel: ObservableObject {
                     }
                     if let fatal = object["fatal"] as? [String: Any] {
                         let code = fatal["code"] as? String ?? ""
-                        let reason = businessFriendlyMessage(
-                            fatal["message"] as? String ?? "订单校验未通过，请检查订单报表后重试。",
-                            operation: "订单操作"
-                        )
+                        let reason = diagnosticMessage(fatal, operation: "订单操作")
                         self.orderError = reason
                         if code == "missing_materials" {
                             self.orderStatus = "未找到 material 文件"

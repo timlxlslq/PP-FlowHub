@@ -1725,6 +1725,8 @@ struct OrderDashboardActivityView: View, Equatable {
                 }
             }
         }
+        // The header and history share one glass surface and one outer contour.
+        .clipShape(RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous))
     }
 
     @ViewBuilder
@@ -1753,7 +1755,6 @@ struct OrderDashboardActivityView: View, Equatable {
             .padding(.horizontal, 12)
             .frame(width: dashboardMessageContentWidth, height: 44)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         } else {
             HStack(spacing: 10) {
                 Image(systemName: "pause.circle.fill").foregroundColor(.secondary)
@@ -1762,7 +1763,6 @@ struct OrderDashboardActivityView: View, Equatable {
             }
             .padding(.horizontal, 12)
             .frame(height: 44)
-            .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
     }
 
@@ -3764,18 +3764,30 @@ struct PendingCenterSheet: View {
                             }
                         }
                     }
-                    if group.manualOnly {
-                        HStack(spacing: 8) {
-                            Text("按此文件夹独立登记。请先在库存系统完成出库；参考订单可留空，登记不会改变原订单。完成后三天独立观察 XML。")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Spacer()
-                            Button("已人工处理") {
-                                manualHandlingGroup = group
+                    if group.manualOnly || group.requiresManualReview {
+                        VStack(alignment: .leading, spacing: 10) {
+                            if group.manualOnly {
+                                Text("按此文件夹独立登记。请先在库存系统完成出库；参考订单可留空，登记不会改变原订单。完成后三天独立观察 XML。")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
-                            .buttonStyle(.glassProminent)
-                            .disabled(model.orderRunning)
+                            HStack(spacing: 8) {
+                                Spacer(minLength: 0)
+                                ServerFolderIgnoreButton(model: model, group: group)
+                                if group.manualOnly {
+                                    Button {
+                                        manualHandlingGroup = group
+                                    } label: {
+                                        Text("已人工处理").frame(width: 112)
+                                    }
+                                    .buttonStyle(.glassProminent)
+                                    .controlSize(.regular)
+                                    .disabled(model.orderRunning || model.inventoryRunning)
+                                }
+                            }
                         }
+                        .padding(.top, 6)
                     }
                 }
             }
@@ -3801,8 +3813,11 @@ struct PendingCenterSheet: View {
                 Image(systemName: issue.kind == "factory_ownership" ? "person.crop.circle.badge.questionmark" : "exclamationmark.triangle.fill")
                     .foregroundColor(issue.kind == "factory_ownership" ? AppPalette.warning : AppPalette.danger)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(issue.kind == "factory_ownership" ? "订单归属问题" : (issue.kind == "server_missing_report" ? "报表检查" : (currentIssueRequiresInventoryMapping(issue) ? "出库前需要材料映射" : "处理失败")))
+                    Text(issue.kind == "factory_ownership" ? "订单归属问题" : (issue.kind == "server_missing_report" ? "报表检查" : (currentIssueRequiresInventoryMapping(issue) ? "出库前需要材料映射" : (issue.kind == "hardware_integrity" ? "本地五金记录待核对" : "资料待核对"))))
                         .font(.subheadline.weight(.semibold))
+                    Text([issue.orderId.isEmpty ? "" : "订单：\(issue.orderId)",
+                          issue.factoryOrder.isEmpty ? "" : "工厂单：\(issue.factoryOrder)"].filter { !$0.isEmpty }.joined(separator: "；"))
+                        .font(.caption)
                     Text(issue.message).fixedSize(horizontal: false, vertical: true)
                     if !issue.path.isEmpty {
                         Text(issue.path)
@@ -4383,12 +4398,21 @@ struct ServerChangesSheet: View {
                                 }
                                 .buttonStyle(.plain)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                if group.manualOnly {
-                                    Button("已人工处理") {
-                                        manualHandlingGroup = group
+                                if group.manualOnly || group.requiresManualReview {
+                                    HStack(spacing: 8) {
+                                        Spacer(minLength: 0)
+                                        ServerFolderIgnoreButton(model: model, group: group)
+                                        if group.manualOnly {
+                                            Button {
+                                                manualHandlingGroup = group
+                                            } label: {
+                                                Text("已人工处理").frame(width: 112)
+                                            }
+                                            .buttonStyle(.glassProminent)
+                                            .controlSize(.regular)
+                                            .disabled(model.orderRunning || model.inventoryRunning)
+                                        }
                                     }
-                                    .buttonStyle(.glassProminent)
-                                    .disabled(model.orderRunning)
                                 }
                             }
                             .padding(12)
@@ -5626,5 +5650,26 @@ struct ManualHardwareSheet: View {
 
     private func close() {
         if dirty { showDiscard = true } else { dismiss() }
+    }
+}
+
+private struct ServerFolderIgnoreButton: View {
+    @ObservedObject var model: AppModel
+    let group: ServerFolderChangeGroup
+    @State private var confirming = false
+
+    var body: some View {
+        Button { confirming = true } label: {
+            Text("忽略此文件夹").frame(width: 112)
+        }
+            .buttonStyle(.glass)
+            .controlSize(.regular)
+            .disabled(model.orderRunning || model.inventoryRunning)
+            .alert("忽略文件夹“\(group.folderName)”？", isPresented: $confirming) {
+                Button("取消", role: .cancel) {}
+                Button("确认忽略") { model.ignoreServerFolder(group.folderPath) }
+            } message: {
+                Text("忽略后不再扫描此文件夹，也不因报表或 XML 变化重新提醒。此操作不登记出库，也不表示已人工处理。")
+            }
     }
 }

@@ -109,7 +109,15 @@ class ServerRailUnitsTests(unittest.TestCase):
         sync_order_index(self.config, refresh_outbound_statuses=False, reconcile_outbound=False)
         self.assertEqual(self.rows(), [('M1097', 5, 'Sets')])
         self.write_report({'M1097': 7})
-        sync_order_index(self.config, refresh_outbound_statuses=False, reconcile_outbound=False)
+        # A committed source now requires approval of the new revision first.
+        from traveler_assistant.fittings import select_latest_fittings, fittings_candidate
+        from traveler_assistant.hardware_source_decisions import load_source_decisions
+        from traveler_assistant.report_read_context import report_read_session
+        selected, *_ = select_latest_fittings([self.report])
+        choice = fittings_candidate(selected['F100'])['id']
+        with report_read_session({'F100': choice}) as context:
+            context.locked_decisions = load_source_decisions(self.config)
+            sync_order_index(self.config, refresh_outbound_statuses=False, reconcile_outbound=False)
         self.assertEqual(self.rows(), [('M1097', 5, 'Sets')])
         store = OrderIndexStore(self.config.workflow_database)
         try:

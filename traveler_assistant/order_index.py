@@ -939,6 +939,10 @@ class OrderIndexStore:
             );
             create index if not exists idx_optimization_artifacts_factory
                 on optimization_artifacts(order_id, factory_order, completed_at);
+            create table if not exists server_folder_ignores(
+                path text primary key,
+                ignored_at text not null
+            );
             create index if not exists idx_factory_order_id on factory_orders(order_id);
             create index if not exists idx_sync_changes_observed on sync_changes(observed_at desc);
             create index if not exists idx_active_issues_status on active_issues(status, last_seen desc);
@@ -3341,7 +3345,7 @@ def assert_factory_orders_outbound_allowed(
     try:
         # Refresh the derived status first so a changed Traveler/report is
         # represented as 可更新 rather than being treated as a duplicate.
-        reconcile_outbound_statuses(config, store)
+        reconcile_outbound_statuses(config, store, factory_orders=selected)
         placeholders = ",".join("?" for _ in selected)
         rows = store.connection.execute(
             f"""
@@ -3395,6 +3399,7 @@ def assert_factory_orders_outbound_allowed(
 def reconcile_outbound_statuses(
     config: Config,
     store: OrderIndexStore | None = None,
+    *, order_ids=None, factory_orders=None,
 ) -> int:
     """Reconcile successful inventory records into persisted factory status.
 
@@ -3406,6 +3411,17 @@ def reconcile_outbound_statuses(
     owns_store = store is None
     store = store or OrderIndexStore(config.workflow_database)
     records = _load_outbound_records(config)
+    scope_sql = ''
+    scope_args = []
+    if order_ids is not None:
+        values = sorted({str(x).strip().upper() for x in order_ids})
+        scope_sql += ' and order_id in (' + ','.join('?' for _ in values) + ')'
+        scope_args.extend(values)
+    if factory_orders is not None:
+        values = sorted({str(x).strip().upper() for x in factory_orders})
+        # Keep sibling identities for ambiguous legacy order-only documents.
+        scope_sql += ' and order_id in (select order_id from factory_orders where factory_order in (' + ','.join('?' for _ in values) + '))'
+        scope_args.extend(values)
     rows = store.connection.execute(
         """
         select factory_order, order_id, factory_name, sales_order_name,
@@ -3413,7 +3429,7 @@ def reconcile_outbound_statuses(
                outbound_completed_at
         from factory_orders
         where order_id <> '' and aimes_status = 'active'
-        """
+        """ + scope_sql, scope_args
     ).fetchall()
     factories = [
         {
@@ -3433,8 +3449,13 @@ def reconcile_outbound_statuses(
     for factory in factories:
         by_order[_outbound_key(factory["order_id"])].append(factory)
 
+    selected_orders = None if order_ids is None else {str(x).strip().upper() for x in order_ids}
+    selected_factories = None if factory_orders is None else {str(x).strip().upper() for x in factory_orders}
+    affected = [factory for factory in factories
+                if (selected_orders is None or factory['order_id'].upper() in selected_orders)
+                and (selected_factories is None or factory['factory_order'].upper() in selected_factories)]
     updated = 0
-    for factory in factories:
+    for factory in affected:
         audit_factory_hardware(store.connection, factory["factory_order"])
         order_factories = by_order.get(_outbound_key(factory["order_id"]), [])
         status, matched_document = _refresh_outbound_status(
@@ -3517,8 +3538,7 @@ def reconcile_outbound_statuses(
             ),
         )
         updated += 1
-    audit_hardware_integrity(store.connection)
-    resolved_issues = _resolve_fully_shipped_server_issues(config, store)
+    resolved_issues = _resolve_fully_shipped_server_issues(config, store, order_ids={f["order_id"] for f in affected})
     if updated or resolved_issues or store.connection.in_transaction:
         store.commit()
     if owns_store:
@@ -3690,6 +3710,8 @@ def _server_folder_scan_allowed(
     aimes_rows: list[dict] | None = None,
 ) -> bool:
     """Apply per-order historical and seven-day Server scan policies."""
+    if _server_folder_is_ignored(store, folder):
+        return False
     if _server_folder_handling_mode(store, folder, aimes_rows) in {"supplemental", "external_manual"}:
         return _temporary_folder_is_candidate(config, store, folder)
     order_ids = _server_folder_order_ids(folder)
@@ -3903,6 +3925,7 @@ def _server_folder_for_issue(issue_path: str) -> Path | None:
 def _resolve_fully_shipped_server_issues(
     config: Config,
     store: OrderIndexStore,
+    *, order_ids=None,
 ) -> int:
     """Close stale Server issues once every order in their folder shipped.
 
@@ -3925,6 +3948,8 @@ def _resolve_fully_shipped_server_issues(
     }
     resolved = 0
     for issue in store.active_issues():
+        if order_ids is not None and issue.get("order_id") not in order_ids:
+            continue
         if issue.get("kind") not in resolvable_kinds or issue.get("status") != "open":
             continue
         folder = _server_folder_for_issue(str(issue.get("path") or ""))
@@ -4178,8 +4203,6 @@ def sync_aimes_index(config: Config, *, force: bool = False, if_needed: bool = F
     operation_started = time.perf_counter()
     started = _now()
     store = OrderIndexStore(config.workflow_database)
-    if config.reconcile_outbound_on_read:
-        reconcile_outbound_statuses(config, store)
     today = date.today().isoformat()
     cached_source_rows = load_aimes_order_cache(config)
     cached_rows, _cached_issues = _partition_aimes_rows(
@@ -4425,8 +4448,55 @@ def _server_folder_handling_mode(
     return "mixed" if _is_mixed_order_folder(folder) else "temporary"
 
 
+def _server_folder_is_ignored(store: OrderIndexStore, folder: Path) -> bool:
+    """A permanent review decision; do not inspect the folder's contents."""
+    return store.connection.execute(
+        "select 1 from server_folder_ignores where path=?", (str(folder),)
+    ).fetchone() is not None
+
+
+def ignore_server_folder(config: Config, folder: Path) -> dict:
+    """Record a review decision only; never claim external completion."""
+    roots = _available_server_roots(config)
+    selected_resolved = folder.expanduser().resolve()
+    root = next((root for root in roots if selected_resolved.parent == root.resolve()), None)
+    if root is None or not selected_resolved.is_dir():
+        raise ValueError("请选择 Server 根目录内的临时文件夹，不能选择根目录或内部子目录")
+    selected = root / selected_resolved.name
+    if _is_standard_order_folder(selected.name):
+        raise ValueError("标准订单文件夹不能使用此忽略操作")
+    path = str(selected)
+    now = _now()
+    store = OrderIndexStore(config.workflow_database)
+    try:
+        store.connection.execute("begin immediate")
+        if _server_folder_handling_mode(store, selected) == "mixed" and _report_files(selected):
+            raise ValueError("有报表的混单文件夹请核对预览，不能使用临时文件夹忽略")
+        unchanged = _server_folder_is_ignored(store, selected)
+        if not unchanged:
+            store.connection.execute(
+                "insert into server_folder_ignores(path, ignored_at) values(?,?)", (path, now)
+            )
+            store.add_change(severity="info", kind="server_folder_ignored", path=path,
+                             message=f"已永久忽略文件夹 {selected.name}；不再观察或自动提醒", observed_at=now)
+        for issue in store.active_issues():
+            issue_path = str(issue.get("path") or "")
+            if issue_path == path or issue_path.startswith(path + "/"):
+                store.resolve_active_issue(issue["issue_key"], resolved_at=now)
+        store.commit()
+        return {"ok": True, "ignored_folder": path,
+                "unchanged": unchanged, "current_issues": store.active_issues()}
+    except Exception:
+        store.connection.rollback()
+        raise
+    finally:
+        store.close()
+
+
 def _temporary_folder_is_candidate(config: Config, store: OrderIndexStore, folder: Path) -> bool:
     """Select eligible recent or never-processed non-standard folders for review."""
+    if _server_folder_is_ignored(store, folder):
+        return False
     try:
         created_at = _folder_created_at(folder)
     except OSError:
@@ -5208,6 +5278,8 @@ def _server_snapshot(
     for server_root in roots:
         for folder in sorted(server_root.iterdir(), key=lambda item: item.name.casefold()):
             if not folder.is_dir():
+                continue
+            if _server_folder_is_ignored(store, folder):
                 continue
             mode = _server_folder_handling_mode(store, folder)
             if mode in {"temporary", "supplemental", "external_manual"}:
@@ -6131,6 +6203,7 @@ def _server_folders_for_sync(
                 folder
                 for folder in server_root.iterdir()
                 if folder.is_dir()
+                and not _server_folder_is_ignored(store, folder)
                 and (
                     (
                         _is_standard_order_folder(folder.name)
@@ -6346,10 +6419,9 @@ def sync_order_index(
     store.connection.execute("delete from temp.preview_validation")
     _mark_initial_orders_shipped(config, store)
     _reconcile_temporary_order_projections(store)
-    if reconcile_outbound:
-        reconcile_outbound_statuses(config, store)
     _clear_stale_server_pending_state(config, store)
     store.delete_stale_factory_ownership_issues(config.initial_date)
+    store.commit()
     changes_before = store.latest_change_id()
     today = date.today().isoformat()
     cached_aimes_source_rows = load_aimes_order_cache(config)
@@ -6455,6 +6527,11 @@ def sync_order_index(
     server_snapshot_reused = snapshot_data is not None
     if snapshot_data is not None:
         root, server_folders, server_snapshot_entries = snapshot_data
+        server_folders = [folder for folder in server_folders
+                          if not _server_folder_is_ignored(store, folder)]
+        allowed_snapshot_folders = {str(folder) for folder in server_folders}
+        server_snapshot_entries = {path: item for path, item in server_snapshot_entries.items()
+                                   if item.get("source_folder") in allowed_snapshot_folders}
     else:
         try:
             root, server_folders = _server_folders_for_sync(
@@ -7021,9 +7098,10 @@ def sync_order_index(
                                 for order_id in ([order_hint] + folder_order_ids)
                                 if order_id
                             )
-                    except Exception:
+                    except Exception as exc:
                         issue_key = f"report_error:{path}"
-                        issue_message = _business_report_message("board", path)
+                        origin = "本地数据库" if isinstance(exc, sqlite3.Error) else "Server 板材报表/本地校验"
+                        issue_message = f"{origin}：订单 {','.join(folder_order_ids) or '未识别'}；文件 {path}：{exc}"
                         current_issue_keys.add(issue_key)
                         store.upsert_active_issue(
                             issue_key=issue_key,
@@ -7045,6 +7123,9 @@ def sync_order_index(
                     # malformed Fittingslist must report its own file, not
                     # raise a secondary UnboundLocalError for order_hint.
                     order_hint = folder_order_ids[0] if len(folder_order_ids) == 1 else ""
+                    factory_orders = []
+                    store.commit()  # Discovery metadata is evidence, not confirmed hardware.
+                    report_write_started = False
                     try:
                         groups = _preview_fittings_groups(path, fittings_cache)
                         factory_orders = [factory_order for factory_order, _ in groups]
@@ -7069,7 +7150,6 @@ def sync_order_index(
                                 and selected_groups
                                 and not order_hint.upper().startswith("CS")
                             ):
-                                store.commit()
                                 resolution_items = [
                                     (
                                         TravelerItem(
@@ -7153,13 +7233,26 @@ def sync_order_index(
                                                 factory_order=normalized_factory_order, name=item.name,
                                             )["quantity"],
                                         })
+                                store.connection.execute("savepoint fittings_report_write")
+                                report_write_started = True
                                 for factory_order, hardware_rows in hardware_rows_by_factory.items():
                                     replace_factory_hardware(
                                         store.connection, factory_order, hardware_rows,
                                         source_path=str(path), observed_at=server_seen,
                                         allow_empty=True,
                                     )
+                                context = current_report_context()
+                                if context:
+                                    for factory_order in hardware_rows_by_factory:
+                                        proposal = context.decision_proposals.get(factory_order)
+                                        if proposal:
+                                            store.connection.execute('insert into hardware_source_decisions(factory_order,decision_json) values(?,?) '
+                                                'on conflict(factory_order) do update set decision_json=excluded.decision_json',
+                                                (factory_order, json.dumps(proposal, ensure_ascii=False, sort_keys=True)))
                                 resolved_mapping_order_ids.add(order_hint.upper())
+                        if not report_write_started:
+                            store.connection.execute("savepoint fittings_report_write")
+                            report_write_started = True
                         store.update_source_file_identity(
                             path,
                             order_id=order_hint,
@@ -7198,8 +7291,12 @@ def sync_order_index(
                             changed_order_ids.update(
                                 order_id.upper() for order_id in folder_order_ids if order_id
                             )
+                        store.connection.execute("release fittings_report_write")
                     except Exception as exc:
-                        if _fittings_report_is_empty(path):
+                        if report_write_started:
+                            store.connection.execute("rollback to fittings_report_write")
+                            store.connection.execute("release fittings_report_write")
+                        if isinstance(exc, RuleError) and _fittings_report_is_empty(path):
                             store.add_change(
                                 severity="info",
                                 kind="report_empty",
@@ -7209,11 +7306,8 @@ def sync_order_index(
                             )
                         else:
                             issue_key = f"report_error:{path}"
-                            issue_message = (
-                                str(exc) if isinstance(exc, RuleError)
-                                and exc.code == "server_rail_pair_quantity_invalid"
-                                else _business_report_message("fittings", path)
-                            )
+                            origin = "本地数据库" if isinstance(exc, sqlite3.Error) else "Server 报表/本地校验"
+                            issue_message = f"{origin}：订单 {order_hint or '未识别'}；工厂单 {','.join(factory_orders) or '未识别'}；文件 {path}：{exc}"
                             current_issue_keys.add(issue_key)
                             store.upsert_active_issue(
                                 issue_key=issue_key,
@@ -7547,10 +7641,9 @@ def sync_order_index(
         server_folder_count=folder_count,
         error="；".join(errors),
     )
-    audit_hardware_integrity(store.connection)
     store.commit()
     if reconcile_outbound:
-        reconcile_outbound_statuses(config, store)
+        reconcile_outbound_statuses(config, store, factory_orders=server_factory_orders)
     finish_phase("finalize_and_commit")
     if root is None:
         server_trace = [
@@ -8649,7 +8742,7 @@ def preview_server_changes(
         # The preview intentionally never runs temporary-order outbound or
         # traveler generation. Those are separate user-approved operations.
         progress("正在读取材料并核对数据库中的工厂单归属")
-        sync_order_index(
+        sync_result = sync_order_index(
             stage_config,
             selected_folders=normalized_folders,
             process_temporary=False,
@@ -8726,6 +8819,7 @@ def preview_server_changes(
             "operation_timing": {
                 "total_seconds": round(time.perf_counter() - timing_started, 6),
                 "stages": timing_stages,
+                "server_parse_phases": sync_result["index_stats"]["phase_durations"],
             },
         }
     finally:
@@ -10253,8 +10347,6 @@ def resolve_current_issue(config: Config, issue_key: str, order_id: str = "", fa
 def list_order_index(config: Config) -> dict:
     store = OrderIndexStore(config.workflow_database)
     _reconcile_temporary_order_projections(store)
-    if config.reconcile_outbound_on_read:
-        reconcile_outbound_statuses(config, store)
     cached_source_rows = load_aimes_order_cache(config)
     _, cached_aimes_warnings = _partition_aimes_rows(
         cached_source_rows,

@@ -73,6 +73,9 @@ private struct DashboardActivityIsolationHarness: View {
 @main
 private struct MacOSUIRegressionTests {
     static func main() {
+        let diagnostic = diagnosticMessage(["message": "database is locked", "source": "本地数据库", "order_id": "PP0064", "factory_order": "F100", "path": "/server/Fittingslist.xlsx"], operation: "出库核对")
+        for value in ["本地数据库", "PP0064", "F100", "/server/Fittingslist.xlsx"] { precondition(diagnostic.contains(value)) }
+        precondition(businessFriendlyMessage("Server /server/report.xlsx Permission denied PP0008", operation: "读取").contains("/server/report.xlsx"))
         testInventoryTravelerNewestFirst()
         testPushToTalkShortcut()
         testSpeechCommandCanonicalization()
@@ -91,8 +94,10 @@ private struct MacOSUIRegressionTests {
         testPendingInventorySourceFolderPath()
         testPendingMaterialMappingIssueRoute()
         testPendingInventoryMappingResumeContract()
+        testServerFolderIgnoreOutcome()
         testSelectedServerPreviewFailure()
         testHardwareSourceSelectionFlow()
+        testServerPreviewCompletionTiming()
         testServerHardwareMappingRefresh()
         testManualHardwareEditorContract()
         testServerNoChangeAcknowledgement()
@@ -959,9 +964,9 @@ private struct MacOSUIRegressionTests {
         )
         require(
             assistantSource.contains("serverChangesExcludingFolder") &&
-                !dashboardSource.contains("忽略此文件夹") &&
-                !assistantSource.contains("ignoreServerFolder"),
-            "已人工处理动作不应保留旧的 Server 文件夹忽略入口"
+                dashboardSource.contains("忽略此文件夹") &&
+                assistantSource.contains("ignoreServerFolder"),
+            "忽略与已人工处理必须保留各自入口"
         )
         let supplementRows = serverChangePreviews([[
             "id": "supplement", "change_type": "added", "kind": "folder",
@@ -1713,6 +1718,36 @@ private struct MacOSUIRegressionTests {
         require(preview.contains(".alert(\"确认后写入\", isPresented: $showWriteConfirmation)") && preview.contains("guard canConfirmWrite else { return }"), "写入预览必须保留显式二次确认和校验门禁")
     }
 
+    private static func testServerFolderIgnoreOutcome() {
+        let model = AppModel()
+        let target = "/server/TEST_A"
+        let other = "/server/TEST_B"
+        model.pendingServerChanges = serverChangePreviews([target, other].map { path in
+            ["id": path, "change_type": "added", "kind": "folder", "path": path,
+             "source_folder": path, "manual_only": true] as [String: Any]
+        })
+        model.selectedServerFolderPaths = [target]
+        var commands: [[String]] = []
+        var failure: (() -> Void)?
+        var success: (([String: Any]) -> Void)?
+        model.pendingOrderRunner = { args, fail, complete in
+            commands.append(args); failure = fail; success = complete
+        }
+        model.ignoreServerFolder(target)
+        require(commands == [["ignore-server-folder", "--folder", target]], "忽略只能提交所选文件夹")
+        model.ignoreServerFolder(target)
+        require(commands.count == 1, "运行中不能重复忽略")
+        model.orderError = "写入失败"
+        failure?()
+        require(model.pendingServerChanges.count == 2 && model.selectedServerFolderPaths.contains(target), "失败必须保留待处理和选择")
+        require(!model.orderRunning && model.dashboardServerStatus.contains("写入失败"), "失败必须退出运行状态并显示错误")
+        model.ignoreServerFolder(target)
+        success?(["ok": true, "ignored_folder": target, "current_issues": []])
+        require(model.pendingServerChanges.count == 1 && model.pendingServerChanges[0].sourceFolder == other, "忽略成功只能移除目标文件夹")
+        require(!model.selectedServerFolderPaths.contains(target) && !model.orderRunning, "成功应清除目标选择和运行状态")
+        require(model.dashboardServerStatus.contains("不再观察"), "永久忽略不能显示观察期限")
+    }
+
     private static func testSelectedServerPreviewFailure() {
         let model = AppModel()
         let folder = URL(fileURLWithPath: "/tmp/PP0062-KITCHEN_20260908145832")
@@ -1726,6 +1761,27 @@ private struct MacOSUIRegressionTests {
         require(model.dashboardServerStatus.contains(folder.path) && model.dashboardSyncStatus == model.dashboardServerStatus, "失败状态应保留真实错误及路径")
         require(model.dashboardActivity.first?.state == "failure" && model.dashboardActivity.first?.detail == model.dashboardServerStatus, "活动记录应显示实际失败原因")
         require(!dashboardStatusIsInProgress("⚠️ 正在读取的文件已被移除"), "错误描述含正在也不能判为运行中")
+    }
+
+    private static func testServerPreviewCompletionTiming() {
+        let model = AppModel()
+        model.dashboardServerStatus = "✅ 上一次扫描完成"
+        let folder = "/tmp/PP0064"
+        var complete: (([String: Any]) -> Void)?
+        model.pendingOrderRunner = { _, _, success in complete = success }
+        model.processSelectedServerFolder(URL(fileURLWithPath: folder), includeHardware: true)
+        complete?([
+            "server_write_preview": ["write_records": [:], "source_folders": [folder], "orders": [["order_id": "PP0064"]]],
+            "operation_timing": ["total_seconds": 12.5, "stages": [
+                ["label": "检查五金来源", "duration_seconds": 2.5],
+                ["label": "读取、解析并校验 Server 文件", "duration_seconds": 10.0]
+            ]]
+        ])
+        let message = model.dashboardSessionMessages.last
+        require(model.showServerWriteConfirmation, "完成预览仍需显式确认写入")
+        require(message?.detail.contains("预览已完成") == true, "最新结果必须是本次预览，不能停留在旧扫描")
+        require((message?.duration ?? 0) >= 12.5, "完成消息必须保留本次预览耗时")
+        require(message?.operationDurations.contains { $0.label == "检查五金来源" && $0.duration == 2.5 } == true, "预览阶段耗时不能丢失")
     }
 
     private static func testHardwareSourceSelectionFlow() {

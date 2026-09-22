@@ -99,6 +99,22 @@ def select_latest_fittings(
         candidates = [fittings_candidate(source) for source in matches]
         requested = choices.get(factory)
         locked = context.locked_decisions.get(factory) if context else None
+        if locked and locked.get('handling') == 'manual':
+            report_versions = {str(source.path.resolve()): hashlib.sha256(source.path.read_bytes()).hexdigest() for source in matches}
+            confirmed_versions = {str(Path(path).resolve()): value for path, value in locked.get('report_versions', {}).items()}
+            if report_versions and all(confirmed_versions.get(path) == value for path, value in report_versions.items()):
+                context.keep_factories.add(factory)
+                context.decision_proposals[factory] = locked
+                source = matches[0]
+                selected[factory] = SelectedFittings(source.path, source.modified_at, (), ())
+                continue
+            # A changed report requires an explicit new decision, including a
+            # byte-only revision. Never carry the manual exemption forward.
+            if not requested:
+                conflicts.append({'factory_order': factory, 'mode': 'update',
+                                  'candidates': [dict(c, label='重新核对并采用此报表') for c in candidates]})
+                continue
+            locked = None
         if locked:
             chosen_data = locked['selected']
             observed = sorted({candidate['content_fingerprint'] for candidate in candidates})
@@ -153,8 +169,10 @@ def select_latest_fittings(
         elif len(matches) > 1:
             warnings.append(f"{factory} 在 {len(matches)} 份五金报表中内容一致，已自动去重")
     if conflicts:
-        raise RuleError("fittings_selection_required", "同一工厂单的五金报表内容不同，请选择五金来源",
-                        conflicts=conflicts)
+        raise RuleError("fittings_selection_required", "Server 五金报表来源或版本变化，请重新核对并选择五金来源",
+                        conflicts=conflicts, source="Server 五金报表",
+                        factory_orders=[row["factory_order"] for row in conflicts],
+                        source_paths=sorted({candidate["path"] for row in conflicts for candidate in row["candidates"]}))
     return selected, warnings, found_files, skipped_empty
 
 

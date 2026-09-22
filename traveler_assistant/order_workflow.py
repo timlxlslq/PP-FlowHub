@@ -50,7 +50,7 @@ from .inventory import (
     TravelerItem,
 )
 from .fittings import is_fittings_report, select_latest_fittings
-from .report_read_context import cached_report, report_paths
+from .report_read_context import cached_report, report_paths, directory_paths, current_report_context
 from .hardware_source_decisions import with_source_decisions
 from .operation_log import configure_operation_log
 from .database import connect_database, enable_foreign_keys, ensure_schema
@@ -140,26 +140,51 @@ def _order_ids_in_text(value: str) -> set[str]:
 
 def related_order_ids(folder: Path) -> list[str]:
     """Discover all complete order ids represented by a shared source folder."""
+    context = current_report_context()
+    key = str(folder)
+    standard_folder = ORDER_FOLDER_RE.fullmatch(folder.name) is not None
+    if standard_folder and context is not None and context.reuse_reports and key in context.related_orders:
+        return list(context.related_orders[key])
+    started = time.perf_counter()
     found = _order_ids_in_text(folder.name)
+    candidates = 0
+    metadata_seconds = 0.0
     # Keep the standard-folder path lightweight: filenames and XML names are
     # enough to detect the PP0035/PP0035-2 shared-folder case, while opening
     # every board workbook here would defeat the incremental index fast path.
-    if ORDER_FOLDER_RE.fullmatch(folder.name):
-        for path in folder.rglob("*"):
-            if path.is_file():
+    if standard_folder:
+        for path in directory_paths(folder):
+            ids = _order_ids_in_text(path.name)
+            if ids:
+                candidates += 1
+                metadata_started = time.perf_counter()
+                is_file = path.is_file()
+                metadata_seconds += time.perf_counter() - metadata_started
+                if is_file:
+                    found.update(ids)
+    else:
+        for path in report_paths(folder):
+            found.update(_order_ids_in_text(path.name))
+            if "板材清单" in path.name:
+                try:
+                    _, name = parse_board_identity(path)
+                except Exception:
+                    continue
+                found.update(_order_ids_in_text(name))
+        for path in directory_paths(folder):
+            if path.name.endswith('.xml'):
                 found.update(_order_ids_in_text(path.name))
-        return sorted(found)
-    for path in report_paths(folder):
-        found.update(_order_ids_in_text(path.name))
-        if "板材清单" in path.name:
-            try:
-                _, name = parse_board_identity(path)
-            except Exception:
-                continue
-            found.update(_order_ids_in_text(name))
-    for path in folder.rglob("*.xml"):
-        found.update(_order_ids_in_text(path.name))
-    return sorted(found)
+    result = sorted(found)
+    if context is not None:
+        context.discovery_timings.append({
+            'stage': 'related_order_identification', 'path': key,
+            'candidate_stat_count': candidates,
+            'metadata_seconds': round(metadata_seconds, 6),
+            'duration_seconds': round(time.perf_counter() - started, 6),
+        })
+        if standard_folder and context.reuse_reports:
+            context.related_orders[key] = result
+    return list(result)
 
 
 def _number(value, field: str) -> float:
@@ -3374,7 +3399,8 @@ def _config_from_args(args, base_config: Config | None = None) -> Config:
         value = getattr(args, name, None)
         if value:
             setattr(config, name, value)
-    config.prepare_storage()
+    if args.command not in {"audit-hardware", "preview-hardware-manual"}:
+        config.prepare_storage()
     return config
 
 
@@ -3388,7 +3414,7 @@ def main(
     stdin_text: str | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(prog="pp-flowhub order")
-    parser.add_argument("command", choices=("list", "list-index", "detail", "cost", "cost-export", "backup-status", "backup-now", "sync-index", "process-server-changes", "process-server-folder", "preview-server-changes", "confirm-server-preview", "confirm-server-material-preview", "confirm-server-preview-memory", "confirm-server-material-preview-memory", "acknowledge-server-preview-memory", "sync-aimes", "scan-server", "mark-temporary-manual", "ignore-aimes", "restore-aimes-ignore", "assign-aimes-order", "restore-aimes-assignment", "auto-resolve-issue", "resolve-issue", "save-order-annotations", "abort-order", "production-preview", "prepare-production", "migrate-production-state", "preview", "preview-related", "refresh-aimes", "stock-check", "set-ignore", "generate", "generate-db", "temporary", "generate-material", "generate-material-from-travelers", "update", "update-related", "add-hardware", "manual-hardware", "save-manual-hardware", "search-hardware-products", "add-factory", "assign-material", "create-test-data"))
+    parser.add_argument("command", choices=("audit-hardware", "preview-hardware-manual", "confirm-hardware-manual", "list", "list-index", "detail", "cost", "cost-export", "backup-status", "backup-now", "sync-index", "process-server-changes", "process-server-folder", "preview-server-changes", "confirm-server-preview", "confirm-server-material-preview", "confirm-server-preview-memory", "confirm-server-material-preview-memory", "acknowledge-server-preview-memory", "sync-aimes", "scan-server", "ignore-server-folder", "mark-temporary-manual", "ignore-aimes", "restore-aimes-ignore", "assign-aimes-order", "restore-aimes-assignment", "auto-resolve-issue", "resolve-issue", "save-order-annotations", "abort-order", "production-preview", "prepare-production", "migrate-production-state", "preview", "preview-related", "refresh-aimes", "stock-check", "set-ignore", "generate", "generate-db", "temporary", "generate-material", "generate-material-from-travelers", "update", "update-related", "add-hardware", "manual-hardware", "save-manual-hardware", "search-hardware-products", "add-factory", "assign-material", "create-test-data"))
     parser.add_argument("--folder", type=Path)
     parser.add_argument("--server-folder", type=Path, action="append", default=[])
     parser.add_argument("--name", action="append", default=[])
@@ -3473,6 +3499,20 @@ def main(
                 raise RuleError("invalid_arguments", f"{args.command} 需要 --order-id")
             from .costing import calculate_order_cost, export_order_cost
             result = export_order_cost(config, args.order_id) if args.command == "cost-export" else calculate_order_cost(config, args.order_id)
+        elif args.command == "audit-hardware":
+            from .hardware_facts import hardware_integrity_findings
+            # Maintenance is deliberately read-only and never initializes/migrates schema.
+            with sqlite3.connect(f"file:{config.workflow_database}?mode=ro", uri=True) as connection:
+                result = {"ok": True, "source": "本地数据库一致性审计",
+                          "findings": hardware_integrity_findings(connection)}
+        elif args.command in {"preview-hardware-manual", "confirm-hardware-manual"}:
+            from .hardware_source_decisions import preview_manual_handling, confirm_manual_handling
+            if args.command == "preview-hardware-manual":
+                result = preview_manual_handling(config, args.order_id, args.factory_order)
+            else:
+                if not args.confirm_write:
+                    raise RuleError("confirmation_required", "本地校验：人工处理需要 --confirm-write 与预览 token")
+                result = confirm_manual_handling(config, args.order_id, args.factory_order, args.preview_token)
         elif args.command == "backup-status":
             from .backup import backup_status
             result = backup_status(config)
@@ -3587,6 +3627,14 @@ def main(
         elif args.command == "scan-server":
             from .order_index import scan_server_changes
             result = scan_server_changes(config)
+        elif args.command == "ignore-server-folder":
+            if not args.folder:
+                raise RuleError("invalid_arguments", "ignore-server-folder 需要 --folder")
+            from .order_index import ignore_server_folder
+            try:
+                result = ignore_server_folder(config, args.folder)
+            except ValueError as exc:
+                raise RuleError("invalid_arguments", str(exc)) from exc
         elif args.command == "mark-temporary-manual":
             if not args.folder:
                 raise RuleError("invalid_arguments", "mark-temporary-manual 需要 --folder")
@@ -3833,7 +3881,8 @@ def main(
             "订单工作流操作失败",
             details={"action": args.command, "code": exc.code, "error": str(exc), "duration_seconds": round(time.perf_counter() - command_started, 6)},
         )
-        fatal = {"fatal": {"code": exc.code, "message": str(exc), **exc.context}}
+        fatal = {"fatal": {"code": exc.code, "message": str(exc), "order_id": args.order_id,
+                            "factory_order": args.factory_order, "path": str(args.folder or ""), **exc.context}}
         if result_sink is not None:
             result_sink["value"] = fatal
         if emit_result:
@@ -3845,15 +3894,18 @@ def main(
             "订单工作流操作发生未预期错误",
             details={
                 "action": args.command,
-                "code": "unexpected_excel_error",
+                "code": "local_database_error" if isinstance(exc, sqlite3.Error) else "local_processing_error",
                 "error": str(exc),
                 "duration_seconds": round(time.perf_counter() - command_started, 6),
             },
         )
         fatal = {
             "fatal": {
-                "code": "unexpected_excel_error",
-                "message": f"Excel 文件无法读取，请检查文件是否损坏或仍在编辑：{exc}",
+                "code": "local_database_error" if isinstance(exc, sqlite3.Error) else "local_processing_error",
+                "message": f"{'本地数据库' if isinstance(exc, sqlite3.Error) else '本地订单处理'}：{exc}",
+                "source": "本地数据库" if isinstance(exc, sqlite3.Error) else "本地订单处理",
+                "order_id": args.order_id, "factory_order": args.factory_order,
+                "path": str(getattr(exc, 'filename', '') or args.folder or ''),
             }
         }
         if result_sink is not None:

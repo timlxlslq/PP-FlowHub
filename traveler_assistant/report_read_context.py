@@ -26,6 +26,10 @@ class ReportReadContext:
     resolved_paths: dict = field(default_factory=dict)
     parsed: dict = field(default_factory=dict)
     directories: dict = field(default_factory=dict)
+    related_orders: dict = field(default_factory=dict)
+    discovery_timings: list = field(default_factory=list)
+    metadata_seconds: float = 0.0
+    directory_reuse_hits: int = 0
     timings: list = field(default_factory=list)
     cache_hits: int = 0
 
@@ -55,19 +59,35 @@ def preview_read_session(function):
             if isinstance(result, dict):
                 result['report_read_metrics'] = {
                     'cache_hits': context.cache_hits, 'files': context.timings,
+                    'discovery': context.discovery_timings,
+                    'directory_reuse_hits': context.directory_reuse_hits,
+                    'report_metadata_seconds': round(context.metadata_seconds, 6),
                 }
             return result
     return run
 
 
-def report_paths(folder: Path):
+def directory_paths(folder: Path):
+    """Share one name-only traversal within a preview; never persist it."""
     context = _current.get()
     key = str(folder)
-    if context is None or not context.reuse_reports:
-        return list(folder.rglob('*.xlsx'))
-    if key not in context.directories:
-        context.directories[key] = list(folder.rglob('*.xlsx'))
-    return list(context.directories[key])
+    if context is not None and context.reuse_reports and key in context.directories:
+        context.directory_reuse_hits += 1
+        return list(context.directories[key])
+    started = time.perf_counter()
+    paths = list(folder.rglob('*'))
+    if context is not None:
+        context.discovery_timings.append({
+            'stage': 'directory_discovery', 'path': key, 'entry_count': len(paths),
+            'duration_seconds': round(time.perf_counter() - started, 6),
+        })
+        if context.reuse_reports:
+            context.directories[key] = paths
+    return list(paths)
+
+
+def report_paths(folder: Path):
+    return [path for path in directory_paths(folder) if path.name.endswith('.xlsx')]
 
 
 def cached_report(function):
@@ -82,7 +102,9 @@ def cached_report(function):
         if bound.arguments.get('allow_missing_factory') is False:
             bound.arguments['fallback_factory'] = ''
         path = next(value for value in bound.arguments.values() if isinstance(value, Path))
+        metadata_started = time.perf_counter()
         stamp = path.stat()
+        context.metadata_seconds += time.perf_counter() - metadata_started
         key = (function.__module__, function.__name__, repr(bound.arguments),
                stamp.st_mtime_ns, stamp.st_size)
         if key in context.parsed:
@@ -90,7 +112,9 @@ def cached_report(function):
             return deepcopy(context.parsed[key])
         started = time.perf_counter()
         result = function(*args, **kwargs)
+        metadata_started = time.perf_counter()
         after = path.stat()
+        context.metadata_seconds += time.perf_counter() - metadata_started
         if (after.st_mtime_ns, after.st_size) != (stamp.st_mtime_ns, stamp.st_size):
             raise ValueError(f'读取期间报表发生变化，请重新预览：{path}')
         context.timings.append({'path': str(path), 'reader': function.__name__,

@@ -2,6 +2,8 @@
 import hashlib
 import json
 import sqlite3
+from datetime import datetime
+from pathlib import Path
 
 
 def decision_revision(value):
@@ -63,3 +65,76 @@ def with_source_decisions(function):
             context.locked_decisions = load_source_decisions(config)
             return function(config, *args, **kwargs)
     return run
+
+
+def preview_manual_handling(config, order_id, factory_order):
+    """Read-only proposal binding the decision to current facts and report bytes."""
+    from .core import RuleError
+    order, factory = order_id.strip().upper(), factory_order.strip().upper()
+    with sqlite3.connect(f'file:{config.workflow_database}?mode=ro', uri=True) as connection:
+        owner = connection.execute('select order_id from factory_orders where factory_order=?', (factory,)).fetchone()
+        if not owner or owner[0] != order:
+            raise RuleError('hardware_owner_invalid', f'本地校验：订单 {order} / 工厂单 {factory} 归属不匹配')
+        saved = connection.execute('select decision_json from hardware_source_decisions where factory_order=?', (factory,)).fetchone()
+        decision = json.loads(saved[0]) if saved else None
+        if not decision or not decision.get('selected'):
+            raise RuleError('hardware_source_missing', f'本地校验：订单 {order} / 工厂单 {factory} 尚无已确认来源，请先完成 Server 预览')
+        paths = {str(Path(decision['selected']['path']).resolve()): decision['selected']['path']}
+        for path, factories in connection.execute("select path,factory_order from source_files where kind='fittings'"):
+            if factory in str(factories).split(','):
+                paths[str(Path(path).resolve())] = path
+        revisions = {}
+        for path in sorted(paths.values()):
+            try:
+                revisions[path] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            except OSError as exc:
+                raise RuleError('server_report_read', f'Server 报表读取失败：订单 {order} / 工厂单 {factory}；文件 {path}：{exc}',
+                                source='Server 报表', order_id=order, factory_order=factory, path=path) from exc
+        facts = connection.execute("select order_id,factory_order,product_code,quantity,source_path from hardware_items where factory_order=? and source_type='aicnc' order by id", (factory,)).fetchall()
+        version = connection.execute('select * from hardware_source_versions where factory_order=?', (factory,)).fetchone()
+        proposal = {'order_id': order, 'factory_order': factory, 'decision': decision,
+                    'report_versions': revisions, 'automatic_rows': facts, 'version': version}
+        return {**proposal, 'token': decision_revision(proposal)}
+
+
+def confirm_manual_handling(config, order_id, factory_order, token):
+    """Atomic, explicit manual disposition; never claims shipment or deletes manual rows."""
+    from .core import RuleError
+    from .order_index import OrderIndexStore
+    from .hardware_facts import replace_factory_hardware
+    if not token:
+        raise RuleError('confirmation_required', '本地校验：请先预览人工处理并提供确认版本')
+    store = OrderIndexStore(config.workflow_database)
+    try:
+        store.connection.execute('begin immediate')
+        proposal = preview_manual_handling(config, order_id, factory_order)
+        if proposal['token'] != token:
+            raise RuleError('hardware_source_stale', f'本地校验：订单 {order_id} / 工厂单 {factory_order} 的报表或本地事实已变化，请重新预览')
+        decision = {**proposal['decision'], 'handling': 'manual', 'report_versions': proposal['report_versions']}
+        factory = proposal['factory_order']
+        replace_factory_hardware(store.connection, factory, [], allow_empty=True,
+                                 source_path=decision['selected']['path'], reason='用户确认人工处理自动五金')
+        store.connection.execute('insert into hardware_source_decisions(factory_order,decision_json) values(?,?) '
+                                 'on conflict(factory_order) do update set decision_json=excluded.decision_json',
+                                 (factory, json.dumps(decision, ensure_ascii=False, sort_keys=True)))
+        store.connection.execute('update hardware_source_versions set order_id=? where factory_order=?',
+                                 (proposal['order_id'], factory))
+        # Index fingerprints describe the exact files confirmed above.
+        for path, fingerprint in proposal['report_versions'].items():
+            indexed_path = path
+            saved = store.connection.execute('select factory_order from source_files where path=?', (indexed_path,)).fetchone()
+            factories = sorted(set(str(saved[0]).split(',')) | {factory}) if saved else [factory]
+            folder = store.connection.execute('select source_folder from source_files where path=?', (indexed_path,)).fetchone()
+            store.upsert_source_file(Path(indexed_path), source_folder=Path(folder[0]) if folder else Path(indexed_path).parent, kind='fittings',
+                                     order_id=proposal['order_id'], factory_order=','.join(x for x in factories if x),
+                                     changed_at=datetime.now().isoformat())
+            if hashlib.sha256(Path(path).read_bytes()).hexdigest() != fingerprint:
+                raise RuleError('hardware_source_stale', f'Server 报表在确认期间变化：{path}')
+        store.resolve_active_issue('hardware_integrity:' + factory)
+        store.commit()
+        return {'ok': True, 'order_id': proposal['order_id'], 'factory_order': factory, 'handling': 'manual'}
+    except Exception:
+        store.connection.rollback()
+        raise
+    finally:
+        store.close()

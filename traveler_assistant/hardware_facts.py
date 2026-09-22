@@ -154,11 +154,28 @@ def audit_factory_hardware(connection, factory_order, now=None):
         (key, 'outbound_hardware_difference', factory[0], factory_order, '', message, now, now))
 
 
-def hardware_integrity_findings(connection):
+def hardware_integrity_findings(connection, *, factory_orders=None):
     """只读检查跨路径重复投影及有报表索引却无自动五金的工厂单。"""
     findings = []
     has_versions = bool(connection.execute("select 1 from sqlite_master where name='hardware_source_versions'").fetchone())
+    scope = None if factory_orders is None else set(factory_orders)
     for factory, order in connection.execute("select factory_order,order_id from factory_orders where aimes_status='active'"):
+        if scope is not None and factory not in scope:
+            continue
+        indexed_paths = {path: fingerprint for path, factories, fingerprint in connection.execute(
+            "select path,factory_order,content_fingerprint from source_files where kind='fittings'")
+            if factory in str(factories).split(',')}
+        decision_row = connection.execute('select decision_json from hardware_source_decisions where factory_order=?', (factory,)).fetchone()
+        decision = json.loads(decision_row[0]) if decision_row else {}
+        if decision.get('handling') == 'manual':
+            revisions = decision.get('report_versions', {})
+            # Missing/changed indexed reports cannot inherit the old decision.
+            if revisions and indexed_paths == revisions and not connection.execute(
+                "select 1 from hardware_items where factory_order=? and source_type='aicnc' limit 1", (factory,)).fetchone():
+                continue
+            findings.append({'factory_order': factory, 'order_id': order, 'path': next(iter(indexed_paths or revisions), ''),
+                             'message': '人工处理后的报表版本、索引或自动五金记录不一致，请重新核对。'})
+            continue
         by_path = {}
         for path, code, qty in connection.execute("select source_path,product_code,quantity from hardware_items where factory_order=? and source_type='aicnc'", (factory,)):
             by_path.setdefault(path, []).append((code, qty))
@@ -176,6 +193,13 @@ def hardware_integrity_findings(connection):
             indexed = any(factory in str(row[0]).split(',') for row in connection.execute("select factory_order from source_files where kind='fittings'"))
             if indexed:
                 findings.append({'factory_order': factory, 'order_id': order, 'message': '存在五金报表索引，但没有有效自动五金；请核对是否全部忽略或资料缺失。'})
+    for row in findings:
+        paths = [path for path, factories in connection.execute("select path,factory_order from source_files where kind='fittings'")
+                 if row['factory_order'] in str(factories).split(',')]
+        row['path'] = row.get('path') or (paths[0] if paths else '')
+        row['source_paths'] = paths
+        row['source'] = '本地数据库一致性审计'
+        row['message'] = f"本地数据库一致性审计：订单 {row['order_id']} / 工厂单 {row['factory_order']}；{row['message']}" + (' 文件：' + '、'.join(paths) if paths else '')
     return findings
 
 
@@ -189,9 +213,9 @@ def audit_hardware_integrity(connection):
             connection.execute("update active_issues set status='resolved',resolved_at=? where issue_key=?", (now, key))
     for row in findings:
         connection.execute("""insert into active_issues(issue_key,kind,order_id,factory_order,path,message,status,first_seen,last_seen,resolved_at)
-            values(?,'hardware_integrity',?,?, '',?,'open',?,?,'') on conflict(issue_key) do update set
-            message=excluded.message,status='open',last_seen=excluded.last_seen,resolved_at=''""",
-            ('hardware_integrity:' + row['factory_order'], row['order_id'], row['factory_order'], row['message'], now, now))
+            values(?,'hardware_integrity',?,?, ?,?,'open',?,?,'') on conflict(issue_key) do update set
+            path=excluded.path,message=excluded.message,status='open',last_seen=excluded.last_seen,resolved_at=''""",
+            ('hardware_integrity:' + row['factory_order'], row['order_id'], row['factory_order'], row['path'], row['message'], now, now))
     return findings
 
 

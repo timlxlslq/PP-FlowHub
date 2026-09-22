@@ -1,5 +1,19 @@
 # Server 扫描性能观测
 
+## 2026-09-18：PP0064 显式材料预览
+
+安装版诊断复现耗时 171.54 秒：五金来源检查 11.04 秒、内存预览准备 0.17 秒、Server 解析校验 156.24 秒、组装预览 4.06 秒。报表解析计时合计仅 1.65 秒；两次后台采样约 99% 停在 `stat`（文件属性查询）。目录有 4,114 个文件，只有 25 个 Excel。关联订单识别原先先对所有路径执行 `is_file()`，再匹配订单号，且同步和校验重复执行。
+
+改法保留完整子目录及共享订单识别：先匹配文件名中的订单号，只对候选路径查属性；`ReportReadContext` 在一次预览内共享目录名称清单和关联订单结果，下次请求重新发现。报表内容仍按修改时间和大小校验，读取前后变化仍报错，不把一次请求的复用变成跨请求持久缓存。
+
+日志 `report_read_metrics.discovery` 记录目录枚举和关联订单识别（后者可能包含首次枚举，不能直接相加）；`report_metadata_seconds` 记录报表读取装饰器的属性查询时间。`operation_timing.server_parse_phases` 保留内部索引阶段耗时，属于外层 `server_parse` 的细分，不能再与外层相加。界面完成消息使用本次预览计时，预览完成仍必须人工确认才能写入材料。
+
+回归入口：`tests/test_preview_discovery.py`、`tests/test_order_index.py`、`tests/test_macos_ui.swift`。实际提速须以重新安装后的同一入口测量为准；局部目录实验不等于整次预览耗时。
+
+新源码在正式 SQLite 的隔离副本上读取同一 Server 目录，预览总计 17.55 秒，解析校验 7.35 秒。目录枚举一次 8.03 秒，复用 5 次；关联订单候选属性查询 30 次（包括需要排除的目录），识别共 0.32 秒。结果为 PP0064 校验正常、两项五金 SKU 待处理。此测量未确认业务写入，也不是安装版 UI 验收；SMB 状态和系统缓存可能影响跨次耗时比较。
+
+发布验证：完整 `test-release` 通过（403 项 Python 测试、1 项跳过，Swift UI、AIMES 离线表格和 workbook 专项通过）；一次串行构建完成，Bundle Identifier 为 `com.pacificpride.ppflowhub`，版本 0.4.1 (5)，三份修改后的 Python 资源与源码一致。电脑控制工具明确禁止操作 Terminal，故本次未完成 Apple Development 签名、正式安装及安装版点击验收；未签名产物保留在 `/tmp/pp-flowhub-build/PP FlowHub.app`。
+
 > **历史观测快照（2026-09）**：本文保留性能测量和增量设计背景；当前轻量 `scan_server_changes` 只比较元数据和 XML 标记，不解析 Excel。当前边界与验收以 [系统架构](../architecture/system-architecture.md)、[业务规则](../business-rules.md) 和 [发布流程](../release-testing.md) 为准，本文不构成当前待办或授权。
 
 ## 本次做法

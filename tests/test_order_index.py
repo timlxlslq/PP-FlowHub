@@ -875,6 +875,7 @@ class OrderIndexTests(unittest.TestCase):
                 preview = preview_server_changes(config, [folder])
 
             preview_timing = preview["operation_timing"]
+            self.assertIn("order_validation", preview_timing["server_parse_phases"])
             self.assertAlmostEqual(
                 preview_timing["total_seconds"],
                 sum(stage["duration_seconds"] for stage in preview_timing["stages"]),
