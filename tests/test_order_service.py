@@ -10,6 +10,8 @@ from traveler_assistant import order_service
 
 
 class OrderServiceTests(unittest.TestCase):
+    # 验证确认操作响应不会覆盖订单列表索引缓存。
+    # self：当前测试用例或测试替身实例。
     def test_confirmation_response_cannot_replace_list_index_cache(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -20,9 +22,16 @@ class OrderServiceTests(unittest.TestCase):
             list_calls = 0
 
             class Logger:
+                # 记录发送的事件位置参数和关键字参数。
+                # self：当前测试用例或测试替身实例。
+                # args：转发给被模拟接口的位置参数。
+                # kwargs：转发给被模拟接口的关键字参数。
                 def event(self, *args, **kwargs):
                     events.append((args, kwargs))
 
+            # 模拟确认和列表命令的不同响应，跟踪列表读取次数。
+            # arguments：模拟 CLI 的参数列表。
+            # kwargs：转发给被模拟接口的关键字参数。
             def fake_main(arguments, **kwargs):
                 nonlocal list_calls
                 calls.append(list(arguments))

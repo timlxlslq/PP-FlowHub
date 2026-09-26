@@ -1,3 +1,4 @@
+// 检查修复后的材料表并输出图片预览。参数：无；使用文件内固定的输入和输出路径。
 import fs from "node:fs/promises";
 import { FileBlob, SpreadsheetFile } from "@oai/artifact-tool";
 

@@ -1,7 +1,7 @@
-"""Request-local report reuse and explicit hardware-source choices.
+"""在单次请求内复用报表读取结果，并保存明确的五金来源选择。
 
-Nothing survives the request or writes to disk. Cached results are copied so
-one validation pass cannot mutate the source facts used by another pass.
+上下文不跨请求保留，也不写入磁盘；复用结果时复制数据，避免一次校验
+修改另一次校验所依赖的来源事实。
 """
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -11,6 +11,7 @@ from functools import wraps
 from pathlib import Path
 import time
 import inspect
+import os
 
 
 @dataclass
@@ -38,11 +39,13 @@ _current = ContextVar('report_read_context', default=None)
 
 
 def current_report_context():
+    """返回当前请求的报表上下文；无参数，未建立会话时返回 None。"""
     return _current.get()
 
 
 @contextmanager
 def report_read_session(choices=None):
+    """建立并在退出时还原报表上下文；choices 为工厂单到所选来源标识的映射。"""
     context = ReportReadContext(choices=dict(choices or {}))
     token = _current.set(context)
     try:
@@ -52,8 +55,10 @@ def report_read_session(choices=None):
 
 
 def preview_read_session(function):
+    """为预览入口创建读取会话并附加读取统计；function 为被包装的预览函数。"""
     @wraps(function)
     def run(*args, **kwargs):
+        """执行预览并补充统计；args、kwargs 原样转交，五金来源选择从关键字参数读取。"""
         with report_read_session(kwargs.get('hardware_source_choices')) as context:
             result = function(*args, **kwargs)
             if isinstance(result, dict):
@@ -68,14 +73,19 @@ def preview_read_session(function):
 
 
 def directory_paths(folder: Path):
-    """Share one name-only traversal within a preview; never persist it."""
+    """列出 folder 下的全部路径，在单次预览内复用遍历结果，不持久保存。"""
     context = _current.get()
     key = str(folder)
     if context is not None and context.reuse_reports and key in context.directories:
         context.directory_reuse_hits += 1
         return list(context.directories[key])
     started = time.perf_counter()
-    paths = list(folder.rglob('*'))
+    # 新版优化由独立编号台账处理，旧版订单预览不可跨入新版子目录重复累计。
+    from .aicnc_import import OPTIMIZATION_RE
+    paths = []
+    for parent, directories, files in os.walk(folder):
+        directories[:] = [name for name in directories if not OPTIMIZATION_RE.fullmatch(name)]
+        paths.extend(Path(parent) / name for name in directories + files)
     if context is not None:
         context.discovery_timings.append({
             'stage': 'directory_discovery', 'path': key, 'entry_count': len(paths),
@@ -87,13 +97,16 @@ def directory_paths(folder: Path):
 
 
 def report_paths(folder: Path):
+    """返回 folder 下名称以 .xlsx 结尾的路径，复用当前请求的目录遍历。"""
     return [path for path in directory_paths(folder) if path.name.endswith('.xlsx')]
 
 
 def cached_report(function):
+    """包装报表解析器 function，按参数及文件版本在当前请求内复用解析结果。"""
     signature = inspect.signature(function)
     @wraps(function)
     def read(*args, **kwargs):
+        """读取并校验报表版本；args、kwargs 为原解析器参数，复用命中时返回深拷贝。"""
         context = _current.get()
         if context is None or not context.reuse_reports:
             return function(*args, **kwargs)

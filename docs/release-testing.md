@@ -76,11 +76,11 @@ Traveler 是按需导出能力，不是查询订单、登记生产或确认出�
 
 | 业务链 | 必须验证的行为 | 现有自动测试入口 |
 | --- | --- | --- |
-| 启动与同步 | 启动按本地缓存 → 当日 AIMES 检查 → Server 扫描；手动获取 AIMES 与手动扫描 Server 相互独立，手动 `force` 不会隐式重扫 Server；重复运行不能把成功事实误报成新的外部操作。 | [test_order_index.py](../tests/test_order_index.py) 的 AIMES daily/force 测试；[test_macos_ui.swift](../tests/test_macos_ui.swift) 的启动进度与历史测试。 |
-| AIMES 事实与进度 | 成功标志、缓存、警告和持久事实一致；失败保留可用缓存；后台 progress、阶段耗时和完成消息按同一次运行保存。非法销售单名称不进入有效映射缓存，而进入持久 `aimes_review_rows`；Swift 将 `aimesFormatWarnings` 投影为待人工确认，并支持确认归属或忽略。 | [test_core.py](../tests/test_core.py) 的错误分类/脱敏/exact verify；[test_order_index.py](../tests/test_order_index.py) 的 warning、review、重开、确认/忽略和按日跳过；[test_report_selection.py](../tests/test_report_selection.py) 的流式进度；[test_macos_ui.swift](../tests/test_macos_ui.swift) 的 AIMES 会话消息。 |
+| 启动与同步 | 启动按本地缓存 → AIMES 当天成功则跳过、否则获取 → Server 扫描；手动获取 AIMES 与手动扫描 Server 相互独立，手动 `force` 不会隐式重扫 Server；重复运行不能把成功事实误报成新的外部操作。 | [test_order_index.py](../tests/test_order_index.py) 的 AIMES daily/force 测试；[test_macos_ui.swift](../tests/test_macos_ui.swift) 的启动进度与历史测试。 |
+| AIMES 事实与进度 | 成功标志、缓存、警告和持久事实一致；失败保留可用缓存；后台 progress、阶段耗时和完成消息按同一次运行保存。非法销售单名称不进入有效映射缓存，而进入会话临时 `pending_aimes_reviews`；Swift 将 `aimesFormatWarnings` 投影为待人工确认，并支持确认归属或忽略。 | [test_core.py](../tests/test_core.py) 的错误分类/脱敏/exact verify；[test_order_index.py](../tests/test_order_index.py) 的 warning、review、重开、确认/忽略和按日跳过；[test_report_selection.py](../tests/test_report_selection.py) 的流式进度；[test_macos_ui.swift](../tests/test_macos_ui.swift) 的 AIMES 会话消息。 |
 | Server 发现到确认 | `scan-server` 只返回本次优化文件发现，不保存优化证据、优化时间或 XML baseline；磁盘快照排除 XML。材料确认后才推进工厂单及订单优化状态，并保存预览版本的文件基线。重复扫描、取消预览、写入失败均不得推进状态或基线。“确认无变化”仅更新已有材料确认文件夹的预览 XML 基线，不修改业务事实；拒绝未校验、有差异或本地事实已变化的预览。 | [test_order_index.py](../tests/test_order_index.py) 的 preview/confirm/scan 测试，以及 [test_confirmed_material_optimization.py](../tests/test_confirmed_material_optimization.py) 的重复扫描、取消预览、事务回滚、无 XML 材料确认、新增工厂单、逐单确认和预览后 XML 变化回归。 |
 | 报表变更与五金来源 | 报表内容变化要重新进入预览；已确认五金来源按工厂单保护，内容未变化时重复预览不能切换或重复替换；失败写入必须回滚。 | [test_report_selection.py](../tests/test_report_selection.py) 的 source choice/restart 测试；[test_hardware_facts.py](../tests/test_hardware_facts.py) 的 projection、rollback 和 confirmed shipment 测试。 |
-| SKU 映射与待处理 | 未完成映射且未按规则有效忽略的项目，阻止需要映射的写入；有效忽略按规则排除，不能绕过其他校验；“稍后处理”只是动作，不解决问题；映射保存成功后回读并继续原文件夹预览；不得重复提交业务写入或丢失已确认映射。 | [test_inventory.py](../tests/test_inventory.py) 的 mapping/block 测试；[test_macos_ui.swift](../tests/test_macos_ui.swift) 的 pending mapping callback/resume 测试；[test_order_index.py](../tests/test_order_index.py) 的 pending/review 持久化测试。 |
+| SKU 映射与待处理 | 未完成映射且未按规则有效忽略的项目，阻止需要映射的写入；有效忽略按规则排除，不能绕过其他校验；“稍后处理”只是动作，不解决问题；映射保存成功后回读并继续原文件夹预览；不得重复提交业务写入或丢失已确认映射。 | [test_inventory.py](../tests/test_inventory.py) 的 mapping/block 测试；[test_macos_ui.swift](../tests/test_macos_ui.swift) 的 pending mapping callback/resume 测试；[test_order_index.py](../tests/test_order_index.py) 的 pending/review 会话生命周期测试。 |
 | 材料 SKU schema 与迁移 | 五张 SKU 引用表有 `products(code)` 外键，相关连接在事务前启用约束；旧材料、生产消耗和 Server 分配唯一迁移到 SKU，无法匹配时整体回滚；商品目录缺失的历史 SKU 保留且阻断新写入；映射或忽略规则改变不重绑或移除已确认 SKU，订单材料行删除后生产消耗/Server 分配仍保护商品业务属性；历史 raw fingerprint/journal 保持五字段来源快照，SKU 或数量真实变化仍触发更新；名义厚度/规范颜色、生产累计、详情、成本、库存和 Traveler 在迁移前后保持业务等价。 | [test_material_sku_contract.py](../tests/test_material_sku_contract.py) 的旧库迁移、失败回滚、外键、目录保留、属性锁定、映射不重绑、库存需求和读写链回归；[test_material_sku_outbound_history.py](../tests/test_material_sku_outbound_history.py) 的旧指纹兼容、SKU/数量变化、后改 mapping/ignore 不重绑回归；相关 [test_production.py](../tests/test_production.py)、[test_inventory.py](../tests/test_inventory.py)、[test_order_index.py](../tests/test_order_index.py)。 |
 | 生产与出货 | 订单级板材/封边生产消耗写入生产事实；工厂单五金出货写入出货事实。已确认无可出库五金时仅按规则更新出货状态，不创建虚假库存单据；生产不等于工厂单出货。 | [test_production.py](../tests/test_production.py)；[test_inventory.py](../tests/test_inventory.py) 的 production/outbound separation、factory selection 和 shipped-block 测试；[test_macos_ui.swift](../tests/test_macos_ui.swift) 的生产/出货显示测试。 |
 | 外部单据与本地同步 | 外部库存单据成功而本地同步失败时，先按单据号和本地事实对账；没有确认前不能盲目重试扣减或删除已成功的外部单据。 | [test_inventory.py](../tests/test_inventory.py) 的 outbound timeout、operation journal、document reconciliation 测试；[test_workflow_database.py](../tests/test_workflow_database.py) 的出货关系迁移测试。 |
@@ -92,7 +92,7 @@ Traveler 是按需导出能力，不是查询订单、登记生产或确认出�
 
 `tests/test_manual_hardware.py` 覆盖人工五金物理删除、重复行合并、批量新增失败回滚、并发/重复提交、工厂单权限、旧失效行清理、字段移除、迁移失败完整回滚与幂等；`test_hardware_facts.py` 验证移除字段不会改变既有来源指纹。正式升级前执行 SQLite Online Backup，并在副本核对所有有效五金逐字段一致、其他业务表不变、完整性及外键通过；元数据迁移执行时间允许不同。关键订单详情、成本和库存需求在旧/新源码的隔离副本对比，不能只比较总行数。
 
-安装版检查人工五金 820×620 弹窗、工厂单与 SKU 输入左对齐、回车搜索、正常状态不显示重新载入，以及暂存删除可撤销。读取失败显示重试，保存失败可重新载入；有草稿时先提示放弃。未经额外授权，不在真实订单保存验收草稿。
+安装版检查人工五金 820×620 弹窗：标题与订单号同一行，标题栏和底部操作栏总高均为 50 点，内容垂直居中；新增表单固定在上方，只有下方工厂单列表滚动，滚动条轨道与列表可视区域上下对齐；搜索结果框与左侧标签齐平，规格列加宽，表头与各列内容水平居中。用 M1161 检查长规格完整换行；多结果检查上一项/下一项、选择保留和修改查询后页码重置。继续检查工厂单与 SKU 输入左对齐、回车搜索、正常状态不显示重新载入，以及暂存删除可撤销。读取失败显示重试，保存失败可重新载入；有草稿时先提示放弃。已出库或失效工厂单应保留“仅查看”，不出现删除按钮或“操作”标题；可编辑分组仍能暂存删除和撤销。未经额外授权，不在真实订单保存验收草稿。
 
 ## Traveler 与 material 的专项边界
 
@@ -128,6 +128,10 @@ generate-material → update-related
 ```
 
 [build-app](../scripts/build-app) 实际检查固定 Bundle Identifier、Python 依赖、Node 架构和动态库，编译 Swift 与钥匙串 helper，复制 Python/Node/Playwright/项目资源，先执行打包 Node 的 `--version` 验证能启动，再验证绝对路径能 import Playwright 且 `chromium.launch` 接口存在；Playwright 只做 import 与接口检查，不启动浏览器，最后生成 `/tmp/pp-flowhub-build/PP FlowHub.app`。应记录 `CFBundleName`、`CFBundleExecutable`、`CFBundleIdentifier`、版本、可执行文件 mtime/SHA-256 和关键资源是否与当前源一致。
+
+每次串行构建通过打包检查后，`build-app` 调用 `tools/app_version.py`，从源码、上次构建包及已安装包中取最高的三段数字版本再递增。普通修改默认执行 `./scripts/build-app`（等同 `--patch`），例如 `0.4.1 → 0.4.2`；新增或修改较大功能时执行 `./scripts/build-app --minor`，例如 `0.4.2 → 0.5.0`。修改范围由开发者或 Codex 判断，脚本不根据代码行数猜测。
+
+新版本同时写入产物和源码 `macos/Info.plist` 的 `CFBundleShortVersionString`、`CFBundleVersion`，不另维护独立构建号；源码版本应随改动保留。可选包不存在时跳过，版本损坏则停止构建；版本保存后若发布产物失败，允许跳号。窗口标题显示 `PP FlowHub  V0.4.2`，其中 `V` 仅是显示前缀。`install-app` 保留构建时版本，失败后重试安装同一产物不会再次升级版本。
 
 构建成功不等于正式安装成功。构建成功后，由 Codex 主动自动通过可用的普通 macOS Terminal/Aqua 会话签名安装，无需重复确认。运行绝对路径：
 
@@ -191,3 +195,15 @@ generate-material → update-related
 `test_hardware_integrity_boundaries.py` 覆盖 PP0064 范围核对不生成 PP0008 问题、空范围、显式维护审计只读且保留路径、人工同版重启、变版重新选择、保留手工五金和出货事实、旧 token 拒绝、人工确认末步失败回滚、多工厂单报表末步失败回滚，以及数据库/未知异常分类。新增故障注入使用 mock，不新增测试触发器。Swift 回归验证来源、订单、工厂单和路径经过错误呈现后仍保留；旧轨道数量回归先选择变版来源，再验证奇数阻断。
 
 真实 PP0008 不作为写入验收夹具，不执行补登记或删问题；其历史人工处理意图需独立确认。安装版业务入口验证优先隔离 state-dir；无法安全隔离启动时只验证签名、包内资源及隔离后端，不将其称为真实订单窗口验收。
+
+## 待处理实时检查与库存恢复（2026-09-24）
+
+`test_pending_recovery.py` 在隔离库验证普通问题与 AIMES 异常不落入主库、不跨连接恢复、历史问题不投影、外部修复后再检查才清除、恢复项跨重启可见、单据不匹配/部分完成/本地失败保留、成功恢复幂等、恢复元数据不改变操作身份。离线 Node 页面替身执行实际核对分支及 SKU/数量校验，拒绝缺单和数量不一致，不访问网络。
+
+Swift 回归验证重新检查失败保留、成功清除、恢复专用命令、运行中防重复和恢复后回读。上述证据不代表真实金蝶页面核对已验收；安装版检查待处理中心的来源刷新、未知状态和恢复入口，不提交真实库存动作。
+
+## 零材料消耗生产（2026-09-24）
+
+`test_zero_material_production.py` 使用临时库验证正余额、零余额、无材料及历史已领完时的显式生产确认；错误选择、未优化/已中止/失效/已生产和库存待恢复阻断；非法数量不能绕过库存；末步失败整体回滚；材料、历史消耗、出库、五金及 schema 不变；CLI 确认与刷新后状态回读。Swift 回归验证零量、空草稿、正消耗与错误输入边界。安装版只打开生产面板检查全零确认按钮并取消，未经具体订单业务授权不提交；核对没有新增字段或迁移。
+
+`testProductionPreviewSheetLifecycle` 挂载实际 `ProductionSheet`，延迟模拟预览回调，检查只发起一次读取、读取中禁用、失败可重试，以及全零预览成功后无障碍按钮状态为启用；另验证忙碌请求明确失败回调。验收过程中不点击生产确认，所有后端响应由隔离测试替身提供。

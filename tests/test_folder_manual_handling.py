@@ -1,4 +1,4 @@
-"""Independent folder completion: no production inventory or order facts are rewritten."""
+"""文件夹独立完成处理，不改写生产、库存或订单事实。"""
 import os
 import tempfile
 import unittest
@@ -13,6 +13,8 @@ from traveler_assistant.order_index import (
 
 
 class FolderManualHandlingTests(unittest.TestCase):
+    # 建立隔离文件夹处理环境，并阻止访问真实库存系统。
+    # self：当前测试用例或测试替身实例。
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -22,6 +24,9 @@ class FolderManualHandlingTests(unittest.TestCase):
         self.inventory = patch('traveler_assistant.inventory.run_jdy', side_effect=AssertionError('inventory must not be called')).start()
         self.addCleanup(patch.stopall)
 
+    # 生成含优化 XML 和故意无效报告的人工处理测试文件夹。
+    # self：当前测试用例或测试替身实例。
+    # name：测试文件夹名称。
     def folder(self, name='PP0008-GLASSCABINET AND PP0035 PANELS'):
         folder = self.config.source_root / name
         xml = folder / 'New Nesting' / 'Optimize file'
@@ -29,10 +34,12 @@ class FolderManualHandlingTests(unittest.TestCase):
         (xml / 'Optimize file.xml').write_text('<Optimize />')
         (xml / 'layout file' / 'nesting_result.xml').write_text('<Nesting />')
         (folder / 'Report').mkdir()
-        # Invalid workbook proves manual completion/metadata scanning does not parse Excel.
+        # 故意使用无效工作簿，验证人工完成和元数据扫描不解析 Excel。
         (folder / 'Report' / 'Fittingslist.xlsx').write_bytes(b'not-an-excel-file')
         return folder
 
+    # 为人工处理测试准备已出货订单、材料、五金和生产事实。
+    # self：当前测试用例或测试替身实例。
     def seed(self):
         store = OrderIndexStore(self.config.workflow_database)
         store.connection.executemany(
@@ -59,12 +66,17 @@ class FolderManualHandlingTests(unittest.TestCase):
         store.connection.execute("update factory_orders set production_record_id=1 where order_id='PP0008' and factory_order='F100'")
         store.commit(); store.close()
 
+    # 读取指定文件夹的临时订单处理记录。
+    # self：当前测试用例或测试替身实例。
+    # folder：目标测试来源文件夹。
     def record(self, folder):
         store = OrderIndexStore(self.config.workflow_database)
         result = store.temporary_order(str(folder))
         store.close()
         return result
 
+    # 读取订单、材料、五金、生产和出库事实快照。
+    # self：当前测试用例或测试替身实例。
     def facts(self):
         store = OrderIndexStore(self.config.workflow_database)
         result = {name: store.connection.execute('select * from '+name).fetchall() for name in [
@@ -74,11 +86,16 @@ class FolderManualHandlingTests(unittest.TestCase):
         store.close()
         return result
 
+    # 改写优化 XML 内容并推进修改时间，以模拟新的 Server 变化。
+    # self：当前测试用例或测试替身实例。
+    # folder：目标测试来源文件夹。
     def change_xml(self, folder):
         path = folder / 'New Nesting' / 'Optimize file' / 'Optimize file.xml'
         path.write_text('<Optimize changed="true" />')
         os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 2))
 
+    # 验证已出货混合补单独立处理，允许没有关联订单引用。
+    # self：当前测试用例或测试替身实例。
     def test_shipped_mixed_supplement_is_independent_and_can_have_no_references(self):
         folder = self.folder(); self.seed()
         before = self.facts()
@@ -96,9 +113,11 @@ class FolderManualHandlingTests(unittest.TestCase):
         self.assertEqual(before, self.facts())
         self.inventory.assert_not_called()
 
+    # 验证新 AIMES 工厂单或未知归属阻止按混合补单处理。
+    # self：当前测试用例或测试替身实例。
     def test_new_aimes_factory_or_unknown_owner_prevents_mixed_supplement(self):
         folder = self.folder(); self.seed()
-        scan_server_changes(self.config)  # A later AIMES row must invalidate pending classification.
+        scan_server_changes(self.config)  # 后续出现的 AIMES 记录必须使原待处理分类失效。
         store = OrderIndexStore(self.config.workflow_database)
         store.upsert_aimes_factory('F102', order_id='PP0035', factory_name='PP0035 NEW', sales_order_name='PP0035', split_time='2026-09-14T11:00:00', seen_at='2026-09-14T11:00:00')
         store.commit()
@@ -111,6 +130,8 @@ class FolderManualHandlingTests(unittest.TestCase):
         self.assertEqual(_server_folder_handling_mode(store, unknown), 'mixed')
         store.close()
 
+    # 验证普通文件夹允许可选关联，重复处理保留原时间。
+    # self：当前测试用例或测试替身实例。
     def test_plain_folder_optional_references_and_duplicate_time(self):
         folder = self.folder('临时柜子')
         with patch('traveler_assistant.order_index._now', return_value='2026-09-14T10:00:00'):
@@ -125,6 +146,8 @@ class FolderManualHandlingTests(unittest.TestCase):
         self.assertEqual(second['reference_order_ids'], [])
         self.assertEqual(self.facts()['orders'], [])
 
+    # 验证 XML 变化在观察期后仍保持待处理，重新完成后重建基线。
+    # self：当前测试用例或测试替身实例。
     def test_xml_change_remains_pending_past_deadline_then_new_completion(self):
         folder = self.folder(); self.seed()
         mark_temporary_folder_manual(self.config, folder)
@@ -140,6 +163,8 @@ class FolderManualHandlingTests(unittest.TestCase):
         self.assertEqual(self.record(folder)['server_scan_policy'], 'watching')
         self.assertFalse(scan_server_changes(self.config)['server']['changes'])
 
+    # 验证未变化的文件夹可独立于所属订单结束观察期。
+    # self：当前测试用例或测试替身实例。
     def test_unchanged_folder_expires_independently_of_parent_orders(self):
         folder = self.folder(); self.seed()
         mark_temporary_folder_manual(self.config, folder)
@@ -149,6 +174,8 @@ class FolderManualHandlingTests(unittest.TestCase):
         self.assertFalse(scan_server_changes(self.config)['server']['changes'])
         self.assertEqual(self.record(folder)['server_scan_policy'], 'permanent')
 
+    # 验证人工处理路径阻止自动预览及自动出库。
+    # self：当前测试用例或测试替身实例。
     def test_manual_route_blocks_preview_and_auto_outbound(self):
         folder = self.folder(); self.seed()
         mark_temporary_folder_manual(self.config, folder)
@@ -159,6 +186,8 @@ class FolderManualHandlingTests(unittest.TestCase):
         self.assertEqual(before, self.facts())
         self.inventory.assert_not_called()
 
+    # 验证处理失败时完成记录与基线一起回滚。
+    # self：当前测试用例或测试替身实例。
     def test_failure_rolls_back_completion_and_baseline(self):
         folder = self.folder(); self.seed()
         before = self.facts()
@@ -168,6 +197,8 @@ class FolderManualHandlingTests(unittest.TestCase):
         self.assertIsNone(self.record(folder))
         self.assertEqual(before, self.facts())
 
+    # 验证增量迁移保留已有临时订单记录。
+    # self：当前测试用例或测试替身实例。
     def test_additive_migration_preserves_existing_temporary_record(self):
         folder = self.folder('普通临时任务')
         mark_temporary_folder_manual(self.config, folder, reference_order_ids=[])
@@ -181,6 +212,8 @@ class FolderManualHandlingTests(unittest.TestCase):
         self.assertEqual(restored['reference_order_ids'], [])
         self.assertEqual(restored['outbound_status'], '已出库')
 
+    # 验证单订单补单根据最新 AIMES 记录判定归属。
+    # self：当前测试用例或测试替身实例。
     def test_single_order_supplement_and_fresh_aimes_rows(self):
         folder = self.folder('PP0008-replacement'); self.seed()
         store = OrderIndexStore(self.config.workflow_database)
@@ -191,6 +224,8 @@ class FolderManualHandlingTests(unittest.TestCase):
         self.assertNotEqual(_server_folder_handling_mode(store, folder), 'supplemental')
         store.close()
 
+    # 验证删除 XML 会重新打开人工待处理任务。
+    # self：当前测试用例或测试替身实例。
     def test_xml_deletion_reopens_manual_task(self):
         folder = self.folder('补件'); mark_temporary_folder_manual(self.config, folder)
         for path in folder.rglob('*.xml'):
@@ -199,6 +234,8 @@ class FolderManualHandlingTests(unittest.TestCase):
         self.assertTrue(any(row['change_type'] == 'removed' for row in changes))
         self.assertEqual(self.record(folder)['server_scan_policy'], 'manual_pending')
 
+    # 验证同步发现补单时只记录发现结果，不解析或生成业务投影。
+    # self：当前测试用例或测试替身实例。
     def test_sync_discovers_supplement_without_parsing_or_projecting_it(self):
         folder = self.folder(); self.seed()
         before = self.facts()

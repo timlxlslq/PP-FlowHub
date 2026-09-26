@@ -84,7 +84,7 @@ HSplitView 右侧订单详情区不使用固定最小宽度，而是使用 minWi
 2. `preview_order(config, folder)` 校验目录名称，并在根目录选择唯一的 `*material*.xlsx`。
 3. `parse_order_materials()` 读取 `Total Qty:`、`Color Table`、Plywood 列和颜色行，返回 `materials` 与 `edge_banding`。板材、封边数量只来自此文件。
 4. PP 订单调用 `_choose_fittings()`，递归查找 `Fittingslist*.xlsx`；`parse_fittings_groups()` 按 `Order No.` 区块读取工厂单号和五金行。
-5. `_factory_names()` 先读取 `pp-板材清单*.xlsx` 的“订单号/订单名称”，再读取现有工厂名称缓存；仍缺失时调用 `lookup_aimes_names()`。
+5. `_factory_names()` 先读取中央库中有效且已确认归属的工厂单，再用 `pp-板材清单*.xlsx` 补充未知身份，随后使用现有名称缓存；仍缺失时调用 `lookup_aimes_names()`。新版合批表头如 `F100-PP9999,F200-PP9999` 只有在每个工厂单及订单归属都与中央库一致时，才可沿用数据库名称通过此项校验；不按表头名称顺序配对，未知、已删除、归属冲突或格式损坏仍阻断。这是过渡期订单身份校验修正，不代表已支持新版材料、五金或合批报表的完整解析。
 6. AIMES 成功结果按当前缓存机制保存，下次优先使用缓存；缓存实现和迁移以 `database.py`、`core.py` 当前源码为准。
 7. `_normalize_fittings()` 按五金 code 聚合、处理左右导轨，并应用忽略映射。
 8. `preview_payload()` 返回材料、封边、工厂单号、工厂名称、五金和 warnings；Swift 显示预览。
@@ -94,6 +94,8 @@ HSplitView 右侧订单详情区不使用固定最小宽度，而是使用 minWi
 材料文件归属：`preview_order()` 发现一个订单文件夹内有多个 material Excel 时，先按完整订单号匹配文件名；唯一匹配会写入现有材料分配缓存。仍无法判断时返回 `material_assignment_required` 和 `assignment_key`，人工通过 `assign-material` 命令确认后持久化，下一次不再重复询问。五金不依赖材料分配，而是从 Fittingslist 的工厂单号读取并做订单名称一致性校验。
 
 共享文件夹筛选：`_factory_names()` 和 `preview_order()` 会按完整订单号保留当前订单的工厂单；同一文件夹中属于兄弟订单的板材清单、Fittingslist 内容会被忽略并记录提醒，不再导致当前订单无法预览。
+
+已中止订单的历史报表可能仍留在共享目录。Server 订单校验跳过中央库已中止的订单，`_server_preview_payload()` 也将它们排除在确认列表和业务写入记录之外；确认其他订单不会改写这些历史事实。仍保留材料分配平衡校验，不能把已中止订单的数量自动转给其他订单。
 
 旧 Traveler 升级：`update_order_traveler()` 只要求核心 `WorkOrderTraveler`，发现旧版本缺少 `Picking List`、`Usage List` 或使用旧名称 `Pickinglist` 时，从当前模板补齐/替换，再写入最新材料和五金格式；人工五金会尝试迁移。
 

@@ -23,8 +23,10 @@ OTHER_SKU = "M-PANEL-B"
 ORIGINAL_QUANTITY = 4.0
 
 
+# 独立复现 SKU 迁移前按名称和数量计算的原始出库指纹。
+# name：旧出库记录使用的来源材料名称。
+# quantity：测试项目数量。
 def legacy_raw_fingerprint(name: str, quantity: float) -> str:
-    """Reproduce the pre-SKU raw outbound fingerprint, independent of runtime code."""
     normalized_name = re.sub(r"[\s_-]+", "", name).upper()
     payload = {"items": [(normalized_name, float(quantity))]}
     encoded = json.dumps(
@@ -36,6 +38,9 @@ def legacy_raw_fingerprint(name: str, quantity: float) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+# 按商品 SKU 和数量计算映射后的出库指纹。
+# product_code：目标商品 SKU 编码。
+# quantity：测试项目数量。
 def mapped_fingerprint(product_code: str, quantity: float) -> str:
     payload = {"items": [(product_code.upper(), float(quantity))]}
     encoded = json.dumps(
@@ -48,6 +53,8 @@ def mapped_fingerprint(product_code: str, quantity: float) -> str:
 
 
 class MaterialSkuOutboundHistoryTests(unittest.TestCase):
+    # 建立已确认材料和旧出库单据，准备 SKU 指纹兼容性检查。
+    # self：当前测试用例或测试替身实例。
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
@@ -140,12 +147,17 @@ class MaterialSkuOutboundHistoryTests(unittest.TestCase):
             root / "backups",
         )
 
+    # 生成数据库出库预览，并确认所有材料均已匹配。
+    # self：当前测试用例或测试替身实例。
     def preview(self):
         preview = build_database_preview(self.config, ORDER_ID)
         self.assertTrue(preview.ready)
         self.assertEqual(preview.missing_items, [])
         return preview
 
+    # 断言已有出库单仍有效，生成的计划没有变化。
+    # self：当前测试用例或测试替身实例。
+    # preview：要检查的出库预览对象。
     def assert_unchanged(self, preview):
         self.assertEqual(
             self.sync_store.status_for(preview.traveler),
@@ -155,6 +167,9 @@ class MaterialSkuOutboundHistoryTests(unittest.TestCase):
         self.assertEqual(len(plans), 1)
         self.assertFalse(plans[0]["changed"])
 
+    # 断言已有出库单需要更新，生成的计划包含变化。
+    # self：当前测试用例或测试替身实例。
+    # preview：要检查的出库预览对象。
     def assert_changed(self, preview):
         self.assertEqual(
             self.sync_store.status_for(preview.traveler),
@@ -164,6 +179,10 @@ class MaterialSkuOutboundHistoryTests(unittest.TestCase):
         self.assertEqual(len(plans), 1)
         self.assertTrue(plans[0]["changed"])
 
+    # 在隔离测试库更新材料 SKU、数量及修改时间。
+    # self：当前测试用例或测试替身实例。
+    # product_code：目标商品 SKU 编码。
+    # quantity：测试项目数量。
     def update_material(self, *, product_code: str, quantity: float):
         connection = connect_database(self.config.workflow_database)
         try:
@@ -177,6 +196,8 @@ class MaterialSkuOutboundHistoryTests(unittest.TestCase):
         finally:
             connection.close()
 
+    # 验证相同 SKU 和数量下，旧名称生成的出库指纹仍可识别为未变化。
+    # self：当前测试用例或测试替身实例。
     def test_legacy_human_name_fingerprint_remains_unchanged_for_same_sku_and_quantity(self):
         preview = self.preview()
 
@@ -184,6 +205,8 @@ class MaterialSkuOutboundHistoryTests(unittest.TestCase):
         self.assertEqual(preview.outbound_items[0].product_code, ORIGINAL_SKU)
         self.assert_unchanged(preview)
 
+    # 验证材料数量或 SKU 真正变化时仍要求更新出库。
+    # self：当前测试用例或测试替身实例。
     def test_quantity_or_sku_change_still_requires_outbound_update(self):
         self.update_material(product_code=ORIGINAL_SKU, quantity=5)
         self.assert_changed(self.preview())
@@ -194,6 +217,8 @@ class MaterialSkuOutboundHistoryTests(unittest.TestCase):
         self.assertEqual(preview.outbound_items[0].product_code, OTHER_SKU)
         self.assert_changed(preview)
 
+    # 验证修改映射不重新绑定已保存材料的 SKU。
+    # self：当前测试用例或测试替身实例。
     def test_mapping_change_does_not_rebind_saved_material_sku(self):
         InventoryMappings(self.config.workflow_database).save_manual(
             SOURCE_NAME, OTHER_SKU
@@ -204,6 +229,8 @@ class MaterialSkuOutboundHistoryTests(unittest.TestCase):
         self.assertEqual(preview.outbound_items[0].product_code, ORIGINAL_SKU)
         self.assert_unchanged(preview)
 
+    # 验证新增忽略映射不删除已经确认的材料 SKU。
+    # self：当前测试用例或测试替身实例。
     def test_ignore_change_does_not_remove_confirmed_material_sku(self):
         InventoryMappings(self.config.workflow_database).save_ignored(
             SOURCE_NAME, "后续全局忽略同名的未确认来源材料"

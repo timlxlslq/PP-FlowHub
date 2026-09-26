@@ -1,11 +1,13 @@
-// Assistant page: speech/text input, command preview, approval, and result
-// presentation.  Command interpretation and business validation remain in
-// the Python CLI/Gateway so the App and CLI use the same contract.
+// 助手页面负责语音与文字输入、命令预览、审批和结果展示。
+// 命令解释和业务校验由 Python CLI/Gateway 负责，确保 App 与 CLI 使用同一契约。
 import AVFoundation
 import AppKit
 import Speech
 import SwiftUI
 
+/// 将语音中的订单前缀、中文数字和连接符规范化为订单命令。
+/// - Parameters:
+///   - text: 原始语音转写文字。
 func canonicalSpeechCommand(_ text: String) -> String {
     let pattern = #"(?i)(p\s*p|c\s*s)\s*([0-9零〇○一二两三四五六七八九幺\s]+)(?:(?:-|\s*[杠横]\s*)([0-9零〇○一二两三四五六七八九幺\s]+))?"#
     guard let expression = try? NSRegularExpression(pattern: pattern) else { return text }
@@ -19,6 +21,9 @@ func canonicalSpeechCommand(_ text: String) -> String {
     for match in matches.reversed() {
         let prefix = source.substring(with: match.range(at: 1))
             .replacingOccurrences(of: " ", with: "").uppercased()
+        /// 提取当前正则匹配的数字分组，去空白并转换中文数字。
+        /// - Parameters:
+        ///   - index: 正则捕获组序号。
         func digits(at index: Int) -> String {
             guard match.range(at: index).location != NSNotFound else { return "" }
             return source.substring(with: match.range(at: index)).compactMap { character in
@@ -43,6 +48,9 @@ struct AssistantOrderResult {
     let fittings: [OrderFittingPreview]
     let warnings: [String]
 
+    /// 解析助手返回的订单材料、工厂单和五金；订单身份不完整时失败。
+    /// - Parameters:
+    ///   - object: 后端返回的 JSON 结果对象。
     init?(object: [String: Any]) {
         guard object["materials"] != nil,
               let orderId = object["order_id"] as? String, !orderId.isEmpty else { return nil }
@@ -101,6 +109,8 @@ final class SpeechInputController: ObservableObject {
     private var pendingCompletion: ((String) -> Void)?
     private var finalResultAvailable = false
 
+    /// 重置语音草稿并申请权限，开始按住说话流程。
+    /// 无参数。
     func beginPushToTalk() {
         guard !isHolding else { return }
         isHolding = true
@@ -110,6 +120,9 @@ final class SpeechInputController: ObservableObject {
         requestAccessAndStart()
     }
 
+    /// 结束录音并等待最终识别结果，超时后使用已有转写。
+    /// - Parameters:
+    ///   - onComplete: 结束识别后接收非空转写文字的回调。
     func endPushToTalk(onComplete: @escaping (String) -> Void) {
         guard isHolding else { return }
         isHolding = false
@@ -128,6 +141,8 @@ final class SpeechInputController: ObservableObject {
         }
     }
 
+    /// 停止录音和识别任务，清除待完成回调及按住状态。
+    /// 无参数。
     func stop() {
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
@@ -141,6 +156,8 @@ final class SpeechInputController: ObservableObject {
         isHolding = false
     }
 
+    /// 释放识别任务，将非空转写交给待执行回调。
+    /// 无参数。
     private func completeRecognition() {
         guard let completion = pendingCompletion else { return }
         pendingCompletion = nil
@@ -155,6 +172,8 @@ final class SpeechInputController: ObservableObject {
         }
     }
 
+    /// 依次申请语音识别和麦克风权限，在仍按住时启动录音。
+    /// 无参数。
     private func requestAccessAndStart() {
         SFSpeechRecognizer.requestAuthorization { status in
             guard status == .authorized else {
@@ -174,6 +193,8 @@ final class SpeechInputController: ObservableObject {
         }
     }
 
+    /// 配置音频采样和中文语音识别，持续更新转写及异常状态。
+    /// 无参数。
     private func start() {
         guard !isRecording, let recognizer, recognizer.isAvailable else {
             errorMessage = "语音识别暂不可用。"
@@ -219,6 +240,10 @@ final class SpeechInputController: ObservableObject {
     }
 }
 
+/// 判断按键是否为仅按住 Option 的空格键快捷键。
+/// - Parameters:
+///   - keyCode: 系统按键代码。
+///   - modifiers: 按键事件的修饰键集合。
 func isPushToTalkShortcut(keyCode: UInt16, modifiers: NSEvent.ModifierFlags) -> Bool {
     keyCode == 49 && modifiers.intersection(.deviceIndependentFlagsMask) == .option
 }
@@ -229,6 +254,10 @@ final class PushToTalkShortcutMonitor: ObservableObject {
     private var keyUpMonitor: Any?
     private var held = false
 
+    /// 注册本地按下和松开事件，避免长按时重复触发录音。
+    /// - Parameters:
+    ///   - onPress: 首次按下语音快捷键时执行的回调。
+    ///   - onRelease: 松开语音快捷键时执行的回调。
     func install(onPress: @escaping () -> Void, onRelease: @escaping () -> Void) {
         guard keyDownMonitor == nil else { return }
         keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -247,6 +276,8 @@ final class PushToTalkShortcutMonitor: ObservableObject {
         }
     }
 
+    /// 移除键盘事件监听并清除长按状态。
+    /// 无参数。
     func uninstall() {
         if let keyDownMonitor { NSEvent.removeMonitor(keyDownMonitor) }
         if let keyUpMonitor { NSEvent.removeMonitor(keyUpMonitor) }
@@ -355,6 +386,11 @@ struct AssistantOrderPreviewView: View {
         .padding(12)
     }
 
+    /// 构造订单预览中带图标的统计卡片。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - value: 需要显示的数值或状态文字。
+    ///   - icon: 系统图标名称。
     private func metricCard(_ title: String, _ value: String, _ icon: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Label(title, systemImage: icon).font(.caption).foregroundColor(.secondary)
@@ -366,6 +402,10 @@ struct AssistantOrderPreviewView: View {
         .clipShape(RoundedRectangle(cornerRadius: 9))
     }
 
+    /// 构造订单预览中的图标分区标题。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - icon: 系统图标名称。
     private func sectionTitle(_ title: String, _ icon: String) -> some View {
         Label(title, systemImage: icon).font(.headline).foregroundColor(AppPalette.accent)
     }
@@ -459,6 +499,9 @@ let assistantCommandHints = [
     "Add 2 pieces of M0144 to PP1234-2-LAUNDRY",
 ]
 
+/// 判断任务状态是否允许在顶部显示取消入口。
+/// - Parameters:
+///   - status: 业务状态文字或状态代码。
 func assistantTaskShowsHeaderCancel(_ status: String) -> Bool {
     status == "排队中" || status == "执行中"
 }
@@ -478,6 +521,8 @@ struct AssistantCommandHintsContent: View {
 }
 
 extension AppModel {
+    /// 异步读取助手 Token 使用统计并更新用量摘要。
+    /// 无参数。
     func loadAssistantUsage() {
         let root = projectRoot
         let executable = root.appendingPathComponent("scripts/pp-flowhub")
@@ -504,6 +549,9 @@ extension AppModel {
         }
     }
 
+    /// 将输入指令加入助手队列，或继续执行已获批准的指令。
+    /// - Parameters:
+    ///   - approved: 当前指令是否已获用户批准。
     func runAssistantCommand(approved: Bool = false) {
         if approved {
             guard let id = assistantActiveTaskID,
@@ -522,6 +570,9 @@ extension AppModel {
         processNextAssistantTask()
     }
 
+    /// 取消排队或正在执行的助手任务，并保护进行中的写入。
+    /// - Parameters:
+    ///   - id: 助手任务的唯一标识。
     func cancelAssistantTask(_ id: UUID) {
         guard let index = assistantTasks.firstIndex(where: { $0.id == id }) else { return }
         logUserAction("点击取消助手任务", details: ["task_active": id == assistantActiveTaskID])
@@ -539,6 +590,8 @@ extension AppModel {
         }
     }
 
+    /// 在助手空闲且无需审批时启动下一个排队任务。
+    /// 无参数。
     func processNextAssistantTask() {
         guard assistantActiveTaskID == nil,
               let index = assistantTasks.firstIndex(where: { $0.status == "排队中" }) else { return }
@@ -546,6 +599,10 @@ extension AppModel {
         executeAssistantTask(assistantTasks[index], approved: false)
     }
 
+    /// 调用助手 CLI，解析审批、预览和结果并更新任务界面。
+    /// - Parameters:
+    ///   - task: 正在执行的助手队列任务。
+    ///   - approved: 当前指令是否已获用户批准。
     private func executeAssistantTask(_ task: AssistantTaskItem, approved: Bool) {
         guard !assistantRunning else { return }
         assistantRunning = true
@@ -671,6 +728,10 @@ extension AppModel {
         }
     }
 
+    /// 更新任务最终状态并清理活动任务，继续处理队列。
+    /// - Parameters:
+    ///   - id: 助手任务的唯一标识。
+    ///   - status: 业务状态文字或状态代码。
     private func finishAssistantTask(_ id: UUID, status: String) {
         if let index = assistantTasks.firstIndex(where: { $0.id == id }) {
             assistantTasks[index].status = status
@@ -689,11 +750,10 @@ private enum AssistantDashboardTypography {
     static let operationDetail: CGFloat = 14
     static let boardTitle: CGFloat = 28
     static let boardSubtitle: CGFloat = 15
-    static let orderID: CGFloat = 20
-    static let stageTitle: CGFloat = 14
-    static let stageValue: CGFloat = 13
-    static let orderIdentityText = Color(red: 0.08, green: 0.36, blue: 0.20)
-    static let stageEmerald = Color(red: 0.08, green: 0.68, blue: 0.38)
+    static let orderID: CGFloat = 26
+    static let stageTitle: CGFloat = 15
+    static let orderIdentityText = Color(red: 0.08, green: 0.28, blue: 0.22)
+    static let stageEmerald = Color(red: 0.16, green: 0.58, blue: 0.39)
 }
 
 enum AssistantProgressSegmentState: Equatable {
@@ -702,7 +762,11 @@ enum AssistantProgressSegmentState: Equatable {
     case pending
 }
 
-// Each phase reflects its own facts: factory orders can advance in separate batches.
+// 每个阶段反映自身事实：不同工厂单可分批推进。
+/// 根据阶段自身的完成数返回未开始、部分完成或完成状态。
+/// - Parameters:
+///   - completedCount: 该阶段已完成的工厂单数量。
+///   - totalCount: 该阶段工厂单总数。
 func assistantProgressSegmentState(completedCount: Int, totalCount: Int) -> AssistantProgressSegmentState {
     guard totalCount > 0, completedCount > 0 else { return .pending }
     return completedCount >= totalCount ? .completed : .active
@@ -860,6 +924,12 @@ struct AssistantView: View {
         }
     }
 
+    /// 构造助手看板的彩色统计指标。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - value: 统计指标的数量。
+    ///   - symbol: 系统图标名称。
+    ///   - color: 界面使用的强调颜色。
     private func assistantMetric(_ title: String, value: Int, symbol: String, color: Color) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: symbol)
@@ -906,68 +976,75 @@ struct AssistantView: View {
         }
     }
 
+    /// 显示订单阶段、日期、材料和进入订单中心的入口。
+    /// - Parameters:
+    ///   - item: 订单看板记录。
     private func assistantOrderCard(_ item: OrderDashboardItem) -> some View {
         OrderDashboardClickContainer(
             onSingleClick: {},
             onDoubleClick: { openOrderCenter(item.orderId) }
         ) {
-            HStack(alignment: .center, spacing: 6) {
-                ZStack {
-                    Text(item.orderId)
-                        .font(.system(size: AssistantDashboardTypography.orderID, weight: .semibold, design: .rounded))
-                        .foregroundColor(AssistantDashboardTypography.orderIdentityText)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.82)
-                        .padding(.horizontal, 34)
-                    HStack {
-                        Image(systemName: "doc.text")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(AssistantDashboardTypography.orderIdentityText.opacity(0.82))
-                            .accessibilityHidden(true)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 12)
-                }
-                .frame(width: 172, height: 42, alignment: .center)
-                .background(AppPalette.success.opacity(0.10), in: Capsule())
-                .glassEffect(.regular.tint(AppPalette.success.opacity(0.12)), in: Capsule())
-                .padding(.leading, 10)
+            HStack(alignment: .center, spacing: 24) {
+                Text(item.orderId)
+                    .font(.system(size: AssistantDashboardTypography.orderID, weight: .semibold).monospacedDigit())
+                    .foregroundColor(AssistantDashboardTypography.orderIdentityText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+                    .help(item.orderId)
+                    .frame(width: 176, alignment: .center)
+                Divider()
+                    .frame(height: 62)
+                    .opacity(0.55)
                 assistantProgressRail(item)
-                    .padding(.leading, 80)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .glassEffect(.clear, in: RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous))
+            .background {
+                RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous)
+                    .fill(.regularMaterial)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous)
+                            .fill(LinearGradient(
+                                colors: [Color.white.opacity(0.72), Color(red: 0.90, green: 0.97, blue: 0.94).opacity(0.56)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.72), lineWidth: 1)
+                    }
+                    .shadow(color: AssistantDashboardTypography.orderIdentityText.opacity(0.07), radius: 8, y: 4)
+            }
             .contentShape(Rectangle())
         }
         .frame(maxWidth: .infinity)
     }
 
+    /// 按各阶段独立事实显示订单进度连接线及节点。
+    /// - Parameters:
+    ///   - item: 订单看板记录。
     private func assistantProgressRail(_ item: OrderDashboardItem) -> some View {
         let stages: [(title: String, completedCount: Int, totalCount: Int, value: String, fallbackSymbol: String)] = [
             ("拆单", item.factoryCount, item.factoryCount, item.factoryCount > 0 ? "\(item.factoryCount)/\(item.factoryCount)" : "—", "arrow.triangle.branch"),
-            ("优化", item.optimizedCount, item.factoryCount, assistantProgressValue(item.optimizationProgress), "square.stack"),
+            ("优化", item.optimizedCount, item.factoryCount, assistantProgressValue(item.optimizationProgress), "square.3.layers.3d"),
             ("生产", item.producedCount, item.factoryCount, assistantProgressValue(item.productionProgress), "scissors"),
-            ("出货", item.shippedCount, item.factoryCount, assistantProgressValue(item.outboundProgress), "truck.box.fill"),
+            ("出货", item.shippedCount, item.factoryCount, assistantProgressValue(item.outboundProgress), "truck.box"),
         ]
         return GeometryReader { geometry in
             let columnWidth = geometry.size.width / CGFloat(stages.count)
-            let iconDiameter: CGFloat = 64
-            let centerY: CGFloat = 50
+            let iconDiameter: CGFloat = 56
+            let centerY: CGFloat = 52
             let iconRadius = iconDiameter / 2
-            let leadingStubLength: CGFloat = 64
-            let stageStep: CGFloat = 10
+            let connectorGap: CGFloat = 10
             ZStack(alignment: .topLeading) {
                 ForEach(Array(stages.enumerated()), id: \.offset) { index, stage in
-                    let baseCenterX = columnWidth * (CGFloat(index) + 0.5)
-                    let stageShift = CGFloat(index + 1) * stageStep
-                    let centerX = baseCenterX + stageShift
+                    let centerX = columnWidth * (CGFloat(index) + 0.5)
                     let startX: CGFloat = index == 0
-                        ? baseCenterX - iconRadius - 10 - leadingStubLength
-                        : columnWidth * (CGFloat(index - 1) + 0.5) + CGFloat(index) * stageStep + iconRadius + 10
-                    let endX = index == 0 ? baseCenterX - iconRadius - 10 : centerX - iconRadius - 10
-                    let segmentMidpoint = (startX + endX) / 2
+                        ? 0
+                        : centerX - columnWidth + iconRadius + connectorGap
+                    let endX = max(startX, centerX - iconRadius - connectorGap)
                     let segmentState = assistantProgressSegmentState(
                         completedCount: stage.completedCount, totalCount: stage.totalCount
                     )
@@ -980,167 +1057,125 @@ struct AssistantView: View {
                         switch segmentState {
                         case .completed:
                             connector.stroke(
-                                AssistantDashboardTypography.stageEmerald.opacity(0.34),
-                                style: StrokeStyle(lineWidth: 9, lineCap: .round)
-                            )
-                            connector.stroke(
-                                AssistantDashboardTypography.stageEmerald.opacity(0.68),
-                                style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                                AssistantDashboardTypography.stageEmerald.opacity(0.92),
+                                style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
                             )
                         case .active:
-                            connector.stroke(
-                                AssistantDashboardTypography.stageEmerald.opacity(0.20),
-                                style: StrokeStyle(lineWidth: 9, lineCap: .round)
-                            )
                             TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: accessibilityReduceMotion)) { context in
                                 let elapsed = context.date.timeIntervalSinceReferenceDate
                                 let dashPhase = accessibilityReduceMotion
                                     ? CGFloat.zero
-                                    : -CGFloat(elapsed.truncatingRemainder(dividingBy: 1.2) / 1.2) * 28
+                                    : -CGFloat(elapsed.truncatingRemainder(dividingBy: 1.2) / 1.2) * 16
                                 connector.stroke(
                                     AssistantDashboardTypography.stageEmerald.opacity(0.92),
                                     style: StrokeStyle(
-                                        lineWidth: 5,
+                                        lineWidth: 2.5,
                                         lineCap: .round,
-                                        dash: [14, 12],
+                                        dash: [7, 9],
                                         dashPhase: dashPhase
                                     )
                                 )
                             }
                         case .pending:
                             connector.stroke(
-                                AppPalette.separator.opacity(0.82),
-                                style: StrokeStyle(lineWidth: 9, lineCap: .round)
-                            )
-                            connector.stroke(
                                 AppPalette.separator.opacity(0.90),
-                                style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                                style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
                             )
                         }
                     }
                     .allowsHitTesting(false)
-
-                    Text(stage.title)
-                        .font(.system(size: AssistantDashboardTypography.stageTitle, weight: .semibold))
-                        .position(x: segmentMidpoint, y: centerY - 20)
-                    Text(stage.value)
-                        .font(.system(size: AssistantDashboardTypography.stageValue).monospacedDigit())
-                        .foregroundColor(.secondary)
-                        .position(x: segmentMidpoint, y: centerY + 20)
                 }
 
-                GlassEffectContainer(spacing: 20) {
-                    HStack(spacing: 0) {
-                        ForEach(Array(stages.enumerated()), id: \.offset) { index, stage in
-                            let stageShift = CGFloat(index + 1) * stageStep
-                            let state = assistantProgressSegmentState(
-                                completedCount: stage.completedCount, totalCount: stage.totalCount
-                            )
+                HStack(spacing: 0) {
+                    ForEach(Array(stages.enumerated()), id: \.offset) { _, stage in
+                        let state = assistantProgressSegmentState(
+                            completedCount: stage.completedCount, totalCount: stage.totalCount
+                        )
+                        VStack(spacing: 8) {
+                            Text(stage.title)
+                                .font(.system(size: AssistantDashboardTypography.stageTitle, weight: .semibold))
+                                .frame(height: 16)
                             assistantStageIcon(
                                 completed: state == .completed,
                                 current: state == .active,
                                 fallbackSymbol: stage.fallbackSymbol
                             )
-                            .frame(width: columnWidth, height: 100, alignment: .center)
-                            .offset(x: stageShift)
-                            .accessibilityElement(children: .combine)
-                            .accessibilityLabel("\(stage.title) \(stage.value)")
                         }
+                        .frame(width: columnWidth, height: 80, alignment: .top)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("\(stage.title) \(stage.value)")
                     }
                 }
             }
         }
-        .frame(height: 100)
+        .frame(height: 80)
     }
 
+    /// 根据完成和当前状态绘制阶段节点图标。
+    /// - Parameters:
+    ///   - completed: 该节点是否已经完成。
+    ///   - current: 该节点是否为当前阶段。
+    ///   - fallbackSymbol: 未完成节点使用的系统图标名称。
     private func assistantStageIcon(
         completed: Bool,
         current: Bool,
         fallbackSymbol: String
     ) -> some View {
         let iconColor = completed || current ? AssistantDashboardTypography.stageEmerald : Color.secondary.opacity(0.62)
-        return ZStack {
-            Circle()
-                .fill(
-                    completed
-                        ? AssistantDashboardTypography.stageEmerald.opacity(0.12)
-                        : Color.white.opacity(0.10)
-                )
-            Image(systemName: fallbackSymbol)
-                .font(.system(size: 34, weight: .semibold))
-                .foregroundStyle(iconColor)
-                .contentTransition(.symbolEffect(.replace))
-        }
-        .frame(width: 64, height: 64)
-        .glassEffect(
-            completed
-                ? .regular.tint(AssistantDashboardTypography.stageEmerald.opacity(0.28))
-                : (current ? .regular.tint(AppPalette.separator.opacity(0.18)) : .clear),
-            in: Circle()
-        )
-        .overlay {
-            if completed {
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [Color.white.opacity(0.55), Color.clear],
-                            center: .topLeading,
-                            startRadius: 0,
-                            endRadius: 31
-                        )
-                    )
-                    .padding(2)
-                    .allowsHitTesting(false)
+        let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+        return Image(systemName: fallbackSymbol)
+            .font(.system(size: 28, weight: .medium))
+            .symbolRenderingMode(.monochrome)
+            .foregroundStyle(iconColor)
+            .contentTransition(.symbolEffect(.replace))
+            .frame(width: 56, height: 56)
+            .background {
+                shape.fill(LinearGradient(
+                    colors: [
+                        Color.white.opacity(0.88),
+                        completed ? iconColor.opacity(0.18) : Color.white.opacity(0.38),
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ))
             }
-            Circle()
-                .stroke(
-                    LinearGradient(
-                        colors: completed || current
-                            ? [
-                                Color.white.opacity(0.88),
-                                iconColor.opacity(0.88),
-                                iconColor.opacity(0.45),
-                            ]
-                            : [
-                                Color.white.opacity(0.72),
-                                AppPalette.separator.opacity(0.85),
-                            ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: current ? 2.5 : 2
+            .overlay {
+                shape.strokeBorder(
+                    completed || current ? iconColor.opacity(0.28) : AppPalette.separator,
+                    lineWidth: 1
                 )
-            Circle()
-                .stroke(Color.white.opacity(completed || current ? 0.48 : 0.28), lineWidth: 1)
-                .padding(3)
-        }
-        .shadow(
-            color: completed || current ? iconColor.opacity(0.19) : Color.clear,
-            radius: 6,
-            y: 2
-        )
+                shape.inset(by: 1).strokeBorder(Color.white.opacity(0.72), lineWidth: 1)
+            }
+            .shadow(color: iconColor.opacity(completed || current ? 0.10 : 0.04), radius: 4, y: 2)
     }
 
+    /// 将缺失或占位进度文本转换为统一的简洁显示。
+    /// - Parameters:
+    ///   - value: 后端返回的阶段进度文字。
     private func assistantProgressValue(_ value: String) -> String {
         value.replacingOccurrences(of: " ", with: "")
     }
 
+    /// 筛选未完成订单，并按最近拆单时间和订单号倒序显示。
     private var ongoingOrders: [OrderDashboardItem] {
         effectiveOrders
             .filter { !orderDashboardIsCompleted($0.stage) }
             .sorted { ($0.latestSplitTime, $0.orderId) > ($1.latestSplitTime, $1.orderId) }
     }
 
+    /// 统计本月完成出货的有效订单数量。
     private var monthlyCompletedCount: Int {
         effectiveOrders.filter {
             $0.stage == "已出货" && dashboardTimestamp($0.completedAt, isInSameMonthAs: Date.now)
         }.count
     }
 
+    /// 排除临时订单及数据异常项，取得助手看板使用的订单。
     private var effectiveOrders: [OrderDashboardItem] {
         model.dashboardOrders.filter { $0.orderType != "temporary" && $0.stage != "数据异常" }
     }
 
+    /// 判断是否有运行任务、审批或结果需要显示助手工作区。
     private var showsAssistantWorkspace: Bool {
         model.assistantRunning || model.assistantPendingApproval ||
             model.assistantOutput != "输入或说出一条指令。" ||
@@ -1148,7 +1183,7 @@ struct AssistantView: View {
             !model.assistantOrderList.isEmpty
     }
 
-    /// Show the active backend step in the compact, single-line status bar.
+    /// 在紧凑的单行状态栏中显示当前后端步骤。
     private var currentAssistantOperation: (title: String, running: Bool) {
         if model.assistantRunning {
             let status = displayedTask?.status.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -1165,6 +1200,9 @@ struct AssistantView: View {
         return ("操作完毕", false)
     }
 
+    /// 根据订单阶段和待优化数量生成当前业务进度说明。
+    /// - Parameters:
+    ///   - item: 订单看板记录。
     private func assistantStageSummary(_ item: OrderDashboardItem) -> String {
         switch item.stage {
         case "已拆单待优化": return "拆单完成，等待 AICNC 优化"
@@ -1179,6 +1217,9 @@ struct AssistantView: View {
         }
     }
 
+    /// 组合最近拆单和优化完成时间的摘要。
+    /// - Parameters:
+    ///   - item: 订单看板记录。
     private func assistantOrderDates(_ item: OrderDashboardItem) -> String {
         var values: [String] = []
         if !item.latestSplitTime.isEmpty {
@@ -1190,11 +1231,17 @@ struct AssistantView: View {
         return values.isEmpty ? "业务时间待同步" : values.joined(separator: "  ·  ")
     }
 
+    /// 将业务时间显示为月日时分，解析失败时保留可读原文。
+    /// - Parameters:
+    ///   - value: 待解析或显示的业务日期时间字符串。
     private func assistantDate(_ value: String) -> String {
         guard let date = dashboardBusinessDate(value) else { return appDisplayTimestamp(value) }
         return date.formatted(.dateTime.month().day().hour().minute())
     }
 
+    /// 将订单阶段转换为状态徽章的颜色类型。
+    /// - Parameters:
+    ///   - stage: 订单或操作的当前阶段标识。
     private func assistantStageKind(_ stage: String) -> AppStatusBadge.Kind {
         switch stage {
         case "数据异常": return .danger
@@ -1204,6 +1251,9 @@ struct AssistantView: View {
         }
     }
 
+    /// 切换到订单中心，并可定位指定订单。
+    /// - Parameters:
+    ///   - orderID: 目标业务订单号。
     private func openOrderCenter(_ orderID: String?) {
         model.requestedOrderCenterOrderID = orderID ?? ""
         NotificationCenter.default.post(name: .ppOpenOrderCenter, object: nil)
@@ -1411,6 +1461,11 @@ struct AssistantView: View {
         }
     }
 
+    /// 构造助手指令流程中带序号和活动状态的步骤。
+    /// - Parameters:
+    ///   - number: 流程步骤的显示序号。
+    ///   - title: 界面或操作记录的标题。
+    ///   - active: 该流程步骤是否处于活动状态。
     private func flowStep(_ number: String, _ title: String, active: Bool) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(number).font(.caption2.monospacedDigit().weight(.bold))
@@ -1422,6 +1477,10 @@ struct AssistantView: View {
         .background(active ? AppPalette.accent.opacity(0.09) : Color.clear)
     }
 
+    /// 构造助手状态区的标签和值。
+    /// - Parameters:
+    ///   - label: 阶段、项目或信息行的显示名称。
+    ///   - value: 需要显示的数值或状态文字。
     private func statusLine(_ label: String, _ value: String) -> some View {
         HStack {
             Text(label).foregroundColor(.secondary)
@@ -1431,6 +1490,9 @@ struct AssistantView: View {
         .font(.caption)
     }
 
+    /// 将助手任务状态转换为徽章类型。
+    /// - Parameters:
+    ///   - status: 业务状态文字或状态代码。
     private func badgeKind(_ status: String) -> AppStatusBadge.Kind {
         switch status {
         case "已完成": return .success
@@ -1440,6 +1502,8 @@ struct AssistantView: View {
         }
     }
 
+    /// 结束语音输入，将规范化转写填入并提交助手命令。
+    /// 无参数。
     private func finishPushToTalk() {
         speech.endPushToTalk { text in
             model.assistantInput = canonicalSpeechCommand(text)
@@ -1447,6 +1511,8 @@ struct AssistantView: View {
         }
     }
 
+    /// 进入命令提示入口时取消关闭任务并延迟显示提示面板。
+    /// 无参数。
     private func beginCommandHintsAnchorHover() {
         commandHintsAnchorHovering = true
         commandHintsHoverGeneration += 1
@@ -1462,24 +1528,32 @@ struct AssistantView: View {
         }
     }
 
+    /// 离开命令提示入口并安排延迟关闭。
+    /// 无参数。
     private func endCommandHintsAnchorHover() {
         commandHintsAnchorHovering = false
         commandHintsHoverGeneration += 1
         scheduleCommandHintsClose()
     }
 
+    /// 进入提示面板时取消关闭任务，维持面板显示。
+    /// 无参数。
     private func beginCommandHintsPanelHover() {
         commandHintsPanelHovering = true
         commandHintsHoverGeneration += 1
         commandHintsTransitionTask?.cancel()
     }
 
+    /// 离开提示面板后安排延迟关闭。
+    /// 无参数。
     private func endCommandHintsPanelHover() {
         commandHintsPanelHovering = false
         commandHintsHoverGeneration += 1
         scheduleCommandHintsClose()
     }
 
+    /// 在入口和面板均未悬停时延迟关闭命令提示。
+    /// 无参数。
     private func scheduleCommandHintsClose() {
         commandHintsTransitionTask?.cancel()
         let generation = commandHintsHoverGeneration
@@ -1493,6 +1567,7 @@ struct AssistantView: View {
         }
     }
 
+    /// 选择当前活动或适合展示的最近助手任务。
     private var displayedTask: AssistantTaskItem? {
         if let id = model.assistantActiveTaskID,
            let active = model.assistantTasks.first(where: { $0.id == id }) {
@@ -1501,10 +1576,12 @@ struct AssistantView: View {
         return model.assistantTasks.last
     }
 
+    /// 统计仍在排队的助手任务数量。
     private var queuedTaskCount: Int {
         model.assistantTasks.filter { $0.status == "排队中" && $0.id != displayedTask?.id }.count
     }
 
+    /// 根据助手运行、审批和结果状态生成工作区标题。
     private var workspaceTitle: String {
         if !model.assistantStockRows.isEmpty { return "库存比对" }
         if model.assistantOrderPreview != nil { return "订单预览" }
@@ -1513,6 +1590,7 @@ struct AssistantView: View {
         return "执行结果"
     }
 
+    /// 根据助手工作区状态选择标题图标。
     private var workspaceIcon: String {
         if !model.assistantStockRows.isEmpty { return "shippingbox.and.arrow.backward" }
         if model.assistantOrderPreview != nil { return "doc.text.magnifyingglass" }
@@ -1521,6 +1599,9 @@ struct AssistantView: View {
         return "text.bubble"
     }
 
+    /// 按助手任务状态返回列表标识颜色。
+    /// - Parameters:
+    ///   - status: 业务状态文字或状态代码。
     private func taskStatusColor(_ status: String) -> Color {
         switch status {
         case "已完成": return AppPalette.success

@@ -1,9 +1,7 @@
-"""Deterministic order preview and Traveler generation workflow.
+"""确定性订单预览及 Traveler 生成流程。
 
-The workflow reads external order reports and central facts, converts them to
-preview objects, and renders the approved result into the Traveler template.
-It owns Excel layout compatibility and validation; the SwiftUI layer should
-only display the resulting payload and progress.
+读取订单报表和本地事实并构造预览，再将批准结果写入 Traveler 模板；负责
+Excel 兼容与校验，SwiftUI 只展示预览数据和执行进度。
 """
 
 from __future__ import annotations
@@ -52,7 +50,7 @@ from .inventory import (
 from .fittings import is_fittings_report, select_latest_fittings
 from .report_read_context import cached_report, report_paths, directory_paths, current_report_context
 from .hardware_source_decisions import with_source_decisions
-from .operation_log import configure_operation_log
+from .operation_log import configure_operation_log, safe_exception_details, safe_rule_error_text
 from .database import connect_database, enable_foreign_keys, ensure_schema
 
 
@@ -115,10 +113,12 @@ ORDER_TOKEN_RE = re.compile(r"(PP\d{4}(?:-\d+)?|CS\d{3})(?=$|[-\s_])", re.IGNORE
 
 
 def _text(value) -> str:
+    """将 value 转为去除首尾空白的文本；None 返回空字符串。"""
     return "" if value is None else str(value).strip()
 
 
 def _factory_name_belongs_to_order(order_id: str, factory_name: str) -> bool:
+    """校验完整工厂单名称是否属于指定订单；order_id 为订单号，factory_name 为工厂单名称。"""
     order = order_id.strip().upper()
     name = factory_name.strip().upper()
     if not order:
@@ -135,11 +135,12 @@ def _factory_name_belongs_to_order(order_id: str, factory_name: str) -> bool:
 
 
 def _order_ids_in_text(value: str) -> set[str]:
+    """从文本 value 提取完整订单号并转大写，返回去重集合。"""
     return {match.group(1).upper() for match in ORDER_TOKEN_RE.finditer(_text(value))}
 
 
 def related_order_ids(folder: Path) -> list[str]:
-    """Discover all complete order ids represented by a shared source folder."""
+    """发现共享来源目录 folder 及其报表代表的完整订单号。"""
     context = current_report_context()
     key = str(folder)
     standard_folder = ORDER_FOLDER_RE.fullmatch(folder.name) is not None
@@ -149,9 +150,7 @@ def related_order_ids(folder: Path) -> list[str]:
     found = _order_ids_in_text(folder.name)
     candidates = 0
     metadata_seconds = 0.0
-    # Keep the standard-folder path lightweight: filenames and XML names are
-    # enough to detect the PP0035/PP0035-2 shared-folder case, while opening
-    # every board workbook here would defeat the incremental index fast path.
+    # 标准目录发现保持轻量，文件名及 XML 名称足以发现主单与分单共享目录；不逐个打开板材工作簿破坏增量读取路径。
     if standard_folder:
         for path in directory_paths(folder):
             ids = _order_ids_in_text(path.name)
@@ -188,6 +187,7 @@ def related_order_ids(folder: Path) -> list[str]:
 
 
 def _number(value, field: str) -> float:
+    """读取数值 value，空值按零处理；field 为解析失败时显示的字段名称。"""
     if value in (None, "") or (isinstance(value, str) and not value.strip()):
         return 0.0
     try:
@@ -197,21 +197,17 @@ def _number(value, field: str) -> float:
 
 
 def _display_number(value, number_format: str, field: str) -> float:
-    """Return the numeric value Excel displays for a supported number format.
+    """按受支持的 Excel 数字格式计算实际显示值，不改来源工作簿。
 
-    ``openpyxl`` exposes the formula result and the number format separately;
-    it does not expose Excel's rendered cell value. Material workbooks use
-    simple numeric formats, so reproduce their rounding in memory without
-    rewriting the source workbook.
-    """
+    参数：value 为数值或公式缓存结果；number_format 为单元格格式；field 为错误定位字段。
+    openpyxl 分别提供值与格式，因此在内存中复现简单格式的舍入。"""
     number = _number(value, field)
     if not math.isfinite(number):
         raise RuleError("invalid_number", f"{field} 不是有限数字：{value}")
     first_section = _text(number_format).split(";", 1)[0]
     if not first_section or first_section.casefold() == "general":
         return number
-    # Ignore quoted literals and escaped characters when locating the
-    # numeric decimal section of a custom Excel format.
+    # 识别 Excel 自定义格式的小数段时，跳过引号内文字及转义字符。
     numeric_format = re.sub(r'"[^"]*"|\\.', "", first_section)
     percent = "%" in numeric_format
     if percent:
@@ -225,6 +221,7 @@ def _display_number(value, number_format: str, field: str) -> float:
 
 
 def _integer(value, field: str) -> float:
+    """将 value 校验为有限非负整数；field 为错误提示中的字段名。"""
     number = _number(value, field)
     if not math.isfinite(number) or abs(number - round(number)) > EPSILON:
         raise RuleError("fractional_material", f"{field} 数量为 {number:g}，板材数量必须为整数，请人工检查")
@@ -234,7 +231,7 @@ def _integer(value, field: str) -> float:
 
 
 def _integer_cell(cell, field: str) -> float:
-    """Read the integer Excel displays, while still rejecting visible decimals."""
+    """按 Excel 显示精度读取整数，仍拒绝可见小数；cell 为单元格，field 为错误提示字段。"""
     number = _number(cell.value, field)
     if not math.isfinite(number) or number < 0:
         raise RuleError("negative_material", f"{field} 数量无效：{number:g}")
@@ -245,14 +242,17 @@ def _integer_cell(cell, field: str) -> float:
 
 
 def _fmt(value: float) -> str:
+    """把数量 value 格式化为简短文本，整数不保留小数尾缀。"""
     return str(int(value)) if float(value).is_integer() else f"{value:g}"
 
 
 def _normalized_label(value) -> str:
+    """去除标签 value 中的空白并转小写，供表头比较。"""
     return re.sub(r"\s+", "", _text(value)).lower()
 
 
 def _canonical_color(value: str) -> str:
+    """标准化颜色 value 的已知别名，其他颜色保留原文字。"""
     color = _text(value)
     if re.fullmatch(r"khaki(?:\s*\(7x9\))?", color, re.IGNORECASE):
         return "Penelope FA44"
@@ -260,12 +260,14 @@ def _canonical_color(value: str) -> str:
 
 
 def resolve_source_root(configured: Path) -> Path:
+    """确认配置目录 configured 可访问并返回路径，否则抛出 Server 不可用错误。"""
     if configured.is_dir():
         return configured
     raise RuleError("server_unavailable", f"服务器目录不可访问：{configured}")
 
 
 def list_order_folders(config: Config) -> list[dict]:
+    """列出来源根目录中的订单文件夹；config 提供来源配置。"""
     root = resolve_source_root(config.source_root)
     rows = []
     for folder in root.iterdir():
@@ -282,6 +284,7 @@ def list_order_folders(config: Config) -> list[dict]:
 
 
 def _find_label_row(ws, label: str) -> int:
+    """在工作表 ws 中定位标签 label 的行号，未找到时抛出材料结构错误。"""
     wanted = _normalized_label(label)
     for row in range(1, ws.max_row + 1):
         if any(_normalized_label(ws.cell(row, col).value) == wanted for col in range(1, ws.max_column + 1)):
@@ -290,6 +293,7 @@ def _find_label_row(ws, label: str) -> int:
 
 
 def _label_column(ws, row: int, label: str) -> int:
+    """在工作表 ws 的 row 行查找 label 所在列，未找到时抛出材料结构错误。"""
     wanted = _normalized_label(label)
     for col in range(1, ws.max_column + 1):
         if _normalized_label(ws.cell(row, col).value) == wanted:
@@ -298,7 +302,7 @@ def _label_column(ws, row: int, label: str) -> int:
 
 
 def _copy_column_style(ws, source_col: int, target_col: int) -> None:
-    """Extend a material Color Table while preserving the template style."""
+    """扩展材料颜色汇总表时复制列样式；ws 为工作表，source_col 为来源列，target_col 为目标列。"""
     if source_col == target_col:
         return
     for row in range(1, ws.max_row + 1):
@@ -319,12 +323,9 @@ def _copy_column_style(ws, source_col: int, target_col: int) -> None:
 
 
 def repair_material_color_table(path: Path) -> dict:
-    """Add detail colors missing from Color Table and restore its formulas.
+    """为材料工作簿 path 补齐明细中已有但颜色汇总表缺失的颜色，并恢复汇总公式。
 
-    The material workbook is the operator-facing source file, so this repair
-    is intentionally limited to the Color Table cells and their existing
-    summary formulas. It does not change the detail rows or any formatting.
-    """
+    修改范围限于颜色汇总区及现有汇总公式，不修改业务明细行，保持来源工作簿的格式风格。"""
     try:
         values_wb = load_workbook(path, data_only=True, read_only=True)
         wb = load_workbook(path, data_only=False)
@@ -416,10 +417,7 @@ def repair_material_color_table(path: Path) -> dict:
         detail_end = total_row - 1
         for col, _ in table_colors:
             letter = get_column_letter(col)
-            # Color Table is a derived summary of the detail rows. Use the
-            # same SUMIF contract for one-color and multi-color workbooks so
-            # an empty table can be populated without changing the detail
-            # rows or the Total Qty row.
+            # 颜色汇总表由明细派生，单色与多色工作簿使用相同 SUMIF 规则，填补空汇总时不改明细或总量行。
             ws.cell(panel_34_row, col).value = (
                 f'=SUMIF($I${detail_start}:$I${detail_end},{letter}${color_row},'
                 f'$F${detail_start}:$F${detail_end})'
@@ -472,6 +470,7 @@ def repair_material_color_table(path: Path) -> dict:
 
 @cached_report
 def parse_order_materials(order_id: str, path: Path) -> tuple[str, list[MaterialItem], dict[str, float]]:
+    """解析并校验订单材料工作簿，返回材料及封边汇总；order_id 为归属订单号，path 为文件路径。"""
     wb = load_workbook(path, data_only=True, read_only=True)
     if len(wb.sheetnames) != 1:
         raise RuleError("materials_schema", f"materials 文件必须只有一个工作簿，当前为：{wb.sheetnames}")
@@ -496,6 +495,7 @@ def parse_order_materials(order_id: str, path: Path) -> tuple[str, list[Material
     formula_ws = formula_wb[formula_wb.sheetnames[0]]
 
     def detail_sum(column: int, source_color: str | None = None) -> float:
+        """累计指定列的明细数量；column 为列号，source_color 为可选颜色筛选，板材按显示精度读取。"""
         total = 0.0
         source_key = _canonical_color(source_color).casefold() if source_color is not None else None
         for detail_row in range(header_row + 1, total_row):
@@ -512,9 +512,11 @@ def parse_order_materials(order_id: str, path: Path) -> tuple[str, list[Material
         return total
 
     def cell_label(row: int, column: int, label: str) -> str:
+        """生成带坐标的错误定位标签；row、column 为行列号，label 为字段名称。"""
         return f"{label}（{get_column_letter(column)}{row}）"
 
     def required_integer(row: int, column: int, label: str) -> float:
+        """读取必填整数，公式缓存缺失时从明细重算；row、column 为坐标，label 为字段名称。"""
         cell = ws.cell(row, column)
         if cell.value in (None, "") or (isinstance(cell.value, str) and not cell.value.strip()):
             formula = formula_ws.cell(row, column).value
@@ -538,6 +540,9 @@ def parse_order_materials(order_id: str, path: Path) -> tuple[str, list[Material
         return _integer_cell(cell, cell_label(row, column, label))
 
     def required_color_table_integer(row: int, column: int, label: str, source_color: str) -> float:
+        """读取颜色汇总的必填整数，公式缓存缺失时按颜色重算。
+
+        参数：row、column 为坐标；label 为字段名称；source_color 为来源颜色。"""
         cell = ws.cell(row, column)
         if cell.value in (None, "") or (isinstance(cell.value, str) and not cell.value.strip()):
             formula = formula_ws.cell(row, column).value
@@ -562,6 +567,9 @@ def parse_order_materials(order_id: str, path: Path) -> tuple[str, list[Material
         return _integer_cell(cell, cell_label(row, column, label))
 
     def required_color_table_number(row: int, column: int, label: str, source_color: str) -> float:
+        """读取颜色汇总数值，公式缓存缺失时从对应颜色封边明细重算。
+
+        参数：row、column 为坐标；label 为字段名称；source_color 为颜色。"""
         cell = ws.cell(row, column)
         if cell.value in (None, "") or (isinstance(cell.value, str) and not cell.value.strip()):
             formula = formula_ws.cell(row, column).value
@@ -580,6 +588,9 @@ def parse_order_materials(order_id: str, path: Path) -> tuple[str, list[Material
         return _display_number(cell.value, cell.number_format, cell_label(row, column, label))
 
     def optional_total_number(row: int, column: int, label: str, integer: bool) -> float | None:
+        """读取可选汇总值，指向颜色汇总或缺失公式缓存时返回 None。
+
+        参数：row、column 为坐标；label 为字段名称；integer 决定是否要求显示为整数。"""
         cell = ws.cell(row, column)
         value = cell.value
         if isinstance(value, str) and value.strip().casefold() == "check color table":
@@ -631,10 +642,7 @@ def parse_order_materials(order_id: str, path: Path) -> tuple[str, list[Material
             "materials 文件缺少必须列：" + "、".join(missing_columns),
         )
 
-    # Panel and edge quantities are read from Color Table, but the detail
-    # rows still have to be complete enough to explain that table. Empty
-    # template rows are normal; only a row with an actual Panel/edge quantity
-    # requires a Color value.
+    # 饰面板和封边数量取自颜色汇总，但明细必须能解释汇总；空模板行正常，只有实际有板材或封边数量的行才必须填颜色。
     if finish_34_col and finish_14_col and edge_col and color_col:
         missing_colors = []
         for detail_row in range(header_row + 1, total_row):
@@ -770,7 +778,9 @@ def _board_report_materials(
     allow_unscoped: bool = False,
     fallback_name: str = "",
 ) -> dict:
-    """Read the compact board/edge summary emitted in a Report folder."""
+    """读取 Report 目录的板材与封边简表。
+
+    参数：path 为报表；order_id 为订单号；allow_unscoped 是否允许无明确归属；fallback_name 为备用名称。"""
     try:
         wb = load_workbook(path, data_only=True, read_only=True)
         ws = wb[wb.sheetnames[0]]
@@ -877,6 +887,7 @@ def _board_report_materials(
 
 
 def _legacy_traveler_factory_name(path: Path, workbook) -> str:
+    """从旧工作簿读取工厂单名称，找不到时使用文件名；path 为文件路径，workbook 为已打开工作簿。"""
     for sheet_name in (WORK_ORDER_SHEET, "Picking List", "Pickinglist"):
         if sheet_name not in workbook.sheetnames:
             continue
@@ -890,6 +901,7 @@ def _legacy_traveler_factory_name(path: Path, workbook) -> str:
 
 
 def _material_item_from_traveler_name(name: str, quantity: float, room_name: str) -> MaterialItem | None:
+    """将 Traveler 材料名称解析为标准材料项；name 为名称，quantity 为数量，room_name 为房间归属。"""
     value = _text(name)
     if not value or quantity <= 0:
         return None
@@ -910,8 +922,7 @@ def _material_item_from_traveler_name(name: str, quantity: float, room_name: str
     if math.isclose(thickness, 19.1, abs_tol=EPSILON):
         return MaterialItem("panel", 19.1, color, quantity, room_name)
     if math.isclose(thickness, 8.0, abs_tol=EPSILON) or math.isclose(thickness, 9.0, abs_tol=EPSILON):
-        # Legacy Travelers call this finish-panel size 9mm; the current
-        # material workbook stores the same category in its 1/4 Finish Panel column.
+        # 旧 Traveler 将此饰面板类别称为 9mm，现行材料表将同类数据放在 1/4 饰面板列。
         return MaterialItem("panel", 8.0, color, quantity, room_name)
     raise RuleError(
         "material_generation_failed",
@@ -920,6 +931,7 @@ def _material_item_from_traveler_name(name: str, quantity: float, room_name: str
 
 
 def _legacy_picking_material_items(path: Path, workbook, order_id: str) -> list[MaterialItem]:
+    """从旧领料单提取订单材料；path 为文件路径，workbook 为工作簿，order_id 为目标订单号。"""
     sheet_name = next((name for name in ("Picking List", "Pickinglist") if name in workbook.sheetnames), None)
     if not sheet_name:
         raise RuleError("material_generation_failed", f"{path.name} 缺少 Usage List 或 Picking List，无法提取板材数据")
@@ -964,6 +976,7 @@ def _legacy_picking_material_items(path: Path, workbook, order_id: str) -> list[
 
 
 def _traveler_material_items(path: Path, order_id: str) -> list[MaterialItem]:
+    """读取 Traveler 的材料明细，兼容现行用量表和旧领料单；path 为文件，order_id 为目标订单。"""
     workbook = load_workbook(path, data_only=True, read_only=True)
     if USAGE_LIST_SHEET in workbook.sheetnames:
         traveler = parse_traveler(path)
@@ -979,6 +992,7 @@ def _traveler_material_items(path: Path, order_id: str) -> list[MaterialItem]:
 
 
 def _aggregate_traveler_material_details(items: list[MaterialItem]) -> tuple[list[list[object]], list[str]]:
+    """汇总材料列表 items 的夹板、饰面板及封边，生成材料表明细和颜色集合。"""
     plywood = defaultdict(float)
     by_color: dict[str, dict[str, float]] = defaultdict(lambda: {"panel_34": 0.0, "panel_14": 0.0, "edge": 0.0})
     for item in items:
@@ -1017,6 +1031,7 @@ def _aggregate_traveler_material_details(items: list[MaterialItem]) -> tuple[lis
 
 
 def _write_generated_material_workbook(destination: Path, order_id: str, details: list[list[object]], colors: list[str]) -> Path:
+    """按材料模板生成工作簿；destination 为目标路径，order_id 为订单号，details 为明细行，colors 为颜色列表。"""
     template = Path(__file__).resolve().parents[1] / "resources/templates/Order Materials.xlsx"
     if not template.is_file():
         raise RuleError("material_generation_failed", "缺少人工 material 模板，请手动生成 material 文件")
@@ -1069,6 +1084,7 @@ def _write_generated_material_workbook(destination: Path, order_id: str, details
 
 
 def _usage_rows_for_traveler(items: list[MaterialItem], room_name: str) -> list[list[object]]:
+    """将材料列表 items 汇总为用量明细，并使用 room_name 标记房间。"""
     details, _ = _aggregate_traveler_material_details(items)
     for row in details:
         if row[0] == "Traveler 汇总":
@@ -1077,6 +1093,7 @@ def _usage_rows_for_traveler(items: list[MaterialItem], room_name: str) -> list[
 
 
 def _update_legacy_traveler_usage_list(config: Config, path: Path, order_id: str, items: list[MaterialItem]) -> Path | None:
+    """根据材料重建旧 Traveler 的用量表；config 为配置，path 为文件，order_id 为订单号，items 为材料列表。"""
     workbook = load_workbook(path, data_only=False)
     if USAGE_LIST_SHEET in workbook.sheetnames:
         return None
@@ -1127,6 +1144,9 @@ def _update_legacy_traveler_usage_list(config: Config, path: Path, order_id: str
 
 
 def generate_material_from_travelers(config: Config, folder: Path, order_id: str, *, confirm_write: bool = False) -> dict:
+    """经明确确认后，从已有 Traveler 汇总生成材料工作簿。
+
+    参数：config 为配置；folder 为来源目录；order_id 为订单号；confirm_write 为明确写入确认。"""
     if not confirm_write:
         raise RuleError("write_confirmation_required", "此操作会更新本机 Traveler 并写入 Server，请使用 --confirm-write")
     folder = folder.expanduser().resolve()
@@ -1182,7 +1202,7 @@ def generate_material_from_travelers(config: Config, folder: Path, order_id: str
 
 
 def generate_material_from_reports(folder: Path, order_id: str) -> Path:
-    """Create a parser-compatible material workbook from Report board summaries."""
+    """根据目录 folder 的板材简表生成兼容解析器的材料工作簿；order_id 为目标订单号。"""
     folder = folder.resolve()
     order_id = order_id.strip().upper()
     if not folder.is_dir() or not order_id:
@@ -1210,7 +1230,7 @@ def generate_material_from_reports(folder: Path, order_id: str) -> Path:
         try:
             factory, report_name = parse_board_identity(path)
         except RuleError:
-            # Let the normal parser retain its detailed filename/schema error.
+            # 由正常解析器保留详细文件名及结构错误提示。
             factory = ""
             report_name = ""
         if factory and _factory_name_belongs_to_order(order_id, report_name):
@@ -1305,7 +1325,7 @@ def generate_material_from_reports(folder: Path, order_id: str) -> Path:
 
 @cached_report
 def parse_material_room_rows(path: Path) -> list[tuple[str, list[MaterialItem], dict[str, float]]]:
-    """Read room-level material quantities when the material workbook provides them."""
+    """从工作簿 path 读取可用的房间级材料及封边数量。"""
     wb = load_workbook(path, data_only=True, read_only=True)
     ws = wb[wb.sheetnames[0]]
     header_row = 2
@@ -1332,19 +1352,12 @@ def parse_material_room_rows(path: Path) -> list[tuple[str, list[MaterialItem], 
         for label, (thickness, kind) in required.items():
             if kind not in {"plywood", "panel"}:
                 continue
-            # Room rows use the same display-oriented integer convention as
-            # the summary rows: some source workbooks store a fractional
-            # formula result while formatting the cell as an integer. Read
-            # the displayed integer here too, otherwise room aggregation can
-            # reintroduce values such as 6.25 after the summary parser has
-            # already normalized them correctly.
+            # 房间行与汇总行均按显示精度读取整数；某些公式缓存有小数而显示为整数，
+            # 此处也按显示值读取，避免房间汇总重新引入汇总解析器已正确处理的小数。
             try:
                 quantity = _integer_cell(ws.cell(row, headers[label]), f"{room} {label}")
             except RuleError as exc:
-                # Room rows can contain cut/layout fractions while Total Qty
-                # remains the authoritative order quantity. Do not turn such
-                # a row into a false factory allocation; the caller will use
-                # the order totals and show the material as unallocated.
+                # 房间行可能含切割或排版小数，订单权威数量仍来自总量行；不能把这种行误作工厂单分配，调用方使用订单总量并显示未分配。
                 if exc.code == "fractional_material":
                     return []
                 raise
@@ -1363,6 +1376,7 @@ def parse_material_room_rows(path: Path) -> list[tuple[str, list[MaterialItem], 
 
 
 def _aggregate_material_sources(order_id: str, paths: list[Path]):
+    """汇总多个来源的材料、封边及房间记录；order_id 为订单号，paths 为来源工作簿路径列表。"""
     all_materials: list[MaterialItem] = []
     all_edges: dict[str, float] = defaultdict(float)
     all_rooms = []
@@ -1387,6 +1401,7 @@ def _aggregate_material_sources(order_id: str, paths: list[Path]):
 
 
 def _next_value_on_row(ws, row: int, col: int) -> str:
+    """在工作表 ws 的 row 行查找 col 列右侧的下一个非空值。"""
     for candidate in range(col + 1, ws.max_column + 1):
         value = _text(ws.cell(row, candidate).value)
         if value:
@@ -1396,6 +1411,7 @@ def _next_value_on_row(ws, row: int, col: int) -> str:
 
 @cached_report
 def parse_board_identity(path: Path) -> tuple[str, str]:
+    """从板材报表 path 读取工厂单号和订单名称并校验身份。"""
     wb = load_workbook(path, data_only=True, read_only=True)
     ws = wb[wb.sheetnames[0]]
     factory = ""
@@ -1410,18 +1426,28 @@ def parse_board_identity(path: Path) -> tuple[str, str]:
         if factory and name:
             break
     if not FACTORY_RE.fullmatch(factory) or not name:
-        raise RuleError("board_identity", f"板材清单无法取得工厂单号或名称：{path}")
+        # 新版合批表头只提供身份引用；不按名称列表的位置猜测工厂单名称。
+        references = [
+            re.fullmatch(r"(F\d+)-(PP\d{4}(?:-\d+)?|CS\d{3})", token.strip())
+            for token in factory.split(",")
+        ]
+        confirmed_candidates = (
+            [match.groups() for match in references]
+            if references and all(references) else []
+        )
+        raise RuleError(
+            "board_identity", f"板材清单无法取得工厂单号或名称：{path}",
+            factory_references=confirmed_candidates,
+        )
     return factory, name
 
 
 def _has_positive_fitting_quantity(path: Path) -> bool | None:
-    """Return None when the workbook cannot be opened, so corruption is never ignored."""
+    """检查五金报表 path 是否存在正数量；无法打开时返回 None，防止把损坏报表当作空表忽略。"""
     try:
         wb = load_workbook(path, data_only=True, read_only=True)
     except Exception:
-        # Empty AICNC reports can carry the same invalid A1:?0 worksheet
-        # dimension as usable reports. Normal mode ignores that optional
-        # dimension and lets us distinguish an empty report from corruption.
+        # 空报表也可能含 A1:?0 这类无效工作表范围；普通模式忽略该可选范围，以区分有效空表和损坏报表。
         try:
             wb = load_workbook(path, data_only=True, read_only=False)
         except Exception:
@@ -1435,7 +1461,7 @@ def _has_positive_fitting_quantity(path: Path) -> bool | None:
 
 
 def _fittings_report_is_empty(path: Path) -> bool:
-    """Recognize an intentionally empty fittings report, not a broken report."""
+    """判断 path 是否为有效但有意为空的五金报表，不把损坏报表认作空表。"""
     try:
         workbook = load_workbook(path, data_only=True, read_only=False)
     except Exception:
@@ -1465,6 +1491,9 @@ def _choose_fittings(
     allow_missing_factory: bool = False,
     fallback_factory: str = "",
 ) -> tuple[dict[str, list[FittingItem]], list[str]]:
+    """选择目录中的工厂单五金来源并收集警告。
+
+    参数：folder 为来源目录；allow_missing_factory 是否允许缺号；fallback_factory 为备用工厂单号。"""
     paths = sorted(
         path for path in report_paths(folder)
         if is_fittings_report(path)
@@ -1489,12 +1518,14 @@ def _choose_fittings(
 
 
 def _ignored_key(name: str, code: str, size: str, unit: str) -> str:
+    """按五金身份生成忽略键；name 为名称，code 为编码，size 为规格，unit 为单位。"""
     payload = "\x1f".join((_text(name).lower(), _text(code).upper(), _text(size).lower(), _text(unit).lower()))
     import hashlib
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
 
 
 def _normalize_fittings(items: list[FittingItem], mappings: InventoryMappings) -> list[PreviewFitting]:
+    """标准化并汇总五金项目；items 为来源记录，mappings 为商品忽略及匹配规则。"""
     direct = {"WJ-CBT": ("Shelf Holder", "pcs/个"), "71T950A": ("Hinge", "pcs/个")}
     rails = {"H-RAIL": ("H-Rail", "set/套"), "L-RAIL": ("L-Rail", "set/套")}
     aggregate: dict[tuple[str, str, str, str], float] = defaultdict(float)
@@ -1504,10 +1535,7 @@ def _normalize_fittings(items: list[FittingItem], mappings: InventoryMappings) -
             name, unit = direct[code]
             aggregate[(name, code, "", unit)] += item.quantity
         elif code in rails:
-            # parse_fittings_groups() has already validated and collapsed an
-            # equal left/right pair into one canonical source row.  Do not
-            # reconstruct the pair here: doing so turns a valid collapsed
-            # pair into a false "missing right side" error.
+            # 五金解析已校验并将数量相等的左右导轨合并为一行，此处不能重建配对，否则会误报缺右侧。
             name, unit = rails[code]
             aggregate[(name, code, "", unit)] += item.quantity
         else:
@@ -1532,6 +1560,10 @@ def _factory_names(
     fallback_name: str = "",
     fallback_factory: str = "",
 ) -> tuple[dict[str, str], list[str]]:
+    """结合已有身份、报表及 AIMES 解析工厂单名称与归属。
+
+    参数：config 为配置；folder 为来源目录；factories 为工厂单号集合；order_id 为订单号；
+    allow_unscoped 是否允许无归属；fallback_name、fallback_factory 为备用名称和单号。"""
     names: dict[str, str] = {}
     trusted: set[str] = set()
     known_relations: dict[str, str] = {}
@@ -1554,32 +1586,33 @@ def _factory_names(
     finally:
         if owns_connection and connection is not None:
             connection.close()
-    # Existing confirmed ownership is authoritative, even when a display name
-    # has no order prefix. Source reports still discover previously unknown IDs.
+    # 已确认归属是权威事实，即使显示名称不带订单前缀；来源报表仍可发现未知的新工厂单号。
     for path in report_paths(folder):
         if path.name.startswith("~$") or "板材清单" not in path.name:
             continue
         try:
             factory, name = parse_board_identity(path)
-        except RuleError:
+        except RuleError as exc:
             if allow_unscoped:
+                continue
+            references = exc.context.get("factory_references", [])
+            if exc.code == "board_identity" and references and all(
+                known_relations.get(factory) == owner for factory, owner in references
+            ):
+                # 每个引用均已在中央库确认；沿用权威身份，不要求合批表提供单一名称。
                 continue
             raise
         if factory in known_relations:
             continue
         if not allow_unscoped and not _factory_name_belongs_to_order(order_id, name):
-            # A shared folder may contain board lists for a sibling order such
-            # as PP0035. Ignore those rows here; they must not contaminate the
-            # selected split order PP0035-2.
+            # 共享目录可能包含主单的板材报表；处理所选分单时跳过这些记录，避免主单数据污染分单。
             continue
         previous = names.get(factory)
         if previous and previous != name:
             raise RuleError("factory_name_conflict", f"{factory} 在板材清单中对应多个名称：{previous} / {name}")
         names[factory] = name
     if allow_unscoped and fallback_name.strip():
-        # A no-AIMES temporary order intentionally has no F-number.  Seed the
-        # folder identity before the AIMES lookup so offline/manual handling
-        # never tries to resolve a synthetic folder key as a real factory.
+        # 未匹配 AIMES 的临时订单有意不使用 F 单号；在线查询前设置目录身份，避免把合成目录键当作真实工厂单查询。
         names.setdefault(fallback_factory.strip(), fallback_name.strip())
     cache = load_factory_name_cache(config)
     for factory in factories - set(names) - set(known_relations):
@@ -1602,6 +1635,7 @@ def _factory_names(
 
 
 def _room_matches_order(room: str, order_id: str, names: dict[str, str]) -> bool:
+    """判断房间文字与目标订单名称是否匹配；room 为房间名，order_id 为订单号，names 为工厂单名称映射。"""
     room_key = re.sub(r"[^a-z0-9]+", "", room.lower())
     room_tokens = [token for token in re.split(r"[^a-z0-9]+", room.lower()) if len(token) >= 4]
     for name in names.values():
@@ -1614,10 +1648,12 @@ def _room_matches_order(room: str, order_id: str, names: dict[str, str]) -> bool
 
 
 def _room_order_ids(room: str) -> list[str]:
+    """从房间文字 room 提取完整订单号，返回排序后的去重列表。"""
     return sorted({match.upper() for match in ORDER_TOKEN_RE.findall(_text(room))})
 
 
 def _room_has_explicit_order_identity(rows) -> bool:
+    """判断房间记录 rows 中是否有名称显式包含订单号的条目。"""
     return any(_room_order_ids(room) for room, _, _ in rows)
 
 
@@ -1627,6 +1663,9 @@ def _select_room_materials(
     names: dict[str, str],
     known_order_ids: set[str] | None = None,
 ):
+    """按明确归属选择目标订单的房间材料，混合订单使用严格校验。
+
+    参数：rows 为房间记录；order_id 为目标订单；names 为工厂单名称；known_order_ids 为已知订单集合。"""
     known = {str(value).strip().upper() for value in (known_order_ids or {order_id}) if str(value).strip()}
     known.add(order_id.upper())
     strict = len(known) > 1
@@ -1650,16 +1689,13 @@ def _select_room_materials(
                 selected.append(row)
             elif owner not in known:
                 invalid_rooms.append(f"{room}（订单号不在当前文件夹）")
-            # A row explicitly belonging to a sibling order is valid, but is
-            # intentionally omitted from the current order.
+            # 明确属于同组其他订单的行有效，但不纳入当前订单。
         elif strict:
             invalid_rooms.append(f"{room}（缺少订单号）")
         elif _room_matches_order(room, order_id, names):
             selected.append(row)
         elif has_quantity:
-            # A single-order legacy workbook may use a plain room name. Keep
-            # that compatibility path; shared-order workbooks must use an
-            # explicit order-bearing factory name.
+            # 旧单订单工作簿允许普通房间名；共享订单工作簿必须使用带明确订单身份的工厂单名称。
             selected.append(row)
     if invalid_rooms:
         examples = "、".join(dict.fromkeys(invalid_rooms[:5]))
@@ -1714,6 +1750,10 @@ def preview_order(
     temporary_factory_name: str = "",
     persist_facts: bool = True,
 ) -> OrderPreview:
+    """解析订单来源并校验材料、工厂单及可选五金，生成业务预览。
+
+    参数：config 为配置；folder 为来源目录；requested_order_id 为可选目标订单；include_hardware 是否包含五金；
+    temporary_factory_order、temporary_factory_name 为临时任务身份；persist_facts 决定是否保存解析事实，默认开启。"""
     if not folder.is_dir():
         raise RuleError("missing_order_folder", f"订单文件夹不存在：{folder}")
     match = ORDER_FOLDER_RE.fullmatch(folder.name)
@@ -1874,15 +1914,18 @@ def preview_order(
 
 
 def _traveler_path(config: Config, order_id: str) -> Path:
+    """计算订单 Traveler 输出路径；config 提供输出根目录，order_id 为订单号。"""
     return config.order_root / order_id / f"Work Order Traveler({order_id}).xlsx"
 
 
 def find_existing_traveler(config: Config, order_id: str) -> Path | None:
+    """查找订单既有 Traveler，未找到返回 None；config 为配置，order_id 为订单号。"""
     expected = _traveler_path(config, order_id)
     return expected if expected.is_file() else None
 
 
 def preview_payload(config: Config, preview: OrderPreview) -> dict:
+    """将预览转成界面可用字典并附加已有 Traveler 信息；config 为配置，preview 为订单预览。"""
     existing = find_existing_traveler(config, preview.order_id)
     mappings = InventoryMappings(config.workflow_database)
     return {
@@ -1916,7 +1959,7 @@ def preview_payload(config: Config, preview: OrderPreview) -> dict:
 
 
 def persist_preview(config: Config, preview: OrderPreview) -> None:
-    """Persist parsed material/hardware facts; raw reports remain the source evidence."""
+    """保存解析后的材料和五金事实，原始报表仍作为来源证据；config 为配置，preview 为已校验预览。"""
     if not config.storage_prepared:
         return
     resolution_items = _preview_inventory_resolution_items(preview)
@@ -2012,7 +2055,7 @@ def persist_preview(config: Config, preview: OrderPreview) -> None:
                  _preview_material_fact_fingerprint(material_source_fingerprint, product_code),
                  observed),
             )
-        # A material-only or partial preview must not erase other factories.
+        # 仅材料或部分范围的预览不能删除其他工厂单五金。
         from .hardware_facts import replace_factory_hardware, server_hardware_quantity
         for factory in preview.factories if preview.include_hardware else []:
             rows = []
@@ -2042,6 +2085,7 @@ def persist_preview(config: Config, preview: OrderPreview) -> None:
 
 
 def _material_inventory_name(kind: str, thickness: float, color: str = "") -> str:
+    """生成库存匹配用材料名称；kind 为类型，thickness 为厚度，color 为可选颜色。"""
     if kind == "plywood":
         labels = {18.0: "18mm--Plywood", 14.5: "14.5mm--Plywood", 5.4: "5.4mm--Plywood"}
         return next(
@@ -2052,6 +2096,7 @@ def _material_inventory_name(kind: str, thickness: float, color: str = "") -> st
 
 
 def _preview_material_source_fingerprint(path: Path) -> str:
+    """计算材料来源文件 path 的内容指纹，供预览写入留痕。"""
     digest = hashlib.sha256()
     try:
         with path.open("rb") as source:
@@ -2065,6 +2110,7 @@ def _preview_material_source_fingerprint(path: Path) -> str:
 def _preview_material_fact_fingerprint(
     source_fingerprint: str, product_code: str,
 ) -> str:
+    """把材料来源证据绑定到 SKU；source_fingerprint 为来源指纹，product_code 为已确认 SKU。"""
     digest = hashlib.sha256()
     digest.update(str(source_fingerprint or "").encode())
     digest.update(b"\x1f")
@@ -2075,6 +2121,7 @@ def _preview_material_fact_fingerprint(
 def _preview_inventory_resolution_items(
     preview: OrderPreview,
 ) -> list[tuple[TravelerItem, str]]:
+    """将订单预览 preview 转为待匹配库存项目及其来源说明。"""
     items: list[tuple[TravelerItem, str]] = []
     row = 1
     for material in preview.materials:
@@ -2115,7 +2162,7 @@ def preview_related_orders(
     *,
     include_hardware: bool = True,
 ) -> dict:
-    """Preview every order represented in a shared source folder."""
+    """预览共享目录中每个完整订单；config 为配置，folder 为目录，include_hardware 决定是否含五金。"""
     order_ids = related_order_ids(folder) if ORDER_FOLDER_RE.fullmatch(folder.name) else [folder.name]
     if not order_ids:
         raise RuleError("no_orders_in_folder", f"文件夹中未识别到完整订单号：{folder}")
@@ -2160,7 +2207,9 @@ def update_related_orders(
     *,
     include_hardware: bool = True,
 ) -> dict:
-    """Generate/update each complete order found in a shared source folder."""
+    """批量生成或更新共享目录中的完整订单 Traveler。
+
+    参数：config 为配置；folder 为目录；generate 为生成选项；include_hardware 决定是否包含五金。"""
     group = preview_related_orders(config, folder, include_hardware=include_hardware)
     if group["errors"]:
         details = "；".join(
@@ -2187,10 +2236,7 @@ def update_related_orders(
             path, backup = update_order_traveler(config, preview)
             saved.append({"order_id": payload["order_id"], "updated": str(path), "backup": str(backup)})
     primary = saved[0] if saved else {}
-    # Keep the complete related-order payload in the response. The previous
-    # response returned only the first alphabetically sorted order, which made
-    # the SwiftUI model replace a three-factory preview with one factory after
-    # updating Traveler files.
+    # 响应保留全部关联订单预览；不能只返回按字母排序的首单，否则 SwiftUI 会在更新 Traveler 后用部分工厂单覆盖完整预览。
     return {
         **group,
         **primary,
@@ -2202,6 +2248,7 @@ def update_related_orders(
 
 
 def set_ignored(config: Config, name: str, ignored: bool) -> None:
+    """保存项目名称的全局忽略设置；config 为配置，name 为名称，ignored 表示是否忽略。"""
     set_ignored_mapping(
         config,
         name,
@@ -2211,6 +2258,7 @@ def set_ignored(config: Config, name: str, ignored: bool) -> None:
 
 
 def _copy_cell(source, target) -> None:
+    """复制单元格值和样式等属性；source 为来源单元格，target 为目标单元格，跳过合并占位格。"""
     if isinstance(source, MergedCell):
         return
     target.value = source.value
@@ -2225,6 +2273,7 @@ def _copy_cell(source, target) -> None:
 
 
 def _copy_worksheet(source, target_wb, title: str, index: int):
+    """复制工作表内容、样式及合并范围；source 为来源表，target_wb 为目标工作簿，title 为表名，index 为插入位置。"""
     target = target_wb.create_sheet(title, index)
     for row in source.iter_rows():
         for cell in row:
@@ -2245,6 +2294,7 @@ def _copy_worksheet(source, target_wb, title: str, index: int):
 
 
 def _shift_merges_for_insert(ws, row: int, count: int) -> None:
+    """插入行并调整相关合并区域；ws 为工作表，row 为起始行，count 为插入行数。"""
     affected = [
         tuple(range_boundaries(str(merged)))
         for merged in ws.merged_cells.ranges
@@ -2269,6 +2319,7 @@ def _shift_merges_for_insert(ws, row: int, count: int) -> None:
 
 
 def _expand_usage_detail_rows(ws, required_rows: int) -> None:
+    """在需要时扩展用量表明细区域；ws 为工作表，required_rows 为所需明细行数。"""
     total_row = _find_label_row(ws, "Total Qty:")
     current_rows = total_row - 3
     if required_rows <= current_rows:
@@ -2306,6 +2357,7 @@ def _expand_usage_detail_rows(ws, required_rows: int) -> None:
 
 
 def _write_usage_formulas(ws) -> None:
+    """重建工作表 ws 的用量汇总及颜色汇总公式。"""
     total_row = _find_label_row(ws, "Total Qty:")
     detail_end = total_row - 1
     color_title_row = _find_label_row(ws, "Color Table")
@@ -2362,6 +2414,9 @@ def _write_usage_formulas(ws) -> None:
 
 
 def _fill_usage_list(source_path: Path, wb, order_id: str, allowed_rooms: set[str] | None = None) -> None:
+    """从材料来源填充 Traveler 用量表。
+
+    参数：source_path 为材料文件；wb 为目标工作簿；order_id 为订单号；allowed_rooms 为可选房间范围。"""
     if USAGE_LIST_SHEET not in wb.sheetnames:
         raise RuleError("template_schema", f"Traveler 模板缺少 {USAGE_LIST_SHEET}")
     source_wb = load_workbook(source_path, data_only=False, read_only=True)
@@ -2390,16 +2445,14 @@ def _fill_usage_list(source_path: Path, wb, order_id: str, allowed_rooms: set[st
             target_cell = target.cell(target_row, col)
             if not isinstance(target_cell, MergedCell):
                 value = source.cell(source_row, col).value
-                # Color Table headers use the canonical business color name.
-                # Normalize copied detail colors as well, otherwise a source
-                # value such as Khaki is written beside a Penelope FA44
-                # header and the generated SUMIF cannot match it.
+                # 颜色汇总表头使用标准业务颜色，复制明细时也须标准化；否则别名与表头不一致会使 SUMIF 无法匹配。
                 target_cell.value = _canonical_color(_text(value)) if col == 9 and value else value
     _write_merged(target, 1, 2, order_id)
     _write_usage_formulas(target)
 
 
 def _restore_template_picking_list(config: Config, wb) -> None:
+    """从当前模板恢复领料单工作表；config 提供模板路径，wb 为目标工作簿。"""
     template_wb = load_workbook(config.template, data_only=False)
     if PICKING_LIST_SHEET not in template_wb.sheetnames:
         raise RuleError("template_schema", f"Traveler 模板缺少 {PICKING_LIST_SHEET}")
@@ -2410,6 +2463,7 @@ def _restore_template_picking_list(config: Config, wb) -> None:
 
 
 def _restore_template_usage_list(config: Config, wb) -> None:
+    """从当前模板恢复用量表工作表；config 提供模板路径，wb 为目标工作簿。"""
     template_wb = load_workbook(config.template, data_only=False)
     if USAGE_LIST_SHEET not in template_wb.sheetnames:
         raise RuleError("template_schema", f"Traveler 模板缺少 {USAGE_LIST_SHEET}")
@@ -2420,6 +2474,7 @@ def _restore_template_usage_list(config: Config, wb) -> None:
 
 
 def _write_merged(ws, row: int, col: int, value) -> None:
+    """向单元格或其合并区域左上角写值；ws 为工作表，row、col 为坐标，value 为待写值。"""
     cell = ws.cell(row, col)
     if not isinstance(cell, MergedCell):
         cell.value = value
@@ -2431,6 +2486,7 @@ def _write_merged(ws, row: int, col: int, value) -> None:
 
 
 def _write_initial_traveler_date(ws) -> None:
+    """定位工作表 ws 的日期字段并填写初始日期，模板缺少字段时报错。"""
     for row in ws.iter_rows():
         for cell in row:
             if _normalized_label(cell.value) == _normalized_label("Date/日期："):
@@ -2449,6 +2505,7 @@ def _write_initial_traveler_date(ws) -> None:
 
 
 def _snapshot_rows(ws, first: int, last: int) -> dict:
+    """保存工作表指定行的值、样式及行高等信息；ws 为工作表，first、last 为首尾行号。"""
     return {
         "cells": {
             (row, col): copy.copy(ws.cell(row, col))
@@ -2469,6 +2526,7 @@ def _snapshot_rows(ws, first: int, last: int) -> dict:
 
 
 def _paste_snapshot(ws, snapshot: dict, destination_row: int) -> None:
+    """按行偏移粘贴已保存快照；ws 为目标表，snapshot 为行快照，destination_row 为目标起始行。"""
     offset = destination_row - snapshot["first"]
     for (row, col), source in snapshot["cells"].items():
         _copy_cell(source, ws.cell(row + offset, col))
@@ -2482,6 +2540,7 @@ def _paste_snapshot(ws, snapshot: dict, destination_row: int) -> None:
 
 
 def _style_merged_row(ws, row: int, last_col: int, color: str) -> None:
+    """调整合并行及填充样式；ws 为工作表，row 为行号，last_col 为末列，color 为填充颜色。"""
     merges = [
         str(merged) for merged in ws.merged_cells.ranges
         if merged.min_row == merged.max_row == row
@@ -2511,6 +2570,7 @@ def _style_merged_row(ws, row: int, last_col: int, color: str) -> None:
 
 
 def _style_picking_list_title(ws, last_col: int) -> None:
+    """设置领料单标题、合并区域和样式；ws 为工作表，last_col 为标题覆盖末列。"""
     for merged in list(ws.merged_cells.ranges):
         if merged.min_row <= 1 <= merged.max_row:
             ws.unmerge_cells(str(merged))
@@ -2528,7 +2588,7 @@ def _style_picking_list_title(ws, last_col: int) -> None:
 
 
 def _clear_picking_list_business_data(ws) -> None:
-    """Keep the template intact when there is no Picking List business content."""
+    """清空工作表 ws 的领料业务内容，保留无明细时所需的模板结构。"""
     for row in range(1, ws.max_row + 1):
         first = ws.cell(row, 1).value
         if _text(first) == "Name/工厂单名称":
@@ -2544,6 +2604,7 @@ def _clear_picking_list_business_data(ws) -> None:
 
 
 def _prepare_picking_list(wb, preview: OrderPreview) -> None:
+    """按订单预览构建各工厂单领料区；wb 为目标工作簿，preview 为材料和五金预览。"""
     ws = wb[PICKING_LIST_SHEET]
     if not preview.factories:
         _clear_picking_list_business_data(ws)
@@ -2555,7 +2616,7 @@ def _prepare_picking_list(wb, preview: OrderPreview) -> None:
     )
     for merged in list(ws.merged_cells.ranges):
         ws.unmerge_cells(str(merged))
-    ws.delete_rows(4, 7)  # Remove the obsolete Panel section; rows now match the approved screenshot.
+    ws.delete_rows(4, 7)  # 移除旧的独立饰面板区，使行布局符合已确认界面样式。
     for min_col, min_row, max_col, max_row in original_merges:
         if max_row < 3:
             ws.merge_cells(
@@ -2593,11 +2654,7 @@ def _prepare_picking_list(wb, preview: OrderPreview) -> None:
         _paste_snapshot(ws, base, cursor)
         if slots > 4:
             insertion = cursor + 7
-            # ``insert_rows`` does not move merged ranges.  The base snapshot
-            # contains the manual-hardware title immediately after the
-            # automatic fitting rows, so inserting extra fitting rows without
-            # shifting its merges leaves the title merge over the fifth item
-            # (for example TB18) and hides that item's values after reload.
+            # 插入行不会移动合并范围；额外五金行插入时必须平移人工五金标题的合并区域，避免覆盖并隐藏后续项目。
             _shift_merges_for_insert(ws, insertion, slots - 4)
             template_row = cursor + 6
             for row in range(insertion, insertion + slots - 4):
@@ -2608,10 +2665,7 @@ def _prepare_picking_list(wb, preview: OrderPreview) -> None:
                 ws.merge_cells(start_row=row, start_column=5, end_row=row, end_column=6)
         _write_merged(ws, cursor, 4, factory.order_name)
         _style_merged_row(ws, cursor, table_last_col, block_colors[factory_index % len(block_colors)])
-        # Find the fitting column header in the pasted template instead of
-        # relying on a fixed offset.  Older approved templates keep the
-        # ``Fitting配件`` label row; newer compact ones omit it.  In both
-        # layouts the first item must be exactly the row after ``No.``.
+        # 在粘贴后的模板中查找五金列头，不依赖固定偏移；兼容旧模板标题位置，第一项必须紧接编号表头下一行。
         header_row = next(
             (
                 row
@@ -2629,8 +2683,7 @@ def _prepare_picking_list(wb, preview: OrderPreview) -> None:
             item = included[index] if index < len(included) else None
             if not isinstance(ws.cell(row, 1), MergedCell):
                 ws.cell(row, 1).value = index + 1
-            # The source report's code identifies its own component; it is
-            # not an inventory SKU and must never be written into SKU NO.
+            # 来源报表编码标识其自身部件，并非库存 SKU，不可直接填入商品编号列。
             if not isinstance(ws.cell(row, 2), MergedCell):
                 ws.cell(row, 2).value = None
             _write_merged(ws, row, 3, item.name if item else None)
@@ -2659,6 +2712,7 @@ def _prepare_picking_list(wb, preview: OrderPreview) -> None:
 
 
 def _purchase_material_rows(preview: OrderPreview) -> list[tuple[str, str, float]]:
+    """从预览 preview 生成采购表所需的材料名称、单位及数量行。"""
     rows: list[tuple[str, str, float]] = []
     materials = sorted(
         (item for item in preview.materials if item.quantity > EPSILON),
@@ -2686,6 +2740,7 @@ def _purchase_material_rows(preview: OrderPreview) -> list[tuple[str, str, float
 
 
 def _purchase_hardware_rows(preview: OrderPreview) -> list[tuple[str, str, float, str]]:
+    """从预览 preview 生成采购表五金记录，保留工厂单归属信息。"""
     rows: list[tuple[str, str, float, str]] = []
     for factory in sorted(preview.factories, key=lambda item: (item.factory_order.casefold(), item.order_name.casefold())):
         hardware = [*factory.fittings, *factory.manual_hardware]
@@ -2702,6 +2757,7 @@ def _purchase_hardware_rows(preview: OrderPreview) -> list[tuple[str, str, float
 
 
 def _insert_purchase_rows(ws, insertion_row: int, count: int, template_row: int) -> None:
+    """插入采购明细并复制模板行样式；ws 为表，insertion_row 为插入行，count 为数量，template_row 为样式来源行。"""
     if count <= 0:
         return
     _shift_merges_for_insert(ws, insertion_row, count)
@@ -2714,13 +2770,10 @@ def _insert_purchase_rows(ws, insertion_row: int, count: int, template_row: int)
 
 
 def _prepare_purchase_list(wb, preview: OrderPreview) -> None:
-    """Populate the optional Purchase List sheet from the same preview facts.
+    """用同一预览事实填充模板中的可选采购表。
 
-    The legacy template contains example materials and accessories.  Leaving
-    those cells untouched makes a database-generated Traveler look like it has
-    hardware that was never present in SQLite, so this sheet is cleared and
-    rebuilt whenever the template provides it.
-    """
+    参数：wb 为目标工作簿；preview 为订单预览。旧模板含示例材料和五金，
+    存在采购表时必须清空重建，避免导出的 Traveler 显示数据库中不存在的五金。"""
     if PURCHASE_LIST_SHEET not in wb.sheetnames:
         return
     ws = wb[PURCHASE_LIST_SHEET]
@@ -2782,6 +2835,7 @@ def _prepare_purchase_list(wb, preview: OrderPreview) -> None:
 
 
 def _manual_hardware(ws) -> dict[str, list[dict]]:
+    """读取工作表 ws 中各工厂单的人工五金区，按工厂单分组返回。"""
     result: dict[str, list[dict]] = defaultdict(list)
     factory = ""
     in_manual_section = False
@@ -2821,6 +2875,7 @@ def _manual_hardware(ws) -> dict[str, list[dict]]:
 
 
 def _manual_hardware_block(ws, factory: str) -> tuple[int, list[int], int] | None:
+    """定位工厂单的人工五金区；ws 为工作表，factory 为目标工厂单身份。"""
     current_factory = ""
     in_target = False
     header = None
@@ -2849,6 +2904,7 @@ def _manual_hardware_block(ws, factory: str) -> tuple[int, list[int], int] | Non
 
 
 def _restore_manual_hardware(ws, hardware: dict[str, list[dict]]) -> None:
+    """将保留的人工五金恢复到领料单；ws 为工作表，hardware 为工厂单到人工记录列表的映射。"""
     for factory, items in hardware.items():
         unique_items = {}
         for item in items:
@@ -2856,9 +2912,7 @@ def _restore_manual_hardware(ws, hardware: dict[str, list[dict]]) -> None:
         items = list(unique_items.values())
         block = _manual_hardware_block(ws, factory)
         if block is None:
-            # Legacy sheets can lose the exact factory label while being
-            # upgraded. Preserve the manual rows in the first available
-            # factory block instead of aborting the whole Traveler update.
+            # 旧表升级时可能丢失精确工厂单标签；将人工行保留在首个可用工厂单区，不中止整个 Traveler 更新。
             for row in range(1, ws.max_row + 1):
                 if _text(ws.cell(row, 1).value) == "Name/工厂单名称":
                     candidate = next((_text(ws.cell(row, col).value) for col in range(2, ws.max_column + 1) if _text(ws.cell(row, col).value)), "")
@@ -2913,7 +2967,7 @@ def _restore_manual_hardware(ws, hardware: dict[str, list[dict]]) -> None:
             _write_merged(ws, row, 5, item["spec"])
             _write_merged(ws, row, 7, item["quantity"])
             ws.cell(row, 9).value = item["remarks"]
-        # Collapse duplicate legacy rows for the same manually entered item.
+        # 合并同一人工五金项目的重复历史行。
         for item in items:
             matches = [row for row in range(1, ws.max_row + 1) if _text(ws.cell(row, 3).value) == _text(item["name"])]
             for row in reversed(matches[1:]):
@@ -2921,6 +2975,7 @@ def _restore_manual_hardware(ws, hardware: dict[str, list[dict]]) -> None:
 
 
 def _positive_hardware_quantity(value) -> int:
+    """把 value 校验为有限正整数，否则抛出人工五金数量错误。"""
     number = _number(value, "人工五金")
     if not math.isfinite(number) or number <= 0 or abs(number - round(number)) > EPSILON:
         raise RuleError("manual_hardware_quantity", f"人工五金数量必须是正整数：{number:g}")
@@ -2932,7 +2987,7 @@ def _resolve_manual_hardware_factory(
     order_id: str,
     factory_name: str,
 ) -> tuple[str, str]:
-    """Resolve the display name to the canonical factory-order identifier."""
+    """把显示名称解析为标准工厂单号；config 为配置，order_id 为订单号，factory_name 为工厂单名称或身份。"""
     requested = _text(factory_name)
     connection = connect_database(config.workflow_database)
     try:
@@ -2968,12 +3023,14 @@ def preview_manual_hardware(
     quantity,
     remarks: str = "",
 ) -> dict:
+    """校验人工五金身份、商品和数量并生成写入预览。
+
+    参数：config 为配置；order_id 为订单；factory_name 为工厂单名称；product_code 为 SKU；quantity 为数量；remarks 为备注。"""
     with ProductDatabase(bootstrap_product_database(config)) as catalog:
         product = catalog.require_code(product_code.strip().upper())
     factory_order, factory = _resolve_manual_hardware_factory(config, order_id, factory_name)
     return {
-        # Kept as an empty compatibility field for older Gateway/UI payloads.
-        # Manual hardware is no longer read from or written to a Traveler.
+        # 保留空字段以兼容已有网关和界面响应；人工五金不再从 Traveler 读取或写入。
         "traveler": "",
         "order_id": order_id.upper(),
         "factory_order": factory_order,
@@ -2987,6 +3044,7 @@ def preview_manual_hardware(
 
 
 def _backup_traveler(config: Config, traveler: Path, order_id: str, label: str = "backup") -> Path:
+    """复制 Traveler 到带时间戳的备份路径；config 为配置，traveler 为来源文件，order_id 为订单号，label 为备份标签。"""
     backup_dir = config.backup_root / order_id.upper()
     backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%d %H%M%S-%f")
@@ -3003,6 +3061,9 @@ def add_manual_hardware(
     quantity,
     remarks: str = "",
 ) -> tuple[Path, Path, dict]:
+    """校验后把人工五金写入中央事实并返回结果。
+
+    参数：config 为配置；order_id 为订单号；factory_name 为工厂单名称；product_code 为 SKU；quantity 为数量；remarks 为备注。"""
     preview = preview_manual_hardware(
         config, order_id, factory_name, product_code, quantity, remarks
     )
@@ -3109,20 +3170,15 @@ def add_manual_hardware(
         "stored_in_database": True,
         "traveler": "",
     }
-    # The tuple shape remains compatible with the existing Gateway/CLI.  Both
-    # paths are intentionally empty because this operation has no Traveler
-    # file side effect and therefore no Traveler backup.
+    # 返回元组结构继续兼容现有网关及 CLI；两个文件路径均为空，因为此操作不修改或备份 Traveler。
     return Path(""), Path(""), result
 
 
 def generate_order_traveler(config: Config, preview: OrderPreview) -> Path:
-    """Render one preview into a new Traveler using the current template.
+    """用当前模板将预览渲染为新 Traveler，保存后校验工作簿结构。
 
-    The preview is the boundary between parsed business facts and Excel
-    layout.  Generation writes a new file in the configured output area and
-    validates the workbook structure before returning its path; it does not
-    silently turn a preview into an external inventory operation.
-    """
+    参数：config 为输出及模板配置；preview 为已解析的业务预览。
+    预览隔离业务事实和 Excel 布局，生成文件不隐式执行外部库存操作。"""
     destination = _traveler_path(config, preview.order_id)
     destination_dir = destination.parent
     if destination.exists():
@@ -3150,6 +3206,7 @@ def generate_order_traveler(config: Config, preview: OrderPreview) -> Path:
 
 
 def _database_material_template(config: Config) -> Path:
+    """查找数据库材料渲染模板，优先配置模板旁的文件；config 为模板配置。"""
     configured = config.template.parent / "Order Materials.xlsx"
     if configured.is_file():
         return configured
@@ -3165,7 +3222,9 @@ def _write_database_material_workbook(
     order_id: str,
     material_rows: list[dict],
 ) -> None:
-    """Create an internal material workbook solely to render DB facts into the Traveler template."""
+    """生成仅用于把数据库事实渲染进 Traveler 的内部材料工作簿。
+
+    参数：config 为配置；destination 为目标路径；order_id 为订单号；material_rows 为数据库材料记录。"""
     shutil.copy2(_database_material_template(config), destination)
     workbook = load_workbook(destination, data_only=False)
     worksheet = workbook[workbook.sheetnames[0]]
@@ -3242,7 +3301,7 @@ def _write_database_material_workbook(
 
 
 def generate_database_order_traveler(config: Config, order_id: str) -> Path:
-    """Render an on-demand Traveler from persisted SQLite facts, never from source files."""
+    """按持久 SQLite 事实生成按需 Traveler，不重读来源报表；config 为配置，order_id 为订单号。"""
     from .order_details import order_detail
 
     normalized_order_id = order_id.strip().upper()
@@ -3333,7 +3392,7 @@ def generate_database_order_traveler(config: Config, order_id: str) -> Path:
 
 
 def generate_temporary_traveler(config: Config, preview: OrderPreview) -> Path:
-    """Render a Traveler into the OS temporary area; never place it in Order."""
+    """把预览渲染到系统临时目录，不放入正式订单目录；config 为配置，preview 为订单预览。"""
     temporary_root = Path(tempfile.mkdtemp(prefix="pp-flowhub-traveler-"))
     transient_config = copy.copy(config)
     transient_config.order_root = temporary_root
@@ -3341,7 +3400,7 @@ def generate_temporary_traveler(config: Config, preview: OrderPreview) -> Path:
 
 
 def update_order_traveler(config: Config, preview: OrderPreview) -> tuple[Path, Path]:
-    """Back up and atomically update an existing Traveler from a preview."""
+    """备份并原子更新已有 Traveler；config 为配置，preview 为新预览，保留更新流程要求的人工内容。"""
     existing = find_existing_traveler(config, preview.order_id)
     if not existing:
         raise RuleError("traveler_not_found", f"找不到可更新的 Traveler：{_traveler_path(config, preview.order_id)}")
@@ -3378,11 +3437,10 @@ def update_order_traveler(config: Config, preview: OrderPreview) -> tuple[Path, 
 
 
 def _config_from_args(args, base_config: Config | None = None) -> Config:
+    """根据命令行参数构建配置；args 为已解析参数，base_config 为可选预设配置。"""
     if base_config is not None:
-        # The resident service has already loaded settings, prepared the
-        # central schema and opened its shared connection.  Request arguments
-        # are intentionally limited to business parameters; changing storage
-        # roots would invalidate the service's in-memory order model.
+        # 常驻服务已加载设置、准备中央库并打开共享连接；单次请求只接受业务参数，
+        # 改变存储根目录会使服务内存订单模型失效，因此不在请求中修改。
         if getattr(args, "state_dir", None):
             raise RuleError("invalid_arguments", "常驻订单服务不允许在请求中切换状态目录")
         request_config = copy.copy(base_config)
@@ -3413,8 +3471,12 @@ def main(
     result_sink: dict | None = None,
     stdin_text: str | None = None,
 ) -> int:
+    """解析并分发订单命令，统一输出结果和错误，返回退出码。
+
+    参数：argv 为可选命令行参数；config_override 为预设配置；logger_override 为预设日志器；
+    emit_result 决定是否输出结果；result_sink 为可选结果接收字典；stdin_text 为可选注入的标准输入文本。"""
     parser = argparse.ArgumentParser(prog="pp-flowhub order")
-    parser.add_argument("command", choices=("audit-hardware", "preview-hardware-manual", "confirm-hardware-manual", "list", "list-index", "detail", "cost", "cost-export", "backup-status", "backup-now", "sync-index", "process-server-changes", "process-server-folder", "preview-server-changes", "confirm-server-preview", "confirm-server-material-preview", "confirm-server-preview-memory", "confirm-server-material-preview-memory", "acknowledge-server-preview-memory", "sync-aimes", "scan-server", "ignore-server-folder", "mark-temporary-manual", "ignore-aimes", "restore-aimes-ignore", "assign-aimes-order", "restore-aimes-assignment", "auto-resolve-issue", "resolve-issue", "save-order-annotations", "abort-order", "production-preview", "prepare-production", "migrate-production-state", "preview", "preview-related", "refresh-aimes", "stock-check", "set-ignore", "generate", "generate-db", "temporary", "generate-material", "generate-material-from-travelers", "update", "update-related", "add-hardware", "manual-hardware", "save-manual-hardware", "search-hardware-products", "add-factory", "assign-material", "create-test-data"))
+    parser.add_argument("command", choices=("confirm-aicnc", "ignore-aicnc", "dismiss-legacy-monitor", "recheck-issue", "audit-hardware", "preview-hardware-manual", "confirm-hardware-manual", "list", "list-index", "detail", "cost", "cost-export", "backup-status", "backup-now", "sync-index", "process-server-changes", "process-server-folder", "preview-server-changes", "confirm-server-preview", "confirm-server-material-preview", "confirm-server-preview-memory", "confirm-server-material-preview-memory", "acknowledge-server-preview-memory", "sync-aimes", "scan-server", "ignore-server-folder", "mark-temporary-manual", "ignore-aimes", "restore-aimes-ignore", "assign-aimes-order", "restore-aimes-assignment", "auto-resolve-issue", "resolve-issue", "save-order-annotations", "abort-order", "production-preview", "prepare-production", "confirm-production-without-materials", "migrate-production-state", "preview", "preview-related", "refresh-aimes", "stock-check", "set-ignore", "generate", "generate-db", "temporary", "generate-material", "generate-material-from-travelers", "update", "update-related", "add-hardware", "manual-hardware", "save-manual-hardware", "search-hardware-products", "add-factory", "assign-material", "create-test-data"))
     parser.add_argument("--folder", type=Path)
     parser.add_argument("--server-folder", type=Path, action="append", default=[])
     parser.add_argument("--name", action="append", default=[])
@@ -3464,7 +3526,24 @@ def main(
     command_started = time.perf_counter()
     logger.event("backend.command.started", "开始订单工作流操作", details={"action": args.command})
     try:
-        if args.command == "create-test-data":
+        if args.command == "confirm-aicnc":
+            from .aicnc_import import confirm
+            payload = json.loads((stdin_text if stdin_text is not None else sys.stdin.read()) or '{}')
+            result = confirm(config, payload, confirmed=args.confirm_write)
+        elif args.command == "ignore-aicnc":
+            from .aicnc_import import ignore
+            if not args.confirm_write or not args.folder:
+                raise RuleError('write_confirmation_required', '忽略优化文件夹需要明确确认')
+            result = ignore(config, args.folder)
+        elif args.command == "dismiss-legacy-monitor":
+            from .aicnc_import import require_enabled
+            from .database import connect_database
+            with connect_database(config.workflow_database) as connection:
+                require_enabled(connection)
+                connection.execute("update aicnc_import_settings set value='1' where key='cleanup_dismissed'")
+            connection.close()
+            result = {'ok': True}
+        elif args.command == "create-test-data":
             if not args.target_root:
                 raise RuleError("invalid_arguments", "create-test-data 需要 --target-root")
             from .test_data import create_local_test_source
@@ -3479,16 +3558,18 @@ def main(
                 raise RuleError("invalid_arguments", "detail 需要 --order-id")
             from .order_details import order_detail
             result = order_detail(config, args.order_id)
-        elif args.command in {"production-preview", "prepare-production"}:
+        elif args.command in {"production-preview", "prepare-production", "confirm-production-without-materials"}:
             if not args.order_id:
                 raise RuleError("invalid_arguments", f"{args.command} 需要 --order-id")
             try:
                 factory_orders = json.loads(args.factory_orders_json)
             except json.JSONDecodeError as exc:
                 raise RuleError("invalid_arguments", "工厂单选择不是有效 JSON") from exc
-            from .production import prepare_production, production_preview
+            from .production import confirm_production_without_materials, prepare_production, production_preview
             if args.command == "production-preview":
                 result = production_preview(config, args.order_id, factory_orders)
+            elif args.command == "confirm-production-without-materials":
+                result = confirm_production_without_materials(config, args.order_id, factory_orders, args.materials_json, confirm=args.confirm_write)
             else:
                 result = prepare_production(config, args.order_id, factory_orders, args.materials_json)
         elif args.command == "migrate-production-state":
@@ -3501,7 +3582,7 @@ def main(
             result = export_order_cost(config, args.order_id) if args.command == "cost-export" else calculate_order_cost(config, args.order_id)
         elif args.command == "audit-hardware":
             from .hardware_facts import hardware_integrity_findings
-            # Maintenance is deliberately read-only and never initializes/migrates schema.
+            # 维护检查保持只读，不初始化或迁移数据库结构。
             with sqlite3.connect(f"file:{config.workflow_database}?mode=ro", uri=True) as connection:
                 result = {"ok": True, "source": "本地数据库一致性审计",
                           "findings": hardware_integrity_findings(connection)}
@@ -3676,6 +3757,14 @@ def main(
                 result = restore_aimes_order_assignment(config, args.ignore_key[0])
             except ValueError as exc:
                 raise RuleError("invalid_arguments", str(exc)) from exc
+        elif args.command == "recheck-issue":
+            from .order_index import recheck_current_issue
+            if not args.issue_key:
+                raise RuleError("invalid_arguments", "重新检查需要问题标识")
+            try:
+                result = recheck_current_issue(config, args.issue_key)
+            except ValueError as exc:
+                raise RuleError("pending_check_failed", str(exc)) from exc
         elif args.command == "auto-resolve-issue":
             if not args.issue_key:
                 raise RuleError("invalid_arguments", "自动处理当前问题需要 --issue-key")
@@ -3879,7 +3968,7 @@ def main(
         logger.event(
             "backend.command.failed",
             "订单工作流操作失败",
-            details={"action": args.command, "code": exc.code, "error": str(exc), "duration_seconds": round(time.perf_counter() - command_started, 6)},
+            details={"action": args.command, "code": exc.code, "error": safe_rule_error_text(str(exc)), "order_id": args.order_id, "factory_order": args.factory_order, "duration_seconds": round(time.perf_counter() - command_started, 6)},
         )
         fatal = {"fatal": {"code": exc.code, "message": str(exc), "order_id": args.order_id,
                             "factory_order": args.factory_order, "path": str(args.folder or ""), **exc.context}}
@@ -3893,16 +3982,15 @@ def main(
             "backend.command.failed",
             "订单工作流操作发生未预期错误",
             details={
-                "action": args.command,
+                **safe_exception_details(exc, action=args.command, order_id=args.order_id, factory_order=args.factory_order),
                 "code": "local_database_error" if isinstance(exc, sqlite3.Error) else "local_processing_error",
-                "error": str(exc),
                 "duration_seconds": round(time.perf_counter() - command_started, 6),
             },
         )
         fatal = {
             "fatal": {
                 "code": "local_database_error" if isinstance(exc, sqlite3.Error) else "local_processing_error",
-                "message": f"{'本地数据库' if isinstance(exc, sqlite3.Error) else '本地订单处理'}：{exc}",
+                "message": "本地订单处理发生未预期错误，请查看操作日志。",
                 "source": "本地数据库" if isinstance(exc, sqlite3.Error) else "本地订单处理",
                 "order_id": args.order_id, "factory_order": args.factory_order,
                 "path": str(getattr(exc, 'filename', '') or args.folder or ''),

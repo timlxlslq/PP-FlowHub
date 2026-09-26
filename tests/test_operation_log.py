@@ -8,6 +8,8 @@ from traveler_assistant.operation_log import OperationLogger, log_database_state
 
 
 class OperationLogTests(unittest.TestCase):
+    # 验证追加日志带时间戳，并移除敏感值。
+    # self：当前测试用例或测试替身实例。
     def test_append_log_has_timestamp_and_never_stores_sensitive_values(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "operation-log.jsonl"
@@ -23,12 +25,16 @@ class OperationLogTests(unittest.TestCase):
             self.assertEqual(row["details"]["password"], "[REDACTED]")
             self.assertNotIn("do-not-store", path.read_text(encoding="utf-8"))
 
+    # 验证关闭日志功能后不会创建或追加日志文件。
+    # self：当前测试用例或测试替身实例。
     def test_disabled_logger_does_not_create_or_append_file(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "operation-log.jsonl"
             write_operation_log(path, "user.action", "点击查询", enabled=False)
             self.assertFalse(path.exists())
 
+    # 验证数据库追踪仅记录操作结构，不记录绑定的实际值。
+    # self：当前测试用例或测试替身实例。
     def test_database_trace_records_operation_shape_without_bound_values(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "operation-log.jsonl"

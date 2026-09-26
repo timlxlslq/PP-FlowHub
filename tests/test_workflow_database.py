@@ -12,6 +12,8 @@ from traveler_assistant.order_index import OrderIndexStore
 
 
 class WorkflowDatabaseTests(unittest.TestCase):
+    # 验证旧的合并出库单据迁移后保留每个工厂单的关联。
+    # self：当前测试用例或测试替身实例。
     def test_grouped_outbound_document_migrates_to_factory_links(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "workflow.sqlite3"
@@ -65,6 +67,8 @@ class WorkflowDatabaseTests(unittest.TestCase):
 
         self.assertEqual(links, [("F100",), ("F101",), ("F102",)])
 
+    # 验证材料表迁移至订单层级后移除旧分配结构并保留材料事实。
+    # self：当前测试用例或测试替身实例。
     def test_material_table_migrates_to_order_scope_and_removes_allocations(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "workflow.sqlite3"
@@ -125,6 +129,8 @@ class WorkflowDatabaseTests(unittest.TestCase):
             self.assertIsNone(connection.execute("select 1 from sqlite_master where name='material_allocations'").fetchone())
             connection.close()
 
+    # 验证旧订单数据库迁移不读取独立库存数据库。
+    # self：当前测试用例或测试替身实例。
     def test_legacy_order_database_migrates_without_reading_inventory_database(self):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp) / "state"
@@ -156,6 +162,8 @@ class WorkflowDatabaseTests(unittest.TestCase):
             self.assertTrue(list((state / "migration-archives").rglob("*.sqlite3")))
             self.assertTrue(legacy_inventory.is_file())
 
+    # 验证源批次信息不会凭空生成生产记录或业务冲突。
+    # self：当前测试用例或测试替身实例。
     def test_source_batches_do_not_create_production_or_conflicts(self):
         with tempfile.TemporaryDirectory() as temp:
             store = OrderIndexStore(Path(temp) / 'workflow.sqlite3')
@@ -167,6 +175,8 @@ class WorkflowDatabaseTests(unittest.TestCase):
             self.assertFalse(store.connection.execute("select 1 from sqlite_master where name in ('production_batches','batch_evidence')").fetchall())
             store.close()
 
+    # 验证没有成功备份记录时，备份状态提示用户执行操作。
+    # self：当前测试用例或测试替身实例。
     def test_backup_status_requires_user_action_without_successful_record(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config(state_dir=Path(temp) / "state", backup_root=Path(temp) / "server" / "database-backups")
@@ -174,6 +184,8 @@ class WorkflowDatabaseTests(unittest.TestCase):
             status = backup_status(config, date.today())
             self.assertTrue(status["requires_user_attention"])
 
+    # 验证备份保留策略保留近期每日备份及周日周备份。
+    # self：当前测试用例或测试替身实例。
     def test_retention_keeps_recent_daily_and_sunday_weekly_backups(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -190,11 +202,13 @@ class WorkflowDatabaseTests(unittest.TestCase):
                 (root / f"workflow-{day.isoformat()}.sqlite3").touch()
             _apply_retention(root, today)
             self.assertTrue((root / "workflow-2026-08-14.sqlite3").exists())
-            self.assertTrue((root / "workflow-2026-08-12.sqlite3").exists())  # latest in the week
+            self.assertTrue((root / "workflow-2026-08-12.sqlite3").exists())  # 该周最新一份备份
             self.assertFalse((root / "workflow-2026-08-11.sqlite3").exists())
-            self.assertTrue((root / "workflow-2026-07-26.sqlite3").exists())  # latest in the week
+            self.assertTrue((root / "workflow-2026-07-26.sqlite3").exists())  # 该周最新一份备份
             self.assertFalse((root / "workflow-2026-05-07.sqlite3").exists())
 
+    # 验证备份执行结果存放在本地数据库备份目录中。
+    # self：当前测试用例或测试替身实例。
     def test_perform_backup_uses_local_database_backup_directory(self):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp) / "state"

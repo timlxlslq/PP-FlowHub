@@ -12,23 +12,31 @@ from traveler_assistant.tool_gateway import _order_folder, execute_local_command
 
 
 class LocalCommandRouterTests(unittest.TestCase):
+    # 验证常见自然语言指令直接路由为本地命令，无需调用模型。
+    # self：当前测试用例或测试替身实例。
     def test_common_phrasings_are_zero_token_commands(self):
         expected = LocalCommand("preview_order", {"order_id": "PP1234"})
         self.assertEqual(parse_local_command("查找PP1234"), expected)
         self.assertEqual(parse_local_command("在服务器上找一下 PP1234"), expected)
 
+    # 验证口述的中英文混合数字先标准化再识别订单指令。
+    # self：当前测试用例或测试替身实例。
     def test_spoken_mixed_digits_are_normalized_before_routing(self):
         expected = LocalCommand("preview_order", {"order_id": "PP0068"})
         self.assertEqual(parse_local_command("查找 PP 0零6八"), expected)
         self.assertEqual(parse_local_command("查找 P P 零 零 六 八"), expected)
         self.assertEqual(normalize_command_text("查找 PP 0零35杠二"), "查找pp0035-2")
 
+    # 验证同一语句中的库存比较优先于普通订单预览。
+    # self：当前测试用例或测试替身实例。
     def test_stock_comparison_has_priority_over_order_preview(self):
         expected = LocalCommand("check_inventory_stock", {"order_id": "CS004"})
         self.assertEqual(parse_local_command("比对CS004的库存"), expected)
         self.assertEqual(parse_local_command("查询 CS004 库存"), expected)
         self.assertEqual(parse_local_command("Check inventory for CS004"), expected)
 
+    # 验证涉及写入的命令必须经过确认。
+    # self：当前测试用例或测试替身实例。
     def test_write_commands_require_approval(self):
         self.assertEqual(
             parse_local_command("生成 PP1234 的 Traveler"),
@@ -53,6 +61,8 @@ class LocalCommandRouterTests(unittest.TestCase):
             ),
         )
 
+    # 验证未确认时人工五金网关仅生成预览，不执行写入。
+    # self：当前测试用例或测试替身实例。
     def test_manual_hardware_gateway_stops_at_preview_without_approval(self):
         command = LocalCommand(
             "add_manual_hardware",
@@ -72,6 +82,8 @@ class LocalCommandRouterTests(unittest.TestCase):
         self.assertEqual(result["status"], "approval_required")
         write.assert_not_called()
 
+    # 验证库存比较使用数据库中的订单事实。
+    # self：当前测试用例或测试替身实例。
     def test_stock_comparison_uses_database_order_facts(self):
         with patch(
             "traveler_assistant.inventory.check_database_stock",
@@ -85,6 +97,8 @@ class LocalCommandRouterTests(unittest.TestCase):
         self.assertEqual(result["result_type"], "stock_comparison")
         self.assertEqual(result["order_id"], "CS004")
 
+    # 验证代切订单指令采用代切数据源。
+    # self：当前测试用例或测试替身实例。
     def test_cut_to_size_commands_use_the_cut_to_size_source(self):
         with tempfile.TemporaryDirectory() as temp:
             server = Path(temp)
@@ -98,6 +112,8 @@ class LocalCommandRouterTests(unittest.TestCase):
             self.assertEqual(_order_folder(config, "PP0068"), pp_folder)
             self.assertEqual(_order_folder(config, "CS004"), cs_folder)
 
+    # 验证找不到订单时报告实际搜索的目录。
+    # self：当前测试用例或测试替身实例。
     def test_missing_order_reports_the_directory_actually_searched(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "Optimized Orders"
@@ -108,9 +124,13 @@ class LocalCommandRouterTests(unittest.TestCase):
             self.assertEqual(raised.exception.context["match_count"], 0)
             self.assertIn(str(root), str(raised.exception))
 
+    # 验证无法识别的文本交由 Agent 处理。
+    # self：当前测试用例或测试替身实例。
     def test_unrecognized_text_requests_agent(self):
         self.assertIsNone(parse_local_command("帮我看看今天应该先处理什么"))
 
+    # 验证仅用户文本明确包含工厂单后缀时才重建该后缀。
+    # self：当前测试用例或测试替身实例。
     def test_agent_factory_suffix_is_rebuilt_only_when_present_in_user_text(self):
         route = AgentRouteResult(
             AgentDecision(
@@ -137,12 +157,16 @@ class LocalCommandRouterTests(unittest.TestCase):
                 rejected, _ = _agent_command(store, "给 PP9999 添加两件 M2000")
             self.assertIsNone(rejected)
 
+    # 验证拆分订单的工厂单名称不会混入主订单。
+    # self：当前测试用例或测试替身实例。
     def test_split_order_factory_name_is_not_mixed_into_base_order(self):
         self.assertTrue(_factory_name_belongs_to_order("PP0035", "PP0035-OFFICE"))
         self.assertTrue(_factory_name_belongs_to_order("PP0035-2", "PP0035-2-MASTER"))
         self.assertTrue(_factory_name_belongs_to_order("PP0035-2", "PP0035-2 OPENSHELF"))
         self.assertFalse(_factory_name_belongs_to_order("PP0035", "PP0035-2-MASTER"))
 
+    # 验证网关拒绝未知工具名称。
+    # self：当前测试用例或测试替身实例。
     def test_gateway_rejects_unknown_tools(self):
         with tempfile.TemporaryDirectory() as temp:
             with self.assertRaises(RuleError) as raised:

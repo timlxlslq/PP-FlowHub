@@ -1,9 +1,7 @@
-"""Shared Fittingslist selection rules.
+"""共享的五金报表来源选择规则。
 
-Fittingslist files can be copied into several room folders while retaining the
-same factory-order blocks.  This module is deliberately independent of
-Traveler generation so database synchronization and on-demand Traveler
-rendering use the same source-selection contract.
+同一工厂单的五金报表可能被复制到多个房间目录。本模块独立于 Traveler
+生成流程，使数据库同步和按需生成 Traveler 使用相同的来源选择规则。
 """
 
 from __future__ import annotations
@@ -22,7 +20,7 @@ EPSILON = 1e-9
 
 
 def is_fittings_report(path: Path) -> bool:
-    """Recognize current English and legacy Chinese AICNC report filenames."""
+    """判断 path 是否为五金报表，兼容新英文及旧中文文件名，并排除临时文件。"""
     return (
         path.suffix.casefold() == ".xlsx"
         and not path.name.startswith("~$")
@@ -31,6 +29,7 @@ def is_fittings_report(path: Path) -> bool:
 
 
 def fitting_signature(items: Iterable[FittingItem]) -> tuple:
+    """标准化并排序五金记录以比较内容；items 为记录集合，数量保留六位小数。"""
     return tuple(sorted(
         (
             str(item.name or "").strip(),
@@ -58,11 +57,12 @@ def select_latest_fittings(
     fallback_factory: str = "",
     is_empty_report: Callable[[Path], bool] | None = None,
 ) -> tuple[dict[str, SelectedFittings], list[str], bool, list[Path]]:
-    """Select one complete report block per factory, requiring a choice on conflicts.
+    """为每个工厂单选取完整五金记录，内容冲突时要求明确选择。
 
-    Returns ``(selected, warnings, found_files, skipped_empty_files)``.  A
-    differing report always requires an explicit content-bound choice; neither
-    folder names nor modification times determine the selected source.
+    参数：paths 为候选报表路径；allow_missing_factory 决定是否允许缺少工厂单号；
+    fallback_factory 为缺号时的替代单号；is_empty_report 为可选空报表判断函数。
+    返回所选记录、警告、是否找到文件及跳过的空报表。来源选择绑定内容，
+    不能仅凭目录名称或修改时间决定采用哪份报表。
     """
     occurrences: dict[str, list[SelectedFittings]] = {}
     found_files = False
@@ -108,8 +108,7 @@ def select_latest_fittings(
                 source = matches[0]
                 selected[factory] = SelectedFittings(source.path, source.modified_at, (), ())
                 continue
-            # A changed report requires an explicit new decision, including a
-            # byte-only revision. Never carry the manual exemption forward.
+            # 报表变化后必须重新明确选择，包括仅字节变化；不能沿用人工处理豁免。
             if not requested:
                 conflicts.append({'factory_order': factory, 'mode': 'update',
                                   'candidates': [dict(c, label='重新核对并采用此报表') for c in candidates]})
@@ -137,14 +136,22 @@ def select_latest_fittings(
                     continue
                 context.decision_proposals[factory] = {'selected': chosen_data, 'observed_contents': observed}
             else:
-                # A stable set of report contents never reopens source selection.
+                # 报表内容集合未变时，不重新要求选择来源。
                 context.keep_factories.add(factory)
                 context.decision_proposals[factory] = locked
-            selected[factory] = selected_from_candidate(chosen_data)
+            selected_source = next(
+                (
+                    source
+                    for source in matches
+                    if fittings_candidate(source)["content_fingerprint"]
+                    == chosen_data.get("content_fingerprint", "")
+                ),
+                None,
+            )
+            selected[factory] = selected_source or selected_from_candidate(chosen_data)
             continue
         resolved = context.resolved_sources.get(factory) if context else None
-        # A folder-local pass cannot replace the choice resolved from the full
-        # request's candidate set with another report for the same factory.
+        # 单个目录内的读取不能用另一份报表替换完整请求已经确定的工厂单来源。
         chosen = next((source for source, candidate in zip(matches, candidates)
                        if candidate["id"] == (requested or resolved)), None)
         if resolved and chosen is None and context.resolved_paths.get(factory) not in {c["path"] for c in candidates}:
@@ -177,7 +184,7 @@ def select_latest_fittings(
 
 
 def fittings_candidate(source: SelectedFittings) -> dict:
-    """Bind a choice to the full report path and parsed content, not its time."""
+    """把来源绑定到完整路径及解析内容；source 为所选五金报表，修改时间不参与标识计算。"""
     identity = json.dumps([str(source.path.resolve()), source.signature], ensure_ascii=False)
     return {
         "id": hashlib.sha256(identity.encode()).hexdigest(),
@@ -189,7 +196,22 @@ def fittings_candidate(source: SelectedFittings) -> dict:
     }
 
 
+def same_selected_fittings_source(source: SelectedFittings, path: Path, items: Iterable[FittingItem] | None = None) -> bool:
+    """检查报表是否仍对应已确认来源；source 为已选来源，path 为当前路径，items 为可选的当前解析条目。路径大小写变化不会视为来源变化。"""
+    selected = Path(source.path)
+    current = Path(path)
+    try:
+        if selected.samefile(current):
+            return True
+    except OSError:
+        pass
+    if selected.resolve() == current.resolve():
+        return True
+    return items is not None and fitting_signature(items) == source.signature
+
+
 def selected_from_candidate(candidate):
+    """从候选字典 candidate 还原所选五金报表及内容签名，缺省修改时间记为零。"""
     items = tuple(FittingItem(name=row['name'], code=row.get('code', ''), size=row.get('spec', ''),
                               unit=row.get('unit', ''), quantity=float(row['quantity']))
                   for row in candidate['items'])

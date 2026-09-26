@@ -12,6 +12,7 @@ from .core import progress
 
 
 def _atomic_save(workbook: Workbook, destination: Path) -> None:
+    """先写临时文件再替换目标；workbook 为待保存工作簿，destination 为输出路径。"""
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         prefix=f".{destination.stem}-", suffix=".xlsx", dir=destination.parent, delete=False
@@ -25,6 +26,10 @@ def _atomic_save(workbook: Workbook, destination: Path) -> None:
 
 
 def _materials(path: Path, order_id: str, color: str, panel_qty: int, edge_qty: float) -> None:
+    """创建固定布局的材料测试工作簿。
+
+    参数：path 为输出路径；order_id 为订单号；color 为颜色；panel_qty 为饰面板数量；edge_qty 为封边米数。
+    """
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Sheet1"
@@ -52,6 +57,7 @@ def _materials(path: Path, order_id: str, color: str, panel_qty: int, edge_qty: 
 
 
 def _board(path: Path, factory: str, name: str) -> None:
+    """创建板材报表测试文件；path 为输出路径，factory 为工厂单号，name 为订单名称。"""
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Page1"
@@ -61,6 +67,7 @@ def _board(path: Path, factory: str, name: str) -> None:
 
 
 def _fittings(path: Path, groups: list[tuple[str, int]]) -> None:
+    """创建五金报表测试文件；path 为输出路径，groups 为工厂单号与测试铰链数量的列表。"""
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Page1"
@@ -82,7 +89,7 @@ def _fittings(path: Path, groups: list[tuple[str, int]]) -> None:
 
 
 def create_local_test_source(target_root: Path) -> dict:
-    """Create deterministic, non-production order inputs without deleting other files."""
+    """在 target_root 生成固定的非生产订单输入及清单，不删除其他文件。"""
     target_root = target_root.expanduser().resolve()
     owned = target_root / "Optimized Orders" / "PP9001"
     cut_to_size = target_root / "CUT TO SIZE" / "CS900"

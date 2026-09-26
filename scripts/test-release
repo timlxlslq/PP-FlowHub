@@ -1,4 +1,5 @@
 #!/bin/bash
+# 串行执行完整发布回归及差异空白检查；无参数，任何子门禁失败即停止。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

@@ -1,8 +1,7 @@
-"""Central workflow database and safe migration helpers.
+"""中央工作流数据库及安全迁移辅助能力。
 
-The application owns one local SQLite file for business data.  Source files
-from AIHouse/AIMES/AICNC/Kingdee remain external; this module stores the
-normalized facts, provenance and user corrections needed by the dashboard.
+应用用一个本地 SQLite 文件保存业务事实；AIHouse、AIMES、AICNC 和金蝶来源仍在外部。
+本模块保存看板所需的标准化事实、来源证据及用户修正。
 """
 
 from __future__ import annotations
@@ -18,12 +17,9 @@ from typing import Any
 
 
 def enable_foreign_keys(connection: sqlite3.Connection) -> sqlite3.Connection:
-    """Enable SQLite foreign-key enforcement before the first transaction.
+    """在事务开始前启用连接 connection 的外键约束并返回该连接。
 
-    SQLite silently ignores ``pragma foreign_keys=on`` inside a transaction.
-    Failing loudly here prevents a borrowed/shared connection from appearing
-    protected when its caller opened a transaction too early.
-    """
+    SQLite 会忽略事务内启用外键的请求；若调用方过早开启事务则报错，避免共享连接看似受保护。"""
     enabled = int(connection.execute("pragma foreign_keys").fetchone()[0])
     if enabled:
         return connection
@@ -35,17 +31,34 @@ def enable_foreign_keys(connection: sqlite3.Connection) -> sqlite3.Connection:
     return connection
 
 
+def prepare_pending_session(connection: sqlite3.Connection) -> None:
+    """创建仅属于连接的检查结果表；不迁移、读取或清理磁盘上的历史问题。"""
+    connection.execute("""create temp table if not exists pending_issues(
+        issue_key text primary key, kind text not null, order_id text not null default '',
+        factory_order text not null default '', path text not null default '', message text not null,
+        status text not null default 'open', first_seen text not null, last_seen text not null,
+        resolved_at text not null default '')""")
+    connection.execute("""create temp table if not exists pending_aimes_reviews(
+        ignore_key text primary key, factory_order text not null, factory_name text not null default '',
+        sales_order_name text not null default '', reason text not null default '',
+        suggested_order_id text not null default '', split_time text not null default '',
+        last_seen text not null)""")
+
+
 def connect_database(path: Path, **kwargs: Any) -> sqlite3.Connection:
-    """Open an application SQLite connection with foreign keys enforced."""
-    return enable_foreign_keys(sqlite3.connect(path, **kwargs))
+    """打开启用外键的 SQLite 连接；path 为数据库路径，kwargs 透传给 sqlite3.connect。"""
+    connection = enable_foreign_keys(sqlite3.connect(path, **kwargs))
+    prepare_pending_session(connection)
+    return connection
 
 
 def database_path(state_dir: Path) -> Path:
-    """Return the single central SQLite path for an application state dir."""
+    """返回状态目录 state_dir 中唯一的中央业务数据库路径。"""
     return state_dir / "workflow.sqlite3"
 
 
 def _now() -> str:
+    """返回带本地时区、精确到秒的当前时间字符串；无参数。"""
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
@@ -61,17 +74,17 @@ _SCHEMA_READY_MARKER = "ensure_schema_production_simplification_v1"
 
 
 def _product_key(value: object) -> str:
+    """移除 value 中的空白、下划线及连字符并转为大写，生成商品比较键。"""
     return _PRODUCT_KEY_RE.sub("", str(value or "")).upper()
 
 
 def catalog_material_attributes(
     category: object, name: object, spec: object, code: object = "",
 ) -> tuple[str, str, str]:
-    """Derive catalog-owned workflow attributes without changing raw fields.
+    """从商品目录推导材料类型、颜色和厚度，不改动原始字段。
 
-    The plywood aliases are explicit workflow nominal sizes.  They deliberately
-    remain separate from a supplier specification such as 5.2 or 15 mm.
-    """
+    参数：category 为类别；name 为名称；spec 为规格；code 为可选 SKU。
+    夹板的业务标称厚度与供应商规格中的实际厚度分别保留。"""
     category_text = str(category or "").strip()
     name_text = str(name or "").strip()
     spec_text = str(spec or "").strip()
@@ -95,8 +108,7 @@ def catalog_material_attributes(
     if kind == "panel":
         fractions = re.findall(r"(?<!\d)(\d+)\s*/\s*(\d+)(?!\d)", spec_text)
         if fractions:
-            # Product specs write thickness first (for example ``3/4 Board``)
-            # and may contain later width/length fractions such as 110-1/4.
+            # 商品规格先写厚度（如 3/4 Board），后面还可能出现宽长分数（如 110-1/4）。
             numerator, denominator = fractions[0]
             thickness = f"{round(float(numerator) / float(denominator) * 25.4, 1):g}"
         else:
@@ -114,6 +126,7 @@ def catalog_material_attributes(
 
 
 def _legacy_material_name(material_type: object, color: object, thickness: object) -> str:
+    """重建旧材料的匹配名称；material_type 为材料类型，color 为颜色，thickness 为厚度。"""
     kind = str(material_type or "").strip().casefold()
     color_text = str(color or "").strip()
     thickness_text = str(thickness or "").strip()
@@ -125,7 +138,7 @@ def _legacy_material_name(material_type: object, color: object, thickness: objec
 
 
 def server_material_identity_key(source_path: object, product_code: object) -> str:
-    """Return the stable v3 identity for one source material SKU."""
+    """生成来源材料的稳定 v3 标识；source_path 为来源路径，product_code 为已确认 SKU。"""
     payload = "\x1f".join((
         str(source_path or "").strip().casefold(),
         str(product_code or "").strip().upper(),
@@ -134,6 +147,7 @@ def server_material_identity_key(source_path: object, product_code: object) -> s
 
 
 def _has_product_foreign_key(connection: sqlite3.Connection, table: str) -> bool:
+    """检查 table 的 product_code 是否关联 products.code 且限制删除；connection 为数据库连接。"""
     return any(
         str(row[2]) == "products" and str(row[3]) == "product_code"
         and str(row[4]) == "code" and str(row[6]).upper() == "RESTRICT"
@@ -147,22 +161,23 @@ def _resolve_legacy_material_code(
     color: object,
     thickness: object,
 ) -> tuple[str, list[str]]:
-    """Resolve one legacy material identity, returning candidates for diagnostics."""
+    """复用现行匹配规则解析旧材料 SKU，并返回诊断候选列表。
+
+    参数：connection 为迁移事务连接；material_type、color、thickness 为旧材料类型、颜色和厚度。"""
     try:
         display_name = _legacy_material_name(material_type, color, thickness)
     except (TypeError, ValueError):
         return "", []
 
-    # Reuse the runtime's authoritative material matcher.  The small adapter
-    # keeps it on this migration transaction instead of opening a second,
-    # potentially locked connection or maintaining a subtly different set of
-    # plywood/panel/edge aliases here.
+    # 复用运行时的权威材料匹配器；适配器使用当前迁移事务，避免另开连接被锁，
+    # 也避免在迁移中维护另一套夹板、饰面板及封边别名。
     from .core import RuleError
     from .inventory import InventoryMappings, Product, TravelerItem, match_item
 
     class _MigrationCatalog:
         @staticmethod
         def _product(row: tuple) -> Product:
+            """将数据库查询行 row 转为商品对象，保留缺失价格为 None。"""
             return Product(
                 category=str(row[0] or ""), code=str(row[1] or ""),
                 name=str(row[2] or ""), spec=str(row[3] or ""),
@@ -172,6 +187,7 @@ def _resolve_legacy_material_code(
             )
 
         def require_code(self, code: str) -> Product:
+            """在当前迁移事务中按 code 查询唯一可用商品；未匹配、多匹配或停用时抛出业务错误。"""
             rows = connection.execute(
                 """select category,code,name,spec,status,brand,remark,unit,cost_price
                    from products where normalized_code=?""",
@@ -185,6 +201,9 @@ def _resolve_legacy_material_code(
             return product
 
         def find(self, *, category=None, name=None, contains=None, spec_thickness=None):
+            """在当前迁移事务中筛选商品。
+
+            参数：category 为类别；name 为完整名称；contains 为名称或备注包含词；spec_thickness 为厚度条件。"""
             products = [
                 self._product(row) for row in connection.execute(
                     """select category,code,name,spec,status,brand,remark,unit,cost_price
@@ -223,6 +242,7 @@ def _resolve_legacy_material_code(
 
 
 def _outbound_factory_tokens(value: object) -> list[str]:
+    """按常见中英文分隔符拆分工厂单字段 value，忽略空项。"""
     return [
         token.strip()
         for token in _OUTBOUND_FACTORY_SPLIT_RE.split(str(value or ""))
@@ -236,12 +256,14 @@ def _outbound_document_factory_candidates(
     order_id: str,
     factory_value: str,
 ) -> set[str]:
+    """依据出库单和本地归属解析明确的工厂单候选，不用生产消耗推断出货。
+
+    参数：connection 为连接；document_number 为单据号；order_id 为订单号；factory_value 为原工厂单字段。"""
     document_number = str(document_number or "").strip()
     order_id = str(order_id or "").strip().upper()
     if not document_number or not order_id:
         return set()
-    # Production consumption never proves that a factory order was shipped,
-    # including when startup backfills legacy document relationships.
+    # 生产消耗不能证明工厂单已出货，启动时补齐旧单据关联也遵守此规则。
     document = connection.execute(
         "select document_type from outbound_documents where document_number=?",
         (document_number,),
@@ -252,10 +274,7 @@ def _outbound_document_factory_candidates(
         "select 1 from sqlite_master where type='table' and name='outbound_document_factories'"
     ).fetchone() is None:
         return set()
-    # InventorySyncStore can also be exercised against the standalone
-    # outbound ledger schema, where the order-index tables do not exist.  In
-    # that case there is no factory identity to resolve; the header row is
-    # still a valid durable outbound fact.
+    # 独立出库台账可能没有订单索引表，无法解析工厂单身份；此时单据主行仍是有效的持久出库事实。
     if connection.execute(
         "select 1 from sqlite_master where type='table' and name='factory_orders'"
     ).fetchone() is None:
@@ -307,14 +326,11 @@ def ensure_outbound_document_factory_links(
     *,
     updated_at: str | None = None,
 ) -> int:
-    """Link one outbound document to its exact factory-order identities.
+    """为出库单补充精确工厂单关联，返回新增关联数。
 
-    The header table keeps one row per inventory document.  This relation
-    table allows one document to cover multiple factory orders without
-    encoding a list into the single-valued legacy ``factory_order`` column.
-    An order-only value is linked only when the order has exactly one active
-    factory order; split orders must provide exact factory identities.
-    """
+    参数：connection 为连接；document_number 为单据号；order_id 为订单号；factory_value 为原关联字段；
+    updated_at 为可选记录时间。单据表保留一单一行，关联表表达多工厂单；仅有订单号时，
+    只有唯一有效工厂单才能推导关联，分单场景必须提供明确身份。"""
     document_number = str(document_number or "").strip()
     order_id = str(order_id or "").strip().upper()
     candidates = _outbound_document_factory_candidates(
@@ -346,13 +362,10 @@ def ensure_outbound_document_factory_links(
 def _execute_schema_statements(
     connection: sqlite3.Connection, script: str,
 ) -> None:
-    """Execute a schema script without ``executescript``'s implicit commit.
+    """逐条执行结构脚本，保留调用方的事务边界。
 
-    Python's ``sqlite3.Connection.executescript`` commits an already-open
-    transaction before running the script.  Schema upgrades need their table
-    creation, column additions, data copy, and cleanup to roll back together,
-    so execute each complete statement inside the caller's transaction.
-    """
+    参数：connection 为事务连接；script 为 SQL 脚本。避免 executescript 隐式提交已有事务，
+    使建表、加列、复制数据和清理可以一起回滚；不完整语句会报错。"""
     pending: list[str] = []
     for line in script.splitlines():
         pending.append(line)
@@ -367,7 +380,7 @@ def _execute_schema_statements(
 
 
 def _simplify_production_schema(connection: sqlite3.Connection) -> None:
-    """Upgrade confirmed production facts atomically; never infer new quantities."""
+    """通过事务连接 connection 迁移已确认生产记录、材料及工厂单关联，不推断新增数量。"""
     connection.execute('''create table if not exists production_records(
         batch_id integer primary key,
         production_time text not null default '',
@@ -436,6 +449,7 @@ def _simplify_production_schema(connection: sqlite3.Connection) -> None:
 
 
 def ensure_schema(path: Path) -> None:
+    """检查或升级 path 指向的中央数据库结构；升级前保留备份，当前结构只补必要的缺失关联。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = connect_database(path)
     try:
@@ -446,10 +460,8 @@ def ensure_schema(path: Path) -> None:
             "select 1 from workflow_metadata where key=? and value='ready'",
             (_SCHEMA_READY_MARKER,),
         ).fetchone():
-            # Normal reads must not take a write lock merely to re-check an
-            # already-current schema.  A legacy/grouped outbound document can
-            # still be inserted after initialization, however, so repair only
-            # documents that demonstrably lack their normalized factory links.
+            # 当前结构的普通读取不应仅为重复检查就取得写锁；初始化后仍可能插入旧格式合并单据，
+            # 因此只修补确实缺少标准化工厂单关联的单据。
             required_tables = {
                 str(row[0]) for row in connection.execute(
                     """select name from sqlite_master
@@ -490,8 +502,7 @@ def ensure_schema(path: Path) -> None:
                 )
             connection.commit()
             return
-        # Keep a recoverable pre-upgrade snapshot outside the rolling daily
-        # backup policy.  No business rows are changed before this succeeds.
+        # 升级前保存独立于每日轮转策略的可恢复快照；成功前不修改业务行。
         if connection.execute("select 1 from sqlite_master where type='table' and name='manual_production_batches'").fetchone():
             backup_directory = path.parent / "schema-migration-backups"
             backup_directory.mkdir(parents=True, exist_ok=True)
@@ -785,8 +796,7 @@ def ensure_schema(path: Path) -> None:
             row[1] for row in connection.execute("pragma table_info(hardware_items)").fetchall()
         }
         if "active" in hardware_columns:
-            # One transaction with the schema migration: a failed DROP must
-            # restore the deleted rows too. Only manual tombstones are known.
+            # 与结构迁移共用事务，删表失败时也恢复已删除行；这里只识别人工删除标记。
             unexpected = connection.execute(
                 "select count(*) from hardware_items where active<>1 and source_type<>'manual'"
             ).fetchone()[0]
@@ -800,8 +810,7 @@ def ensure_schema(path: Path) -> None:
             )
         retired_hardware_columns = {"source_code", "name", "spec", "unit"} & hardware_columns
         if retired_hardware_columns:
-            # Quantities in persisted facts are already canonical. Never run
-            # report rail folding or piece-to-pair conversion during migration.
+            # 持久事实中的数量已标准化；迁移时不可再次合并导轨或执行支数转对数。
             for column in sorted(retired_hardware_columns):
                 connection.execute(f"alter table hardware_items drop column {column}")
             from .hardware_facts import hardware_fingerprint
@@ -1046,9 +1055,7 @@ def ensure_schema(path: Path) -> None:
             production_material_columns != {"batch_id", "order_id", "product_code", "quantity"}
             or not _has_product_foreign_key(connection, "manual_production_batch_materials")
         ):
-            # A partial development database may already carry product_code
-            # together with the legacy descriptive columns.  Collapse it to
-            # the final SKU-only shape without changing batch quantities.
+            # 部分开发库可能同时保留 product_code 和旧描述列；收敛为仅以 SKU 标识的结构，不改批次数量。
             if "product_code" in production_material_columns:
                 rows = connection.execute(
                     "select batch_id,order_id,product_code,quantity from manual_production_batch_materials"
@@ -1353,11 +1360,8 @@ def ensure_schema(path: Path) -> None:
                             f"alter table factory_orders add column {column} {definition}"
                         )
                     except sqlite3.OperationalError as exc:
-                        # Two independent one-shot commands can prepare the
-                        # same fresh state directory concurrently.  The first
-                        # transaction may add the column after this caller's
-                        # pragma snapshot; that is a successful race, not a
-                        # schema failure.
+                        # 两个独立命令可能同时初始化新目录；另一个事务可能在读取结构后先添加该列，
+                        # 这是并发初始化已成功，不是结构失败。
                         if "duplicate column name" not in str(exc).lower():
                             raise
             for document_number, order_id, factory_value, updated_at in connection.execute(
@@ -1399,13 +1403,9 @@ def ensure_schema(path: Path) -> None:
 
 
 def collapse_actual_installation_days(connection: sqlite3.Connection) -> int:
-    """Keep only the earliest actual installation date for each order.
+    """每单只保留最早实际安装日期及该行安装人员，并建立唯一约束。
 
-    The table remains date-type based for compatibility with existing
-    databases and the planned start-date row.  Actual installation is now an
-    order-level start date, so older rows after the earliest date are removed
-    while the installer attached to the earliest row is preserved.
-    """
+    参数：connection 为数据库连接。保留原日期类型表结构以兼容计划日期，返回删除行数。"""
     table = connection.execute(
         "select 1 from sqlite_master where type='table' and name='order_installation_days'"
     ).fetchone()
@@ -1441,6 +1441,7 @@ def collapse_actual_installation_days(connection: sqlite3.Connection) -> int:
 
 
 def _normalize_inventory_rule_name(value: str) -> str:
+    """标准化库存规则名称 value，去除空白、下划线及连字符并转大写。"""
     return re.sub(r"[\s_-]+", "", str(value)).upper()
 
 
@@ -1457,20 +1458,15 @@ _LEGACY_MAPPING_DISPLAY_NAMES = {
 
 
 def migrate_inventory_mapping_file(state_dir: Path) -> dict[str, Any]:
-    """Move the legacy mapping JSON into the central database once.
+    """将 state_dir 中的旧映射 JSON 一次性迁入中央库，事务提交后才归档原文件。
 
-    The JSON is archived only after the transaction commits.  Runtime code
-    does not use the archived file; it exists solely as a recoverable record
-    of the pre-database configuration.
-    """
+    归档只用于恢复切换前配置，运行时不再使用归档文件。"""
     central = database_path(state_dir)
     ensure_schema(central)
     source = state_dir / "inventory" / "mappings.json"
     connection = connect_database(central)
     try:
-        # App startup can prepare storage from more than one background task.
-        # Serialize this one-time migration so two callers cannot both observe
-        # a missing marker and then race on workflow_metadata's primary key.
+        # App 多个后台任务可能同时准备存储；串行执行一次性迁移，避免都读到缺失标记后争用元数据主键。
         connection.execute("begin immediate")
         marker = connection.execute(
             "select value from workflow_metadata where key='inventory_mapping_migration_v1'"
@@ -1554,9 +1550,8 @@ def migrate_inventory_mapping_file(state_dir: Path) -> dict[str, Any]:
     finally:
         connection.close()
 
-    # The legacy merge can create a central factory_orders table from an old
-    # schema after the first ensure_schema call. Run the lightweight migration
-    # once more so direct detail reads are safe before OrderIndexStore opens.
+    # 旧库合并可能在首次结构检查后创建旧版工厂单表；再执行一次轻量迁移，
+    # 使 OrderIndexStore 打开前的直接详情读取也能使用当前结构。
     ensure_schema(central)
 
     archive = state_dir / "migration-archives" / datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1575,6 +1570,9 @@ def migrate_inventory_mapping_file(state_dir: Path) -> dict[str, Any]:
 
 
 def _copy_table(source: sqlite3.Connection, target: sqlite3.Connection, table: str) -> bool:
+    """复制来源表结构及全部数据，会重建目标同名表。
+
+    参数：source 为来源连接；target 为目标连接；table 为表名。来源表不存在时返回 False。"""
     exists = source.execute(
         "select sql from sqlite_master where type='table' and name=?", (table,)
     ).fetchone()
@@ -1593,12 +1591,7 @@ def _copy_table(source: sqlite3.Connection, target: sqlite3.Connection, table: s
 
 
 def migrate_legacy_databases(state_dir: Path) -> dict[str, Any]:
-    """Merge old local facts into the central DB and archive source files.
-
-    The operation is idempotent. Legacy files are moved to a timestamped
-    archive only after their data has been committed to the central database;
-    runtime code therefore has one canonical storage path after cutover.
-    """
+    """将 state_dir 中的旧本地事实幂等合并到中央库，提交后才把原文件移入带时间戳的归档。"""
     central = database_path(state_dir)
     ensure_schema(central)
     legacy_paths = [state_dir / "order-index.sqlite3"]
@@ -1623,8 +1616,7 @@ def migrate_legacy_databases(state_dir: Path) -> dict[str, Any]:
                     "active_issues", "temporary_orders",
                 ]
                 for table in tables:
-                    # Existing central tables are preserved; row-level merge is
-                    # handled by INSERT OR IGNORE for stable primary keys.
+                    # 保留已有中央表；依据稳定主键使用 INSERT OR IGNORE 合并记录。
                     sql = source.execute(
                         "select sql from sqlite_master where type='table' and name=?", (table,)
                     ).fetchone()
@@ -1647,8 +1639,7 @@ def migrate_legacy_databases(state_dir: Path) -> dict[str, Any]:
                                 f"insert or ignore into {table}({names}) values({placeholders})", row
                             )
                         except sqlite3.Error:
-                            # A newer central schema may intentionally omit a
-                            # historical column. The source remains archived.
+                            # 新中央结构可能已移除历史列；原始来源仍保留在归档中。
                             continue
                 migrated.append(str(legacy))
             finally:
@@ -1737,6 +1728,7 @@ def migrate_legacy_databases(state_dir: Path) -> dict[str, Any]:
 
 
 def _cache_rows(path: Path, cache_name: str) -> dict[str, Any]:
+    """读取指定缓存的全部键值并解码 JSON；path 为数据库路径，cache_name 为缓存名称。"""
     ensure_schema(path)
     connection = connect_database(path)
     try:
@@ -1751,6 +1743,9 @@ def _cache_rows(path: Path, cache_name: str) -> dict[str, Any]:
 
 
 def read_cache(path: Path, cache_name: str, legacy: Path | None = None, default: Any = None) -> Any:
+    """读取已有业务缓存，必要时导入旧 JSON。
+
+    参数：path 为数据库路径；cache_name 为缓存名称；legacy 为可选旧文件；default 为缺失或读取失败的默认值。"""
     values = _cache_rows(path, cache_name)
     if values:
         return values.get("value", default)
@@ -1765,6 +1760,7 @@ def read_cache(path: Path, cache_name: str, legacy: Path | None = None, default:
 
 
 def write_cache(path: Path, cache_name: str, value: Any) -> None:
+    """保存已有业务缓存并提交；path 为数据库路径，cache_name 为缓存名称，value 为可序列化的值。"""
     ensure_schema(path)
     connection = connect_database(path)
     try:

@@ -1,4 +1,4 @@
-"""Database-backed order cost calculation and workbook export."""
+"""基于数据库事实计算订单成本并导出工作簿。"""
 
 from __future__ import annotations
 
@@ -25,10 +25,12 @@ from .inventory import (
 
 
 def _now() -> str:
+    """返回带本地时区、精确到秒的当前时间字符串；无参数。"""
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 def _number(value) -> float:
+    """把 value 转为浮点数；空值或无法转换的值按零处理。"""
     try:
         return float(value or 0)
     except (TypeError, ValueError):
@@ -36,6 +38,7 @@ def _number(value) -> float:
 
 
 def _material_name(kind: str, thickness: str, color: str) -> str:
+    """拼接材料显示名称；kind 为类型，thickness 为厚度，color 为颜色。"""
     if kind == "edge":
         return f"Edge banding--{color}"
     if kind == "plywood":
@@ -44,7 +47,10 @@ def _material_name(kind: str, thickness: str, color: str) -> str:
 
 
 def _resolve_product(catalog, mappings, *, name: str, section: str, code: str = ""):
-    """Resolve a cost product without rounding the source quantity."""
+    """优先按编码查成本商品，否则按名称和映射匹配唯一商品，不对来源数量取整。
+
+    参数：catalog 为商品目录；mappings 为匹配规则；name 为名称；section 为类别；code 为可选编码。
+    """
     if code.strip():
         try:
             return catalog.require_code(code.strip().upper()), "商品编号"
@@ -80,6 +86,12 @@ def _line(
     source: str,
     missing: str = "",
 ) -> dict:
+    """组装成本明细，缺价格或有缺失说明时不计算金额。
+
+    参数：category 为类别；factory_order 为工厂单或汇总标签；room_name 为房间名；
+    name、spec 为商品名称和规格；quantity、unit 为数量和单位；product_code 为 SKU；
+    cost_price 为可选单价；source 为匹配来源；missing 为缺失说明。
+    """
     amount = None if cost_price is None or missing else quantity * cost_price
     return {
         "category": category,
@@ -98,7 +110,7 @@ def _line(
 
 
 def _aggregate_material_rows(rows: list[sqlite3.Row]) -> list[dict]:
-    """Aggregate material and edge-banding facts at order scope only."""
+    """在订单范围内按 SKU 及材料属性汇总 rows 中的板材、封边数量并排序。"""
     grouped: dict[tuple[str, str, str, str, str], dict] = {}
     for row in rows:
         key = (
@@ -132,11 +144,9 @@ def _aggregate_material_rows(rows: list[sqlite3.Row]) -> list[dict]:
 
 
 def _display_cost_lines(lines: list[dict]) -> list[dict]:
-    """Build the compact, business-ordered projection used by the App.
+    """从原始明细 lines 生成按业务顺序排列的 App 成本列表。
 
-    Raw lines retain their factory-order provenance for the Excel report.  The
-    App does not display factory order, so identical hardware rows are combined
-    there to avoid showing the same SKU more than once.
+    原明细保留工厂单来源供 Excel 使用；App 不展示工厂单，因此合并相同五金行，避免重复显示。
     """
     display_lines: list[dict] = []
     grouped_hardware: dict[tuple, dict] = {}
@@ -168,6 +178,7 @@ def _display_cost_lines(lines: list[dict]) -> list[dict]:
     material_sku_order = {"M0004": 0, "M0003": 1, "M0002": 2}
 
     def sort_key(line: dict) -> tuple:
+        """生成明细 line 的展示排序键，优先固定板材 SKU，再按类别、编码及名称排序。"""
         category = str(line["category"] or "")
         product_code = str(line["product_code"] or "").upper()
         if product_code in material_sku_order:
@@ -192,6 +203,10 @@ def _display_cost_lines(lines: list[dict]) -> list[dict]:
 
 
 def calculate_order_cost(config: Config, order_id: str) -> dict:
+    """读取订单材料和有效工厂单五金，计算成本明细并单列缺价项。
+
+    参数：config 为业务配置；order_id 为订单号。缺价时总成本返回 None，不将缺价视为零元。
+    """
     normalized = order_id.strip().upper()
     if not normalized:
         raise RuleError("cost_order_missing", "计算成本需要订单号")
@@ -341,6 +356,7 @@ EXCEL_HEADERS = [
 
 
 def _excel_row(row: dict) -> list:
+    """将成本明细 row 转成导出表格的一行，金额列留待工作表公式计算。"""
     return [
         row["factory_order"] or "材料汇总",
         row["category"],
@@ -358,6 +374,10 @@ def _excel_row(row: dict) -> list:
 
 
 def _style_rows(sheet, header_row: int, last_row: int, widths: dict[str, float]) -> None:
+    """设置成本表样式、冻结行及筛选范围。
+
+    参数：sheet 为工作表；header_row、last_row 为表头及末行号；widths 为列字母到列宽的映射。
+    """
     navy = "1F4E78"
     border = Side(style="thin", color="B8C7D9")
     sheet.freeze_panes = f"A{header_row + 1}"
@@ -378,6 +398,10 @@ def _style_rows(sheet, header_row: int, last_row: int, widths: dict[str, float])
 
 
 def export_order_cost(config: Config, order_id: str) -> dict:
+    """计算并导出订单成本工作簿，写入状态目录的成本报表文件夹。
+
+    参数：config 为业务配置；order_id 为订单号，相同订单的导出文件使用固定名称。
+    """
     report = calculate_order_cost(config, order_id)
     output_dir = config.state_dir / "cost-reports"
     output_dir.mkdir(parents=True, exist_ok=True)

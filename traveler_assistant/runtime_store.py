@@ -14,7 +14,7 @@ RUNTIME_DATABASE_NAME = "assistant-runtime.sqlite3"
 
 
 def runtime_database_path(state_dir: Path) -> Path:
-    """Return the private database used for assistant usage and learned commands."""
+    """返回助手用量和已学习命令的私有数据库路径；state_dir 为状态目录。"""
     return state_dir / RUNTIME_DATABASE_NAME
 
 
@@ -25,11 +25,13 @@ class TokenUsage:
 
     @property
     def total_tokens(self) -> int:
+        """返回输入与输出 Token 数量之和；无显式参数，读取当前对象的计数。"""
         return self.input_tokens + self.output_tokens
 
 
 class RuntimeStore:
     def __init__(self, path: Path):
+        """打开助手运行库并创建所需表；path 为数据库路径，不支持的版本会报错。"""
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self.connection = sqlite3.connect(path)
@@ -61,6 +63,7 @@ class RuntimeStore:
         self.connection.commit()
 
     def record_agent_usage(self, model: str, usage: TokenUsage) -> None:
+        """保存一次模型用量；model 为模型名称，usage 为输入和输出 Token 数量。"""
         self.connection.execute(
             "insert into agent_usage(created_at, model, input_tokens, output_tokens) values(?,?,?,?)",
             (datetime.now().isoformat(timespec="seconds"), model, usage.input_tokens, usage.output_tokens),
@@ -68,6 +71,10 @@ class RuntimeStore:
         self.connection.commit()
 
     def remember_command(self, normalized_text: str, action: str, arguments: dict[str, str]) -> None:
+        """新增或更新已学习的命令映射。
+
+        参数：normalized_text 为标准化命令文本；action 为动作名；arguments 为动作参数。
+        """
         self.connection.execute(
             """
             insert into learned_commands(normalized_text, action, arguments_json, created_at)
@@ -87,6 +94,7 @@ class RuntimeStore:
         self.connection.commit()
 
     def learned_command(self, normalized_text: str) -> tuple[str, dict[str, str]] | None:
+        """按标准化文本 normalized_text 查询动作及参数；未找到或参数格式无效时返回 None。"""
         row = self.connection.execute(
             "select action, arguments_json from learned_commands where normalized_text = ?",
             (normalized_text,),
@@ -102,12 +110,14 @@ class RuntimeStore:
         return str(row[0]), arguments
 
     def token_summary(self, now: datetime | None = None) -> dict[str, int]:
+        """汇总本周、本月和累计 Token 用量；now 为统计基准时间，省略时使用当前时间。"""
         now = now or datetime.now()
         week_start = now - timedelta(days=now.weekday())
         week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
         def total_since(start: datetime | None) -> int:
+            """累计 start 起的输入和输出 Token 数；start 为 None 时统计全部记录。"""
             if start is None:
                 row = self.connection.execute(
                     "select coalesce(sum(input_tokens + output_tokens), 0) from agent_usage"

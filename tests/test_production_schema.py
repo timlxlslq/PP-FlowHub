@@ -1,4 +1,4 @@
-"""Production schema reductions preserve facts and block invalid migrations."""
+"""生产结构简化须保留业务事实，并阻止无效迁移。"""
 import sqlite3
 import tempfile
 import unittest
@@ -11,11 +11,16 @@ from traveler_assistant.core import RuleError
 
 
 class ProductionSchemaTests(unittest.TestCase):
+    # 分配独立的临时数据库路径，供各迁移测试建立所需旧结构。
+    # self：当前测试用例或测试替身实例。
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / 'workflow.sqlite3'
 
+    # 创建旧版生产数据及可选的重复关联，供迁移验证。
+    # self：当前测试用例或测试替身实例。
+    # duplicate：是否加入工厂单的重复生产关联。
     def legacy(self, duplicate=False):
         with sqlite3.connect(self.path) as c:
             c.executescript('''
@@ -39,6 +44,8 @@ class ProductionSchemaTests(unittest.TestCase):
                 c.execute("insert into manual_production_batches values(8,'MP-SECOND','PP0001','','manual','completed','old','old')")
                 c.execute("insert into manual_production_batch_factories values(8,'PP0001','F1')")
 
+    # 验证迁移保留记录标识及历史，且不留下兼容表。
+    # self：当前测试用例或测试替身实例。
     def test_migration_preserves_ids_history_and_has_no_compatibility_tables(self):
         self.legacy()
         ensure_schema(self.path)
@@ -57,6 +64,8 @@ class ProductionSchemaTests(unittest.TestCase):
             self.assertFalse(c.execute('pragma foreign_key_check').fetchall())
             self.assertEqual(c.execute('pragma integrity_check').fetchone(),('ok',))
 
+    # 验证工厂单历史归属有歧义时回滚整次迁移。
+    # self：当前测试用例或测试替身实例。
     def test_ambiguous_factory_history_rolls_back_whole_migration(self):
         self.legacy(duplicate=True)
         with self.assertRaisesRegex(ValueError,'多次生产'):
@@ -66,6 +75,8 @@ class ProductionSchemaTests(unittest.TestCase):
             self.assertIn('optimized',{r[1] for r in c.execute('pragma table_info(factory_orders)')})
             self.assertFalse(c.execute("select 1 from sqlite_master where name='production_records'").fetchall())
 
+    # 验证共享生产记录按订单区分同 SKU，并阻止重复生产。
+    # self：当前测试用例或测试替身实例。
     def test_shared_record_keeps_same_sku_separate_by_order_and_blocks_repeat(self):
         store=OrderIndexStore(self.path)
         self.addCleanup(store.close)
@@ -85,6 +96,8 @@ class ProductionSchemaTests(unittest.TestCase):
             record_completed_production(c,draft)
         self.assertEqual(c.execute('select count(*) from production_records').fetchone()[0],1)
 
+    # 验证材料校验失败时回滚生产记录及工厂单关联。
+    # self：当前测试用例或测试替身实例。
     def test_invalid_material_rolls_back_record_and_factory_links(self):
         store=OrderIndexStore(self.path)
         self.addCleanup(store.close)
@@ -96,6 +109,8 @@ class ProductionSchemaTests(unittest.TestCase):
         self.assertEqual(store.connection.execute('select stage,production_record_id from factory_orders').fetchone(),('已优化',None))
         self.assertEqual(store.connection.execute('select count(*) from production_records').fetchone()[0],0)
 
+    # 验证临时校验状态不会改写持久业务阶段。
+    # self：当前测试用例或测试替身实例。
     def test_validation_is_temporary_and_never_changes_business_stage(self):
         store=OrderIndexStore(self.path)
         store.upsert_order('PP0001',stage='已生产')
@@ -108,6 +123,8 @@ class ProductionSchemaTests(unittest.TestCase):
         self.assertFalse(store.connection.execute('select * from temp.preview_validation').fetchall())
         self.assertFalse({'validation_status','validation_message','material_status'} & {r[1] for r in store.connection.execute('pragma table_info(orders)')})
 
+    # 验证饰面板、夹板和封边的分配数量分别满足平衡约束。
+    # self：当前测试用例或测试替身实例。
     def test_panel_plywood_and_edge_allocations_must_balance_independently(self):
         from traveler_assistant.order_index import _validated_memory_allocations
         import copy

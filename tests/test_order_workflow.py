@@ -44,8 +44,10 @@ from unittest.mock import patch
 from traveler_assistant.test_data import create_local_test_source
 
 
+# 为测试材料和五金写入对应的商品目录父记录。
+# connection：隔离测试数据库连接。
+# rows：待写入的商品记录列表。
 def seed_products(connection, rows):
-    """Insert real catalog parents for SKU-backed test facts."""
     connection.executemany(
         """insert into products(
                category,code,name,spec,status,unit,normalized_code,
@@ -78,6 +80,11 @@ def seed_products(connection, rows):
     )
 
 
+# 生成带数量汇总及颜色表的测试材料工作簿。
+# path：测试文件的读写路径。
+# order_id：目标订单编号。
+# fractional：是否生成非整数夹板数量。
+# edge：封边长度，单位为米。
 def make_materials(path: Path, order_id: str = "PP9999", fractional: bool = False, edge: float = 12.5):
     wb = Workbook()
     ws = wb.active
@@ -102,6 +109,10 @@ def make_materials(path: Path, order_id: str = "PP9999", fractional: bool = Fals
     wb.save(path)
 
 
+# 生成包含工厂单号及订单名称的最小板材报告。
+# path：测试文件的读写路径。
+# factory：目标工厂单编号。
+# name：报告中的工厂单名称。
 def make_board(path: Path, factory: str, name: str):
     wb = Workbook()
     ws = wb.active
@@ -111,6 +122,13 @@ def make_board(path: Path, factory: str, name: str):
     wb.save(path)
 
 
+# 生成含夹板、饰面板和封边统计的板材报告。
+# path：测试文件的读写路径。
+# factory：目标工厂单编号。
+# name：报告中的工厂单名称。
+# plywood_qty：夹板张数。
+# panel_qty：饰面板张数。
+# edge_qty：封边长度，单位为米。
 def make_board_material_report(
     path: Path,
     factory: str = "F100",
@@ -136,6 +154,9 @@ def make_board_material_report(
     wb.save(path)
 
 
+# 按工厂单分组生成铰链五金报告。
+# path：测试文件的读写路径。
+# groups：工厂单编号与铰链数量的分组列表。
 def make_fittings(path: Path, groups: list[tuple[str, float]]):
     wb = Workbook()
     ws = wb.active
@@ -157,6 +178,12 @@ def make_fittings(path: Path, groups: list[tuple[str, float]]):
     wb.save(path)
 
 
+# 生成左右导轨报告，用于校验配对数量。
+# path：测试文件的读写路径。
+# left_quantity：左导轨原始件数。
+# right_quantity：右导轨原始件数，空值表示缺少右导轨。
+# left_name：左导轨来源名称。
+# right_name：右导轨来源名称。
 def make_rail_fittings(
     path: Path,
     left_quantity: float,
@@ -183,11 +210,15 @@ def make_rail_fittings(
     wb.save(path)
 
 
+# 复制项目 Traveler 模板到测试目录。
+# path：测试文件的读写路径。
 def make_template(path: Path):
     project_template = Path(__file__).resolve().parents[1] / "resources/templates/Work Order Traveler.xlsx"
     shutil.copy2(project_template, path)
 
 
+# 生成材料和人工五金测试使用的商品目录工作簿。
+# path：测试文件的读写路径。
 def make_product_catalog(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook = Workbook()
@@ -208,6 +239,8 @@ def make_product_catalog(path: Path):
     workbook.save(path)
 
 
+# 提取领料单尺寸、合并单元格和样式，供布局对比。
+# sheet：用于提取布局的工作表。
 def picking_layout_snapshot(sheet):
     structural_last_column = max(item.max_col for item in sheet.merged_cells.ranges)
     return {
@@ -236,6 +269,8 @@ def picking_layout_snapshot(sheet):
 
 
 class OrderWorkflowTests(unittest.TestCase):
+    # 验证无变化确认命令走预览路由，不写入业务事实。
+    # self：当前测试用例或测试替身实例。
     def test_no_change_acknowledgement_routes_preview_without_business_write(self):
         with tempfile.TemporaryDirectory() as temp:
             payload = {"orders": [], "source_folders": ["/server/PP0064"]}
@@ -251,6 +286,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertTrue(acknowledge.call_args.kwargs['confirm_write'])
             write.assert_not_called()
 
+    # 验证内存中的 Server 确认命令从标准输入读取 JSON 请求。
+    # self：当前测试用例或测试替身实例。
     def test_memory_server_confirmation_command_reads_json_from_stdin(self):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp) / "state"
@@ -273,6 +310,8 @@ class OrderWorkflowTests(unittest.TestCase):
                     0,
                 )
 
+    # 验证数据库订单生成 Traveler 时使用 SQLite 事实，无需源材料文件。
+    # self：当前测试用例或测试替身实例。
     def test_database_order_traveler_uses_sqlite_facts_without_source_material(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -347,6 +386,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertIn("Hinge", purchase_values)
             self.assertNotIn("TB18", purchase_values)
 
+    # 验证数据库 Traveler 中第五项及后续五金仍完整可见。
+    # self：当前测试用例或测试替身实例。
     def test_database_order_traveler_keeps_fifth_and_later_hardware_visible(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -415,6 +456,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(reopened_picking["G10"].value, 1)
             self.assertEqual(reopened_picking["C11"].value, "BLS36")
 
+    # 验证人工五金写入 Traveler 的附件区域。
+    # self：当前测试用例或测试替身实例。
     def test_database_order_traveler_writes_manual_hardware_to_accessory_section(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -499,6 +542,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertIn("15寸垃圾桶(TB18用)", purchase_values)
             self.assertIn("BLS36", purchase_values)
 
+    # 验证旧 Traveler 从领料单恢复用料表及材料数据。
+    # self：当前测试用例或测试替身实例。
     def test_legacy_traveler_gets_usage_list_and_material_from_picking_list(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -551,6 +596,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(updated.sheetnames[:3], ["WorkOrderTraveler", "Usage List", "Picking List"])
             self.assertEqual(parse_traveler(traveler).documents["CS001"][0].name, "19.1mm--Test Oak")
 
+    # 验证材料文件缺失时可从报告汇总生成材料数据。
+    # self：当前测试用例或测试替身实例。
     def test_missing_material_can_be_generated_from_report_summary(self):
         with tempfile.TemporaryDirectory() as temp:
             order = Path(temp) / "PP9999"
@@ -584,6 +631,8 @@ class OrderWorkflowTests(unittest.TestCase):
             for coordinate in ("A1", "B1", "A2", "C3", "A14", "C16", "A20"):
                 self.assertEqual(generated[coordinate].style_id, template[coordinate].style_id)
 
+    # 验证从报告生成材料时合并重复颜色的颜色表数量。
+    # self：当前测试用例或测试替身实例。
     def test_generated_material_color_table_aggregates_repeated_report_colors(self):
         with tempfile.TemporaryDirectory() as temp:
             order = Path(temp) / "PP9999"
@@ -618,6 +667,8 @@ class OrderWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(edges, {"Test Oak": 20.0})
 
+    # 验证复杂报告不能自动生成材料时提示人工处理。
+    # self：当前测试用例或测试替身实例。
     def test_complex_report_generation_requests_manual_material(self):
         with tempfile.TemporaryDirectory() as temp:
             order = Path(temp) / "PP9999"
@@ -632,6 +683,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "material_generation_failed")
             self.assertIn("手动生成 material", str(raised.exception))
 
+    # 验证本地测试数据可重复生成且目录布局与 Server 一致。
+    # self：当前测试用例或测试替身实例。
     def test_local_test_source_is_repeatable_and_matches_server_layout(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "test-source"
@@ -660,6 +713,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(cut.factories, [])
             self.assertTrue((root / "test-data-manifest.json").is_file())
 
+    # 验证用料表扩展行数后重建正确的汇总公式。
+    # self：当前测试用例或测试替身实例。
     def test_usage_list_expands_and_rewrites_summary_formulas(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -705,6 +760,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertFalse(any("UNIQUE" in formula or "FILTER" in formula for formula in formulas))
             self.assertNotIn("A3:A4", {str(item) for item in usage.merged_cells.ranges})
 
+    # 验证用料表在建立颜色表公式前先统一颜色别名。
+    # self：当前测试用例或测试替身实例。
     def test_usage_list_normalizes_alias_color_before_color_table_formulas(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -742,6 +799,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertIn("C$16", usage["C17"].value)
             self.assertIn("$I$3:$I$13", usage["C17"].value)
 
+    # 验证订单文件夹按修改时间从新到旧排序。
+    # self：当前测试用例或测试替身实例。
     def test_order_folders_are_sorted_by_modified_time_descending(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -763,6 +822,8 @@ class OrderWorkflowTests(unittest.TestCase):
                 ["PP0001", "PP5000-2", "PP9999"],
             )
 
+    # 验证代切订单缺少材料工作簿时拒绝生成。
+    # self：当前测试用例或测试替身实例。
     def test_cut_to_size_requires_materials_workbook(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -774,14 +835,16 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "missing_materials")
             self.assertIn("material", str(raised.exception))
 
+    # 验证代切订单仅生成材料 Traveler，不读取或写入五金。
+    # self：当前测试用例或测试替身实例。
     def test_cut_to_size_generates_materials_only_traveler(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             order = root / "CS004"
             order.mkdir()
             make_materials(order / "material.xlsx", order_id="CS004")
-            # Even if an old source folder happens to contain a fitting file,
-            # cut-to-size orders must not read or write it.
+            # 即使旧来源文件夹中恰好包含五金文件，
+            # 代切订单也不应读取或写入该文件。
             make_fittings(order / "Fittingslist-old.xlsx", [("F999", 7)])
             template = root / "template.xlsx"
             make_template(template)
@@ -798,8 +861,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(preview.factories, [])
             self.assertTrue(any("不读取或写入五金" in item for item in preview.warnings))
 
-            # openpyxl normalizes merged-cell style records on every save, so
-            # compare with an otherwise untouched workbook after the same round trip.
+            # openpyxl 每次保存都会规范化合并单元格样式，
+            # 因此应与经历相同读写过程但未被修改的工作簿比较。
             normalized_template = root / "normalized-template.xlsx"
             untouched = load_workbook(template, data_only=False)
             untouched.save(normalized_template)
@@ -846,6 +909,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(set(traveler.documents), {"CS004"})
             self.assertTrue(traveler.documents["CS004"])
 
+    # 验证来源组件编码不会误写为库存 SKU。
+    # self：当前测试用例或测试替身实例。
     def test_source_component_code_is_not_written_as_sku(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -874,6 +939,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(hinge_rows, [6])
             self.assertTrue(all(picking.cell(row, 2).value is None for row in hinge_rows))
 
+    # 验证关闭五金选项后 Traveler 不包含报告中的五金。
+    # self：当前测试用例或测试替身实例。
     def test_opt_out_hardware_omits_report_fittings_from_traveler(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -904,6 +971,8 @@ class OrderWorkflowTests(unittest.TestCase):
                 for row in range(1, picking.max_row + 1)
             ))
 
+    # 验证尺寸为空等无效输入只返回一条明确业务错误。
+    # self：当前测试用例或测试替身实例。
     def test_invalid_empty_dimension_returns_one_business_error(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -920,6 +989,8 @@ class OrderWorkflowTests(unittest.TestCase):
                 parse_fittings_groups(broken)
             self.assertEqual(raised.exception.code, "fittings_schema")
 
+    # 验证左右导轨数量相同则配对合并，数量不同时停止读取。
+    # self：当前测试用例或测试替身实例。
     def test_equal_rail_pair_is_collapsed_but_mismatch_stops_read(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "Fittingslist.xlsx"
@@ -951,6 +1022,8 @@ class OrderWorkflowTests(unittest.TestCase):
                 [("Lower Left Rail", 1.0)],
             )
 
+    # 验证导轨配对后的预览按规范单位消耗数量。
+    # self：当前测试用例或测试替身实例。
     def test_equal_rail_pair_preview_consumes_canonical_quantity(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -972,6 +1045,8 @@ class OrderWorkflowTests(unittest.TestCase):
                 [("H-Rail", "H-RAIL", 6.0)],
             )
 
+    # 验证单色材料正确读取，并校验必须为整数的板材数量。
+    # self：当前测试用例或测试替身实例。
     def test_single_color_materials_and_integer_validation(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -985,6 +1060,8 @@ class OrderWorkflowTests(unittest.TestCase):
                 parse_order_materials("PP9999", path)
             self.assertEqual(raised.exception.code, "fractional_material")
 
+    # 验证多色材料接受总计行上的颜色表标记。
+    # self：当前测试用例或测试替身实例。
     def test_multicolor_materials_accepts_color_table_marker_in_total_row(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "PP0063-2 materials.xlsx"
@@ -1019,6 +1096,8 @@ class OrderWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(edges, {"Basalto SM": 12.5, "Walnut": 7.5})
 
+    # 验证单色材料缺少颜色表时报告结构错误。
+    # self：当前测试用例或测试替身实例。
     def test_single_color_materials_without_color_table_is_a_schema_error(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "PP9999 materials.xlsx"
@@ -1038,6 +1117,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "materials_schema")
             self.assertIn("Color Table", str(raised.exception))
 
+    # 验证饰面板数量为零时仍保留封边数量。
+    # self：当前测试用例或测试替身实例。
     def test_single_color_materials_keep_edge_when_panel_is_zero(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "PP9999 materials.xlsx"
@@ -1056,6 +1137,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertFalse([item for item in materials if item.kind == "panel"])
             self.assertEqual(edges, {"Basalto SM": 12.5})
 
+    # 验证从明细修复空的单色颜色表，同时保持原明细不变。
+    # self：当前测试用例或测试替身实例。
     def test_repairs_empty_single_color_table_from_detail_rows_without_changing_details(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "PP0072 materials.xlsx"
@@ -1101,6 +1184,8 @@ class OrderWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(edges, {"Basalto SM": 319.64})
 
+    # 验证补齐颜色表缺失颜色并重建全部汇总公式。
+    # self：当前测试用例或测试替身实例。
     def test_repairs_missing_color_table_colors_and_rebuilds_all_summary_formulas(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "PP0035-2 materials.xlsx"
@@ -1141,6 +1226,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(panel_quantities, {"Ivory Oak": 3, "Penelope FA44": 1, "Frappe 3": 5})
             self.assertEqual(edges, {"Ivory Oak": 18.5, "Penelope FA44": 36.72, "Frappe 3": 87.52})
 
+    # 验证颜色表不完整时预览被拒绝，且不改写源文件。
+    # self：当前测试用例或测试替身实例。
     def test_preview_rejects_incomplete_color_table_without_rewriting_source(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1163,6 +1250,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertIsNone(load_workbook(path, data_only=False).active["D16"].value)
             self.assertIsNone(load_workbook(path, data_only=False).active["E16"].value)
 
+    # 验证修复颜色表时合并明细中的同色重复行。
+    # self：当前测试用例或测试替身实例。
     def test_repair_aggregates_repeated_detail_color_rows(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "PP0035-2 materials.xlsx"
@@ -1190,6 +1279,8 @@ class OrderWorkflowTests(unittest.TestCase):
                 {"Ivory Oak": 18.5, "Penelope FA44": 78.0, "Frappe 3": 87.52},
             )
 
+    # 验证完整颜色表与汇总不一致时要求人工处理。
+    # self：当前测试用例或测试替身实例。
     def test_existing_complete_color_table_mismatch_requires_manual_handling(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "PP0035-2 materials.xlsx"
@@ -1197,8 +1288,8 @@ class OrderWorkflowTests(unittest.TestCase):
             workbook = load_workbook(path)
             sheet = workbook.active
             sheet["C16"] = "Basalto SM"
-            # A complete table is still the parsing source, but a mismatch
-            # with Total Qty must stop automatic material writing.
+            # 完整颜色表仍是解析来源，但它的数量
+            # 与总数量不一致时必须停止自动写入材料。
             sheet["C17"], sheet["C18"], sheet["C19"] = 2, 0, 9.25
             workbook.save(path)
 
@@ -1208,6 +1299,8 @@ class OrderWorkflowTests(unittest.TestCase):
                 parse_order_materials("PP0035-2", path)
             self.assertEqual(raised.exception.code, "material_summary_mismatch")
 
+    # 验证支持八种颜色的颜色表，不受旧七色上限限制。
+    # self：当前测试用例或测试替身实例。
     def test_eight_color_table_is_read_without_seven_color_limit_error(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "PP0035 materials.xlsx"
@@ -1241,6 +1334,8 @@ class OrderWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(set(edges), set(colors))
 
+    # 验证整数显示格式采用 Excel 实际显示的总数量。
+    # self：当前测试用例或测试替身实例。
     def test_integer_display_format_uses_the_total_qty_values_excel_shows(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "PP0068 materials.xlsx"
@@ -1270,6 +1365,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(quantities[("panel", 19.1)], 6)
             self.assertEqual(edges, {"Basalto SM": 320.0})
 
+    # 验证材料明细有数量时必须填写颜色。
+    # self：当前测试用例或测试替身实例。
     def test_material_detail_quantity_requires_color(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "CS004 materials.xlsx"
@@ -1284,6 +1381,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "material_color_required")
             self.assertIn("Kitchen", str(raised.exception))
 
+    # 验证总数量与颜色表一致后才允许写入材料事实。
+    # self：当前测试用例或测试替身实例。
     def test_total_qty_and_color_table_must_match_before_material_write(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "CS004 materials.xlsx"
@@ -1308,6 +1407,8 @@ class OrderWorkflowTests(unittest.TestCase):
                 parse_order_materials("CS004", path)
             self.assertEqual(raised.exception.code, "material_summary_mismatch")
 
+    # 验证公式没有缓存时用显示值核对汇总与颜色表。
+    # self：当前测试用例或测试替身实例。
     def test_formula_without_cached_values_uses_display_values_for_totals_and_color_table(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "PP0072 materials.xlsx"
@@ -1336,8 +1437,10 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(quantities[("panel", 8.0)], 1)
             self.assertEqual(edges, {"Basalto SM": 320.0})
 
+    # 验证有无公式缓存时封边汇总均遵守显示格式。
+    # self：当前测试用例或测试替身实例。
     def test_edge_summary_format_with_and_without_formula_cache(self):
-        # Two detail rows must be summed before applying the summary format.
+        # 应先合计两行明细，再应用汇总显示格式。
         from xml.etree import ElementTree as ET
 
         for cached in (False, True):
@@ -1367,6 +1470,8 @@ class OrderWorkflowTests(unittest.TestCase):
                     self.assertEqual(parse_order_materials("PP0072", path)[2], {"Basalto SM": expected})
                     self.assertEqual(path.read_bytes(), original)
 
+    # 验证封边显示舍入不会掩盖实际汇总差异。
+    # self：当前测试用例或测试替身实例。
     def test_edge_display_rounding_preserves_real_summary_mismatch(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "PP0072 materials.xlsx"
@@ -1380,15 +1485,17 @@ class OrderWorkflowTests(unittest.TestCase):
                 parse_order_materials("PP0072", path)
             self.assertEqual(raised.exception.code, "material_summary_mismatch")
 
+    # 验证房间明细数量同样采用整数显示格式。
+    # self：当前测试用例或测试替身实例。
     def test_integer_display_format_is_also_used_for_room_rows(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "PP0068 materials.xlsx"
             make_materials(path)
             wb = load_workbook(path)
             ws = wb.active
-            # The source formula result is fractional, but the workbook's
-            # integer display format is what the operator sees and what the
-            # summary parser already uses.
+            # 源公式结果带有小数，但工作簿的
+            # 整数显示格式才是操作者看到的数值，
+            # 汇总解析器已经按此格式读取。
             ws["F3"] = 6.25
             ws["F3"].number_format = "0;\\-0;;@"
             wb.save(path)
@@ -1396,6 +1503,8 @@ class OrderWorkflowTests(unittest.TestCase):
             panel = next(item for item in rows[0][1] if item.kind == "panel")
             self.assertEqual(panel.quantity, 6)
 
+    # 验证房间区域名称精确提取订单号，并拒绝有歧义的行。
+    # self：当前测试用例或测试替身实例。
     def test_room_section_factory_name_extracts_exact_order_and_rejects_ambiguous_rows(self):
         rows = [
             ("PP0035-OFFICE", [MaterialItem("panel", 19.1, "Frappe 3", 4)], {}),
@@ -1419,6 +1528,8 @@ class OrderWorkflowTests(unittest.TestCase):
                 known_order_ids={"PP0035", "PP0035-2"},
             )
 
+    # 验证关联更新失败时返回具体订单的错误。
+    # self：当前测试用例或测试替身实例。
     def test_related_update_reports_the_specific_order_error(self):
         group = {
             "errors": [{
@@ -1435,6 +1546,8 @@ class OrderWorkflowTests(unittest.TestCase):
         self.assertIn("PP0067", str(raised.exception))
         self.assertIn("找不到文件名包含 material", str(raised.exception))
 
+    # 验证关联更新响应保留所有订单及工厂单。
+    # self：当前测试用例或测试替身实例。
     def test_related_update_response_keeps_all_orders_and_factories(self):
         group = {
             "errors": [],
@@ -1463,6 +1576,8 @@ class OrderWorkflowTests(unittest.TestCase):
         self.assertEqual(len(result["factories"]), 3)
         self.assertEqual(len(result["updated_orders"]), 2)
 
+    # 验证重复五金报告无论时间先后都要求用户选择。
+    # self：当前测试用例或测试替身实例。
     def test_duplicate_fittings_require_choice_regardless_of_time(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1489,6 +1604,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(selected["F999"][0].quantity, 2)
             self.assertTrue(any("用户选择" in warning for warning in warnings))
 
+    # 验证跳过空的异常五金报告后仍可生成 Traveler。
+    # self：当前测试用例或测试替身实例。
     def test_empty_malformed_fittings_is_skipped_and_traveler_can_generate(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1497,8 +1614,8 @@ class OrderWorkflowTests(unittest.TestCase):
             report.mkdir(parents=True)
             materials_path = order / "PP9999 materials.xlsx"
             make_materials(materials_path)
-            # Room details may contain cut/layout fractions; order-level
-            # plywood must still come from Total Qty and not these rows.
+            # 房间明细可能包含切割或排版产生的小数；订单层级的
+            # 夹板数量仍必须采用总数量，不能采用这些明细。
             workbook = load_workbook(materials_path)
             sheet = workbook.active
             for coordinate, value in {"C3": 2.5, "D3": 0.75, "E3": 3.25, "F3": 6.25}.items():
@@ -1545,6 +1662,8 @@ class OrderWorkflowTests(unittest.TestCase):
                 [None, None, None, None],
             )
 
+    # 验证全局忽略规则生效，并只生成所选订单工作簿。
+    # self：当前测试用例或测试替身实例。
     def test_global_ignore_and_generate_one_order_workbook(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1647,6 +1766,8 @@ class OrderWorkflowTests(unittest.TestCase):
             self.assertEqual(updated_picking.cell(manual_rows[0], 7).value, 6)
             self.assertEqual(updated_picking.cell(manual_rows[0], 9).value, "现场增加")
 
+    # 验证重新扫描订单时不持久保存已忽略的五金。
+    # self：当前测试用例或测试替身实例。
     def test_ignored_hardware_is_not_persisted_when_order_is_rescanned(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1682,6 +1803,8 @@ class OrderWorkflowTests(unittest.TestCase):
             finally:
                 connection.close()
 
+    # 验证新增人工五金写入数据库，并按相同 SKU 合并数量。
+    # self：当前测试用例或测试替身实例。
     def test_add_manual_hardware_writes_database_and_aggregates_same_sku(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1711,7 +1834,7 @@ class OrderWorkflowTests(unittest.TestCase):
                 index.connection.commit()
             finally:
                 index.close()
-            # A malformed/legacy Traveler must not affect this database operation.
+            # 格式损坏或旧版 Traveler 不得影响本次数据库操作。
             traveler = config.order_root / "PP9999" / "Work Order Traveler(PP9999).xlsx"
             traveler.parent.mkdir(parents=True)
             traveler.write_text("legacy traveler placeholder", encoding="utf-8")
@@ -1777,6 +1900,8 @@ class OrderWorkflowTests(unittest.TestCase):
             finally:
                 connection.close()
 
+    # 验证添加人工五金可直接使用工厂单号，无需 Traveler。
+    # self：当前测试用例或测试替身实例。
     def test_manual_hardware_accepts_factory_number_without_traveler(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

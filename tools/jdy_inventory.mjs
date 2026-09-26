@@ -1,3 +1,4 @@
+// 从标准输入读取库存请求，按动作导航、查询、导出或提交出库并报告结果。参数：输入 JSON 提供动作、登录信息、商品明细及浏览器选项。
 import { chromium } from "playwright";
 import fs from "node:fs";
 import path from "node:path";
@@ -9,7 +10,13 @@ const processStartedAt = performance.now();
 const UI_STEP_TIMEOUT = 15000;
 const PAGE_NAVIGATION_TIMEOUT = 30000;
 const DOWNLOAD_TIMEOUT = 60000;
+/** 计算自起点至今的秒数并保留两位小数。
+ * 参数：startedAt：performance.now() 计时起点。
+ */
 const elapsedSeconds = startedAt => ((performance.now() - startedAt) / 1000).toFixed(2);
+/** 读取当前页面地址并移除查询参数，读取失败返回空串。
+ * 参数：无；使用当前 page。
+ */
 const safePageURL = () => {
   try {
     if (!page) return "";
@@ -19,6 +26,9 @@ const safePageURL = () => {
     return "";
   }
 };
+/** 向标准错误输出包含页面地址的结构化进度日志。
+ * 参数：message：进度文案；details：补充日志字段。
+ */
 const log = (message, details = {}) => process.stderr.write(`${JSON.stringify({
   event: "progress",
   message: `[+${elapsedSeconds(processStartedAt)}s] ${message}`,
@@ -26,6 +36,9 @@ const log = (message, details = {}) => process.stderr.write(`${JSON.stringify({
   page_url: safePageURL(),
   ...details,
 })}\n`);
+/** 执行异步步骤并记录开始、完成或失败耗时。
+ * 参数：label：日志中的步骤名称；operation：待执行操作。
+ */
 const timed = async (label, operation) => {
   const startedAt = performance.now();
   log(`${label}：开始`, { stage: label, stage_state: "started" });
@@ -46,10 +59,19 @@ const timed = async (label, operation) => {
     throw error;
   }
 };
+/** 等待指定时长并记录实际耗时。
+ * 参数：page：浏览器页面；milliseconds：等待毫秒数；label：等待原因。
+ */
 const timedWait = async (page, milliseconds, label) =>
   timed(`${label}（计划等待 ${(milliseconds / 1000).toFixed(2)} 秒）`, () =>
     page.waitForTimeout(milliseconds));
+/** 构造完全匹配文本的页面定位器。
+ * 参数：page：页面或框架；text：完整目标文本。
+ */
 const exact = (page, text) => page.getByText(text, { exact: true });
+/** 返回候选元素中首个可见项，未找到返回空值。
+ * 参数：locator：可能匹配多个元素的定位器。
+ */
 const firstVisible = async locator => {
   for (let index = 0; index < await locator.count(); index += 1) {
     const candidate = locator.nth(index);
@@ -57,6 +79,9 @@ const firstVisible = async locator => {
   }
   return null;
 };
+/** 从后向前尝试点击完全匹配文本的可见元素。
+ * 参数：page：页面或框架；text：完整目标文本。
+ */
 const clickVisibleText = async (page, text) => {
   const matches = page.getByText(text, { exact: true });
   for (let index = (await matches.count()) - 1; index >= 0; index -= 1) {
@@ -68,12 +93,18 @@ const clickVisibleText = async (page, text) => {
   }
   return false;
 };
+/** 从后向前遍历框架并点击目标文本，成功后停止。
+ * 参数：page：浏览器页面；text：完整目标文本。
+ */
 const clickVisibleTextAcrossFrames = async (page, text) => {
   for (const frame of page.frames().reverse()) {
     if (await clickVisibleText(frame, text)) return true;
   }
   return false;
 };
+/** 收集各框架中完全匹配文本的可见元素。
+ * 参数：page：浏览器页面；text：完整目标文本。
+ */
 const visibleTextLocatorsAcrossFrames = async (page, text) => {
   const matches = [];
   for (const frame of page.frames().reverse()) {
@@ -85,6 +116,9 @@ const visibleTextLocatorsAcrossFrames = async (page, text) => {
   }
   return matches;
 };
+/** 在主框架收集匹配导航名称的可见元素。
+ * 参数：page：浏览器页面；text：导航项完整文本。
+ */
 const visibleLeftNavigationLocators = async (page, text) => {
   const locator = page.mainFrame().getByText(text, { exact: true });
   const matches = [];
@@ -94,6 +128,9 @@ const visibleLeftNavigationLocators = async (page, text) => {
   }
   return matches;
 };
+/** 轮询左侧菜单直至目标项可见，超时抛出诊断错误。
+ * 参数：page：浏览器页面；text：导航项文本；timeoutMs：最长等待毫秒数。
+ */
 const waitForVisibleLeftNavigationItem = async (page, text, timeoutMs = UI_STEP_TIMEOUT) => {
   const attempts = Math.max(1, Math.ceil(timeoutMs / 250));
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -103,12 +140,21 @@ const waitForVisibleLeftNavigationItem = async (page, text, timeoutMs = UI_STEP_
   }
   throw new Error(`左侧菜单中等待可见“${text}”超过 ${timeoutMs / 1000} 秒`);
 };
+/** 根据库存动作选择商品或仓库菜单。
+ * 参数：action：请求动作名称。
+ */
 const inventoryMenuForAction = action => action === "exportProducts" ? "商品" : "仓库";
+/** 等待当前请求所需的业务菜单就绪；预检动作直接返回。
+ * 参数：currentPage：待检查的业务页面。
+ */
 const waitForInventoryActionShell = async currentPage => {
   if (request.action === "preflight") return;
   const menuText = inventoryMenuForAction(request.action);
   await waitForVisibleLeftNavigationItem(currentPage, menuText, PAGE_NAVIGATION_TIMEOUT);
 };
+/** 轮询各框架直至目标文本可见，超时抛出错误。
+ * 参数：page：浏览器页面；text：完整目标文本；timeoutMs：最长等待毫秒数。
+ */
 const waitForVisibleTextAcrossFrames = async (page, text, timeoutMs = UI_STEP_TIMEOUT) => {
   const attempts = Math.max(1, Math.ceil(timeoutMs / 250));
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -118,6 +164,9 @@ const waitForVisibleTextAcrossFrames = async (page, text, timeoutMs = UI_STEP_TI
   }
   throw new Error(`等待可见“${text}”控件超过 ${timeoutMs / 1000} 秒`);
 };
+/** 收集各框架中匹配文本模式的可见元素。
+ * 参数：page：浏览器页面；pattern：文本匹配模式。
+ */
 const visiblePatternLocatorsAcrossFrames = async (page, pattern) => {
   const matches = [];
   for (const frame of page.frames().reverse()) {
@@ -129,6 +178,9 @@ const visiblePatternLocatorsAcrossFrames = async (page, pattern) => {
   }
   return matches;
 };
+/** 轮询等待匹配提示全部消失，超时抛出错误。
+ * 参数：page：浏览器页面；pattern：提示文本模式；timeoutMs：最长等待毫秒数。
+ */
 const waitForVisiblePatternToDisappear = async (page, pattern, timeoutMs = UI_STEP_TIMEOUT) => {
   const attempts = Math.max(1, Math.ceil(timeoutMs / 250));
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -137,14 +189,21 @@ const waitForVisiblePatternToDisappear = async (page, pattern, timeoutMs = UI_ST
   }
   throw new Error(`等待网页提示消失超过 ${timeoutMs / 1000} 秒`);
 };
+/** 依次悬停并点击元素，为两步分别记录耗时。
+ * 参数：label：元素用途名称；locator：目标元素定位器。
+ */
 const moveAndClick = async (label, locator) => {
   await timed(`移动鼠标到${label}`, () => locator.hover());
   await timed(`点击${label}`, () => locator.click());
 };
+/** 轮询寻找满足条件且可见的框架，超时返回空值。
+ * 参数：page：浏览器页面；predicate：框架筛选函数；timeoutMs：最长等待毫秒数。
+ */
 const waitForVisibleFrame = async (page, predicate, timeoutMs = 15000) => {
   const attempts = Math.max(1, Math.ceil(timeoutMs / 250));
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    for (const frame of page.frames().filter(predicate).reverse()) {
+    for (const frame of page.frames().reverse()) {
+      if (!(await predicate(frame))) continue;
       if (frame === page.mainFrame()) return frame;
       const frameElement = await frame.frameElement().catch(() => null);
       if (frameElement && await frameElement.isVisible().catch(() => false)) return frame;
@@ -153,6 +212,9 @@ const waitForVisibleFrame = async (page, predicate, timeoutMs = 15000) => {
   }
   return null;
 };
+/** 检查框架中是否存在匹配元素，定位失败返回否。
+ * 参数：frame：目标框架；selector：调用方提供的选择器，按需包含可见条件。
+ */
 const hasVisibleLocator = async (frame, selector) => {
   try {
     return await frame.locator(selector).count() > 0;
@@ -160,6 +222,9 @@ const hasVisibleLocator = async (frame, selector) => {
     return false;
   }
 };
+/** 结合原生属性、无障碍属性及样式类判断保存控件是否禁用。
+ * 参数：control：保存控件定位器。
+ */
 const isOutboundSaveControlDisabled = async control => {
   const disabled = await control.getAttribute("disabled").catch(() => null);
   const ariaDisabled = await control.getAttribute("aria-disabled").catch(() => null);
@@ -167,6 +232,9 @@ const isOutboundSaveControlDisabled = async control => {
   return disabled !== null || ariaDisabled === "true" ||
     /(?:^|\s)(?:disabled|is-disabled|ui-btn-dis)(?:\s|$)/i.test(className);
 };
+/** 列出不同页面版本的可见保存控件候选定位器。
+ * 参数：frame：出库页面框架。
+ */
 const visibleOutboundSaveControls = frame => [
   {
     selector: '#edit:visible',
@@ -181,12 +249,18 @@ const visibleOutboundSaveControls = frame => [
     locator: frame.locator('a:visible,button:visible').filter({ hasText: /^\s*保存\s*$/ }),
   },
 ];
+/** 检查框架中是否存在可见保存控件。
+ * 参数：frame：候选出库框架。
+ */
 const hasVisibleOutboundSaveControl = async frame => {
   for (const candidate of visibleOutboundSaveControls(frame)) {
     if (await candidate.locator.count() > 0) return true;
   }
   return false;
 };
+/** 收集各框架保存控件的文本、禁用状态和样式类。
+ * 参数：currentPage：浏览器页面；preferredFrame：优先检查的出库框架。
+ */
 const outboundSaveControlDiagnostics = async (currentPage, preferredFrame) => {
   const frames = [];
   for (const frame of [preferredFrame, currentPage.mainFrame(), ...currentPage.frames().reverse()]) {
@@ -211,6 +285,9 @@ const outboundSaveControlDiagnostics = async (currentPage, preferredFrame) => {
   }
   return details;
 };
+/** 等待可点击的保存控件，超时携带单号及控件诊断抛错。
+ * 参数：currentPage：浏览器页面；preferredFrame：优先框架；documentNumber：待保存单号。
+ */
 const waitForOutboundSaveControl = async (currentPage, preferredFrame, documentNumber) => {
   const frames = [];
   for (const frame of [preferredFrame, currentPage.mainFrame(), ...currentPage.frames().reverse()]) {
@@ -237,6 +314,9 @@ const waitForOutboundSaveControl = async (currentPage, preferredFrame, documentN
     `已检查 ${details.length ? JSON.stringify(details) : "当前表单和主页面均无可见“保存”控件"}`,
   );
 };
+/** 解码网址中的转义字符，非法编码时保留原值。
+ * 参数：rawURL：原始网址文本。
+ */
 const decodedURL = rawURL => {
   try {
     return decodeURIComponent(rawURL || "");
@@ -244,14 +324,23 @@ const decodedURL = rawURL => {
     return rawURL || "";
   }
 };
+/** 检查网址是否指向其他出库单历史列表路由。
+ * 参数：rawURL：原始网址文本。
+ */
 const isOtherOutboundListURL = rawURL => {
   const url = decodedURL(rawURL);
   return /(?:[?&#]|&)action=initOiList(?:[&#]|$)/i.test(url);
 };
+/** 检查网址是否包含支持的其他出库表单路由。
+ * 参数：rawURL：原始网址文本。
+ */
 const isOtherOutboundFormURL = rawURL => {
   const url = decodedURL(rawURL);
   return /(?:invOi|storage\/other-outbound\.jsp|otherOutbound)/i.test(url);
 };
+/** 检查日期、搜索词和查询按钮是否均已显示。
+ * 参数：frame：候选历史列表框架。
+ */
 const hasOtherOutboundListControls = async frame => {
   const requiredSelectors = [
     ".quick-datepicker-start:visible",
@@ -264,29 +353,35 @@ const hasOtherOutboundListControls = async frame => {
   }
   return true;
 };
+/** 以可见查询控件判断历史列表是否就绪。
+ * 参数：frame：候选历史列表框架。
+ */
 const isOtherOutboundListFrame = async frame => {
-  // The route can appear before initOiList has rendered its query controls.
-  // A URL alone is therefore not evidence that the page is query-ready.
-  // Some tenant workbenches keep the shell URL while rendering the list
-  // inside a route/frame, so visible controls are the readiness contract.
+  // 路由可能早于查询控件出现；部分租户在框架内显示列表但保留外壳地址，因此以可见控件作为查询就绪依据。
   return hasOtherOutboundListControls(frame);
 };
+/** 结合保存控件、表头和路由识别出库编辑表单。
+ * 参数：frame：候选出库框架。
+ */
 const isOtherOutboundFormFrame = async frame => {
   if (isOtherOutboundListURL(frame.url())) return false;
   const hasSave = await hasVisibleOutboundSaveControl(frame);
   const hasTable = await frame.locator("thead:visible th").count() > 0;
-  // Tenant versions use both the legacy invOi route and the newer
-  // storage/other-outbound.jsp route. The form controls are the stable
-  // readiness contract; the URL is only a hint and must not be the sole
-  // gate for recognizing an already-open edit form.
+  // 租户既有旧版 invOi 路由，也有新版 storage/other-outbound.jsp 路由；以表单控件作为稳定依据，网址只作提示，不能单独决定编辑表单是否就绪。
   return hasSave && hasTable && (
     isOtherOutboundFormURL(frame.url()) || frame === page?.mainFrame()
   );
 };
+/** 将表格文本中的不换行空格和连续空白规范化。
+ * 参数：value：单元格原始值。
+ */
 const normalizeGridText = value => String(value || "")
   .replace(/\u00a0/g, " ")
   .replace(/\s+/g, " ")
   .trim();
+/** 读取可见出库材料行及商品代码；缺少代码列时停止保存。
+ * 参数：frame：出库表单框架。
+ */
 const outboundMaterialRows = async frame => {
   const rows = frame.locator("tbody:visible tr:visible");
   const snapshots = [];
@@ -305,6 +400,9 @@ const outboundMaterialRows = async frame => {
   }
   return snapshots;
 };
+/** 保存前逐项核对材料行数、唯一商品代码和数量。
+ * 参数：frame：出库表单框架；items：请求材料明细；quantityColumnId：数量列标识。
+ */
 const assertOutboundFormMatchesRequest = async (frame, items, quantityColumnId) => {
   const snapshots = await outboundMaterialRows(frame);
   const expectedCodes = items.map(item => item.productCode);
@@ -330,18 +428,27 @@ const assertOutboundFormMatchesRequest = async (frame, items, quantityColumnId) 
     throw new Error(`保存前发现 ${unexpected.length} 行非本次出库材料，已停止保存`);
   }
 };
+/** 查找当前页面已有的就绪出库历史列表。
+ * 参数：page：浏览器页面。
+ */
 const currentOtherOutboundListFrame = async page => {
   for (const frame of page.frames().reverse()) {
     if (await isOtherOutboundListFrame(frame)) return frame;
   }
   return null;
 };
+/** 查找当前页面已有的出库编辑表单。
+ * 参数：page：浏览器页面。
+ */
 const currentOtherOutboundFormFrame = async page => {
   for (const frame of page.frames().reverse()) {
     if (await isOtherOutboundFormFrame(frame)) return frame;
   }
   return null;
 };
+/** 等待出库历史查询控件就绪，超时返回空值。
+ * 参数：page：浏览器页面；timeoutMs：最长等待毫秒数。
+ */
 const waitForOtherOutboundListFrame = async (page, timeoutMs = PAGE_NAVIGATION_TIMEOUT) => {
   const attempts = Math.max(1, Math.ceil(timeoutMs / 250));
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -352,6 +459,9 @@ const waitForOtherOutboundListFrame = async (page, timeoutMs = PAGE_NAVIGATION_T
   }
   return null;
 };
+/** 等待出库编辑表单可识别，超时返回空值。
+ * 参数：page：浏览器页面；timeoutMs：最长等待毫秒数。
+ */
 const waitForOtherOutboundFormFrame = async (page, timeoutMs = PAGE_NAVIGATION_TIMEOUT) => {
   const attempts = Math.max(1, Math.ceil(timeoutMs / 250));
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -362,6 +472,9 @@ const waitForOtherOutboundFormFrame = async (page, timeoutMs = PAGE_NAVIGATION_T
   }
   return null;
 };
+/** 点击历史单据入口并等待当前或新页面中的列表。
+ * 参数：page：包含历史入口的页面。
+ */
 const clickOtherOutboundHistory = async page => {
   const candidates = await visibleTextLocatorsAcrossFrames(page, "历史单据");
   for (const candidate of candidates.reverse()) {
@@ -381,6 +494,9 @@ const clickOtherOutboundHistory = async page => {
   }
   return null;
 };
+/** 打开历史单据列表，首次失败时刷新并重试一次。
+ * 参数：currentPage：包含历史入口的页面。
+ */
 const clickOtherOutboundHistoryWithRetry = async currentPage => {
   const first = await clickOtherOutboundHistory(currentPage);
   if (first) return first;
@@ -389,13 +505,16 @@ const clickOtherOutboundHistoryWithRetry = async currentPage => {
   await currentPage.waitForTimeout(500);
   return clickOtherOutboundHistory(currentPage);
 };
+/** 展开仓库菜单并重试点击指定出库入口。
+ * 参数：page：业务页面；label：二级菜单名称。
+ */
 const openOtherOutboundMenuItem = async (page, label = "其他出库单") => {
   const warehouseItems = await waitForVisibleLeftNavigationItem(page, "仓库", PAGE_NAVIGATION_TIMEOUT);
   const warehouse = warehouseItems.at(-1);
-  // Some workbench versions open the second-level menu on hover, while
-  // others also require a click. Start with hover, then retry the visible
-  // menu item before clicking the parent again (a second click can close a
-  // toggle menu in some accounts).
+  // 部分工作台悬停即可展开二级菜单，另一些还需点击；先悬停并重试可见菜单，再点父级，避免重复点击把菜单收起。
+  /** 悬停并点击匹配目标名称的可见菜单项。
+   * 参数：无；使用外层 page 和 label。
+   */
   const clickVisibleMenuText = async () => {
     const candidates = await visibleTextLocatorsAcrossFrames(page, label);
     for (const candidate of candidates.reverse()) {
@@ -406,6 +525,9 @@ const openOtherOutboundMenuItem = async (page, label = "其他出库单") => {
     }
     return false;
   };
+  /** 在出库菜单容器中尝试直接链接及路由入口。
+   * 参数：无；使用外层 page 和 label。
+   */
   const clickVisibleMenuLink = async () => {
     for (const frame of page.frames().reverse()) {
       const menu = frame.locator('#storage\\/otherOutbound_menu:visible').last();
@@ -438,6 +560,9 @@ const openOtherOutboundMenuItem = async (page, label = "其他出库单") => {
   }
   throw new Error(`仓库菜单已打开，但找不到“${label}”入口`);
 };
+/** 复用已有列表，或通过菜单与历史单据入口打开列表。
+ * 参数：currentPage：当前业务页面。
+ */
 const openOtherOutboundList = async currentPage => {
   const existing = await currentOtherOutboundListFrame(currentPage);
   if (existing) {
@@ -456,10 +581,7 @@ const openOtherOutboundList = async currentPage => {
   await page.mouse.move(800, 80);
   const listFrame = await waitForOtherOutboundListFrame(page);
   if (listFrame) return listFrame;
-  // In the current tenant, clicking “其他出库单” opens the blank entry form
-  // (initOi), while the searchable history is opened by its “历史单据” button.
-  // Do not treat the entry form as a failed list load; follow the page's own
-  // navigation to the actual initOiList view.
+  // 当前租户的“其他出库单”先打开空白录入表单（initOi），需点“历史单据”进入可查询列表（initOiList）；应沿页面导航进入，不能将录入表单误判为列表加载失败。
   log("“其他出库单”已打开新增表单，准备点击“历史单据”进入记录列表");
   const historyFromForm = await clickOtherOutboundHistoryWithRetry(page);
   if (historyFromForm) {
@@ -470,6 +592,9 @@ const openOtherOutboundList = async currentPage => {
   return listFrame;
 };
 
+/** 更新日期控件并派发输入、变更和失焦事件。
+ * 参数：input：日期输入框定位器；value：待填写日期。
+ */
 const applyOutboundDate = async (input, value) => {
   await input.evaluate((element, nextValue) => {
     element.value = nextValue;
@@ -479,6 +604,9 @@ const applyOutboundDate = async (input, value) => {
   }, value);
 };
 
+/** 按请求日期查询备注，返回备注完整匹配的可见出库行。
+ * 参数：listFrame：历史列表框架；remark：目标备注文本。
+ */
 const findExactOutboundRows = async (listFrame, remark) => {
   await applyOutboundDate(listFrame.locator(".quick-datepicker-start"), request.queryDateFrom);
   await applyOutboundDate(listFrame.locator(".quick-datepicker-end"), request.queryDateTo);
@@ -513,6 +641,9 @@ let loginSubmittedAt = null;
 let securityChallengeDetected = false;
 let traceStarted = false;
 let diagnosticsRunDir = "";
+/** 验证网址使用 HTTP 协议且属于金蝶域名。
+ * 参数：rawURL：待检查网址。
+ */
 const isInventoryDomainURL = rawURL => {
   try {
     const parsed = new URL(rawURL);
@@ -523,6 +654,9 @@ const isInventoryDomainURL = rawURL => {
     return false;
   }
 };
+/** 识别登录、退出或全球站入口，解析失败视为入口。
+ * 参数：rawURL：待检查网址。
+ */
 const isInventoryLoginOrGlobalURL = rawURL => {
   try {
     const parsed = new URL(rawURL);
@@ -534,12 +668,21 @@ const isInventoryLoginOrGlobalURL = rawURL => {
     return true;
   }
 };
+/** 判断网址属于金蝶业务范围且不是登录或全球站入口。
+ * 参数：url：待检查网址。
+ */
 const isInventoryWorkbenchURL = url =>
   isInventoryDomainURL(url) && !isInventoryLoginOrGlobalURL(url);
+/** 检查候选页面是否属于库存工作台范围。
+ * 参数：candidate：浏览器候选页面。
+ */
 const isInventoryPage = candidate => {
   const url = candidate.url();
   return isInventoryWorkbenchURL(url);
 };
+/** 识别金蝶服务工作台入口地址。
+ * 参数：rawURL：待检查网址。
+ */
 const isServiceWorkbenchURL = rawURL => {
   try {
     const parsed = new URL(rawURL);
@@ -549,6 +692,9 @@ const isServiceWorkbenchURL = rawURL => {
     return false;
   }
 };
+/** 必要时关闭遮挡弹窗并进入库存业务系统，验证业务菜单就绪。
+ * 参数：currentPage：当前金蝶页面。
+ */
 const ensureInventoryBusinessWorkbench = async currentPage => {
   page = currentPage;
   if (!isServiceWorkbenchURL(page.url())) return page;
@@ -586,6 +732,9 @@ const ensureInventoryBusinessWorkbench = async currentPage => {
   log("已从服务工作台进入库存业务系统");
   return page;
 };
+/** 连接现有浏览器并优先复用已有出库列表或表单标签页。
+ * 参数：endpoint：Chrome 调试连接地址。
+ */
 const attachToExistingInventoryChrome = async endpoint => {
   try {
     const browser = await chromium.connectOverCDP(endpoint);
@@ -593,10 +742,8 @@ const attachToExistingInventoryChrome = async endpoint => {
     const candidates = browser.contexts().flatMap(browserContext => browserContext.pages());
     const inventoryPages = candidates.filter(candidate => isInventoryPage(candidate));
     let existingPage = null;
-    if (new Set(["outbound", "findOutbound"]).has(request.action)) {
-      // Prefer the tab that already contains the outbound list. CDP can expose
-      // several authenticated workbench tabs, and choosing the first one can
-      // attach to a generic shell while the user is looking at another tab.
+    if (new Set(["outbound", "findOutbound", "verifyOutbound"]).has(request.action)) {
+      // 优先复用已有出库列表的标签页；调试连接可能返回多个已登录标签页，首个可能只是通用外壳，并非用户正在查看的页面。
       for (const candidate of inventoryPages) {
         if (await currentOtherOutboundListFrame(candidate) ||
             await currentOtherOutboundFormFrame(candidate)) {
@@ -605,15 +752,11 @@ const attachToExistingInventoryChrome = async endpoint => {
         }
       }
     }
-    // The service portal is an entry page, not the business workbench. Prefer
-    // an already-entered tenant page for every action; if it is the only page,
-    // ensureInventoryBusinessWorkbench() will click “进入使用” below.
+    // 服务门户仅是入口，优先选择已进入租户的业务页；若只剩门户页，由 ensureInventoryBusinessWorkbench() 点击“进入使用”。
     existingPage ||= inventoryPages.find(candidate => !isServiceWorkbenchURL(candidate.url())) ||
       inventoryPages[0] || null;
     if (!existingPage) {
-      // Playwright's Browser has close(), not Puppeteer's disconnect(). For a
-      // browser connected over CDP, close() disposes the Playwright connection
-      // and leaves the user's Chrome process running.
+      // Playwright 的 Browser 提供 close() 而不是 Puppeteer 的 disconnect()；调试连接下 close() 仅释放连接，保留用户 Chrome 进程。
       await browser.close();
       return false;
     }
@@ -627,6 +770,9 @@ const attachToExistingInventoryChrome = async endpoint => {
   }
 };
 
+/** 通过浏览器级调试命令关闭库存专用 Chrome。
+ * 参数：endpoint：Chrome 调试连接地址。
+ */
 const closeInventoryChrome = async endpoint => {
   try {
     const browser = await chromium.connectOverCDP(endpoint);
@@ -638,9 +784,7 @@ const closeInventoryChrome = async endpoint => {
   }
 };
 
-// Browser.close() on a Playwright CDP connection only disconnects Playwright.
-// Normal App termination uses the browser-level CDP command to close the
-// dedicated Chrome itself.
+// Playwright 调试连接上的 Browser.close() 仅断开连接；App 正常退出时使用浏览器级调试命令关闭专用 Chrome。
 if (request.action === "closeChrome") {
   const endpoint = request.cdpEndpoint || "http://127.0.0.1:9222";
   const closed = await closeInventoryChrome(endpoint);
@@ -777,9 +921,7 @@ try {
       await password.press("Meta+A");
       await password.pressSequentially(request.password, { delay: 30 });
     });
-    // JDY's login form only re-runs its client-side validation after focus
-    // moves back through both fields. Preserve the verified user workflow:
-    // password -> username -> password.
+    // 金蝶登录页在焦点重新经过两个输入框后才重新校验；保留已验证的顺序：密码框、用户名框、密码框。
     await timed("点击用户名输入框触发登录校验", () => username.click());
     await timed("再次点击密码输入框完成登录校验", () => password.click());
     const agreements = loginScope.locator('#reg_agreement, #agree-protocol');
@@ -796,9 +938,7 @@ try {
     }
     const login = loginScope.locator('button:visible').filter({ hasText: /^登录$/ }).first()
       .or(loginScope.locator('input[type="button"][value="登录"]:visible').first());
-    // Scope the challenge listener to this exact submit. A permanent page
-    // response listener can consume an older ajaxChecking response and report
-    // a negative response time or a challenge that belongs to a prior login.
+    // 验证挑战监听仅绑定本次提交；常驻响应监听可能消费旧的 ajaxChecking 响应，产生负耗时或误报前一次登录的挑战。
     const loginCheckPromise = page.waitForResponse(
       response => response.url().includes("/commonservice/ajaxChecking.do") &&
         response.request().method() === "POST",
@@ -918,8 +1058,7 @@ try {
     }
     throw new Error("库存系统未显示“进入使用”，页面可能尚未加载完成");
   }
-  // Some workbench notices are injected after the initial page-ready check.
-  // Recheck immediately before entering so their mask cannot intercept the click.
+  // 部分工作台公告在首次就绪检查之后注入；进入业务前再次检查，避免遮罩拦截点击。
   const lateModalWaitStartedAt = performance.now();
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const lateModal = page.locator(".kd-modal-container-show:visible").first();
@@ -1014,6 +1153,9 @@ try {
         .then(nextDownload => ({ download: nextDownload }))
         .catch(error => ({ error }));
       let stopNoDataPolling = false;
+      /** 等待商品导出页面出现无数据提示，作为下载等待的替代结果。
+       * 参数：无；使用当前页面和导出状态。
+       */
       const noDataPromise = (async () => {
         for (let attempt = 0; attempt < DOWNLOAD_TIMEOUT / 250; attempt += 1) {
           if (stopNoDataPolling) return { stopped: true };
@@ -1049,6 +1191,39 @@ try {
     await download.saveAs(request.downloadPath);
     log("商品资料下载文件已保存");
     process.stdout.write(JSON.stringify({ ok: true, downloadPath: request.downloadPath }));
+  } else if (request.action === "verifyOutbound") {
+    const listFrame = await openOtherOutboundList(page);
+    const matches = await findExactOutboundRows(listFrame, request.orderName);
+    if (matches.length !== 1) {
+      throw new Error(`备注“${request.orderName}”找到 ${matches.length} 张单据；请在库存系统核对后重新检查，未修改库存`);
+    }
+    const text = await matches[0].innerText();
+    const number = text.match(/QTCK\d+/i)?.[0]?.toUpperCase() || "";
+    if (!number || (request.knownDocumentNumber && request.knownDocumentNumber !== number)) {
+      throw new Error("单据编号与操作记录不一致，未恢复本地记录");
+    }
+    await matches[0].dblclick();
+    const frame = await waitForVisibleFrame(page, async item => {
+      if (!(await isOtherOutboundFormFrame(item))) return false;
+      const shownNumber = normalizeGridText(await item.locator("#number:visible").textContent().catch(() => ""));
+      if (shownNumber.toUpperCase() !== number) return false;
+      const labels = await item.locator("thead:visible th").allTextContents();
+      return labels.some(label => /^\*?数量$/.test(label.replace(/\s+/g, "")));
+    });
+    if (!frame) throw new Error("未能读取对应单据的编号和数量列，页面可能尚未加载完成；请打开库存系统检查后重试");
+    const headers = frame.locator("thead:visible th");
+    const labels = (await headers.allTextContents()).map(value => value.replace(/\s+/g, ""));
+    const quantityIndex = labels.findIndex(value => /^\*?数量$/.test(value));
+    if (quantityIndex < 0) throw new Error("未能识别单据页面的数量列，自动核对已停止；请打开库存系统检查单据后重试");
+    const quantityColumn = await headers.nth(quantityIndex).getAttribute("id");
+    if (!quantityColumn) throw new Error("单据数量列无法识别");
+    try {
+      await assertOutboundFormMatchesRequest(frame, request.items, quantityColumn);
+    } catch (error) {
+      throw new Error(String(error.message).replaceAll("保存前", "核对时").replaceAll("已停止保存", "未修改库存或本地记录"));
+    }
+    process.stdout.write(JSON.stringify({ok: true, verified: true, remark: request.orderName,
+      documentNumber: number, url: page.url()}));
   } else if (request.action === "findOutbound") {
     const listFrame = await openOtherOutboundList(page);
     const startDate = listFrame.locator(".quick-datepicker-start");
@@ -1056,6 +1231,9 @@ try {
     if (await startDate.count() !== 1 || await endDate.count() !== 1) {
       throw new Error("无法唯一定位其他出库单查询日期范围");
     }
+    /** 更新查询日期并派发事件使页面接收新值。
+     * 参数：input：日期输入框定位器；value：待填写日期。
+     */
     const applyDate = async (input, value) => {
       await input.evaluate((element, nextValue) => {
         element.value = nextValue;
@@ -1091,9 +1269,7 @@ try {
     const warehouseItems = await waitForVisibleLeftNavigationItem(page, "仓库");
     await warehouseItems[0].click({ force: true });
     await page.waitForTimeout(400);
-    // The current workbench groups inventory reports under a second-level
-    // "仓库报表" entry. Older accounts expose the balance report directly,
-    // so keep the direct lookup first and expand the group only when needed.
+    // 当前工作台把库存报表放在“仓库报表”二级入口下；旧账户直接显示余额表，因此先尝试直接入口，仅在需要时展开分组。
     let openedBalance = await clickVisibleTextAcrossFrames(page, "商品库存余额表");
     if (!openedBalance) {
       const reportGroup = await firstVisible(page.getByText("仓库报表", { exact: true }));
@@ -1255,11 +1431,7 @@ try {
           if (!formFrame) throw new Error(`旧出库单 ${existingDocumentNumber} 编辑表单未加载完成`);
           log(`旧出库单 ${existingDocumentNumber} 已通过编辑按钮进入修改状态`);
         } else {
-          // The current tenant opens historical documents directly in an edit
-          // form. Save remains disabled until a cell actually changes, so its
-          // initial disabled state is not evidence that the document is
-          // read-only. Continue and let the real cell editors prove whether
-          // the form can be modified.
+          // 当前租户直接以编辑表单打开历史单据，实际改单元格前保存按钮保持禁用；初始禁用不代表只读，应由真实单元格编辑器确认是否可改。
           log(`旧出库单 ${existingDocumentNumber} 未显示独立编辑按钮，按直接编辑表单处理`);
         }
         isUpdate = true;
@@ -1414,9 +1586,7 @@ try {
       await quantityCell.click();
       const quantityEditor = formFrame.locator('input[name="qty"]:visible');
       await quantityEditor.waitFor({ state: "visible", timeout: 5000 });
-      // Use the normal input path so the inventory page receives the
-      // input/change events that mark the document dirty. Directly assigning
-      // input.value can leave Save unaware of the changed quantity.
+      // 通过正常输入路径触发 input/change 事件，使页面标记单据已修改；直接赋值 input.value 可能使保存逻辑无法感知数量变化。
       await quantityEditor.fill(String(item.quantity));
       await quantityEditor.press("Enter");
       await page.waitForTimeout(300);
@@ -1594,8 +1764,7 @@ try {
   process.exitCode = 1;
 } finally {
   if (traceStarted) await context.tracing.stop().catch(() => {});
-  // This Browser came from connectOverCDP. Playwright's close() disconnects
-  // its client connection for this case; it does not quit the user's Chrome.
+  // 此 Browser 来自 connectOverCDP；close() 仅断开客户端连接，不退出用户 Chrome。
   if (remoteBrowser) await remoteBrowser.close();
   else if (context && (!keepBrowserOpenOnExit || temporaryProfile)) await context.close();
   if (typeof temporaryProfile === "string" && temporaryProfile) {

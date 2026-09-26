@@ -1,4 +1,5 @@
 #!/bin/bash
+# 选择 Node 环境并运行 AIMES 表格离线回归；无位置参数，可用 TRAVELER_NODE 指定运行程序。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

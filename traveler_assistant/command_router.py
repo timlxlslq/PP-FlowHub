@@ -1,9 +1,7 @@
-"""Deterministic parsing for the small set of common assistant commands.
+"""使用确定规则解析少量常见助手命令。
 
-The router converts user text into a typed :class:`LocalCommand`.  It is
-deliberately narrower than a natural-language model: a command is returned
-only when the required business arguments can be recognized locally.  The
-returned action is still checked by the gateway before any write occurs.
+仅在本地能识别必要业务参数时，才把用户文本转换为 LocalCommand。
+识别范围小于自然语言模型；返回的动作在写入前仍须经过网关检查。
 """
 
 from __future__ import annotations
@@ -39,8 +37,9 @@ class LocalCommand:
 
 
 def normalize_spoken_order_ids(text: str) -> str:
-    """Canonicalize digit-by-digit speech transcripts such as ``PP 0零6八``."""
+    """标准化语音中的订单号；text 为识别文本，例如把 PP 0零6八 转成 PP0068。"""
     def replace(match: re.Match[str]) -> str:
+        """拼接标准化的前缀、数字和分单号；match 为语音订单号的匹配结果。"""
         prefix = re.sub(r"\s+", "", match.group("prefix")).upper()
         number = re.sub(r"\s+", "", match.group("number")).translate(SPOKEN_DIGITS)
         suffix = match.group("suffix")
@@ -53,16 +52,16 @@ def normalize_spoken_order_ids(text: str) -> str:
 
 
 def normalize_command_text(text: str) -> str:
+    """标准化命令文本 text，统一语音订单号、移除空白及常见标点并转为小写。"""
     text = normalize_spoken_order_ids(text)
     return re.sub(r"[\s，。！？,!.?]+", "", text).lower()
 
 
 def parse_local_command(text: str) -> LocalCommand | None:
-    """Parse a supported common command, or return ``None`` for ambiguity.
+    """从用户文本 text 解析受支持的命令，无法确定动作或必要参数时返回 None。
 
-    Returning ``None`` is an intentional handoff to the learned-command or
-    Agent path; it is not itself a failure.  Keep this function free of file,
-    database, and external-system side effects so it remains cheap to test.
+    返回 None 表示交给已学习命令或 Agent 继续处理，不代表执行失败。
+    此函数不读写文件、数据库或外部系统，便于独立测试。
     """
     normalized = normalize_command_text(text)
     if not normalized:

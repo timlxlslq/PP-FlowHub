@@ -1,4 +1,4 @@
-"""Legacy Chinese AICNC reports share identity and quantity safety contracts."""
+"""历史中文 AICNC 报告同样遵守身份和数量安全约束。"""
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +10,8 @@ from traveler_assistant.order_workflow import _choose_fittings
 
 
 class LegacyFittingsTests(unittest.TestCase):
+    # 验证不同历史版本的五金报告均可被发现并按相应结构解析。
+    # self：当前测试用例或测试替身实例。
     def test_discovery_and_parsing_across_report_versions(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

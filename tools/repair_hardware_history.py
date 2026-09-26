@@ -19,12 +19,20 @@ ORDERS = ('PP0072', 'PP0057')
 
 
 def records(connection, sql, parameters=()):
+    """执行参数化查询并按列名组装字典记录。
+
+    参数：connection：业务数据库连接；sql：待执行的 SQL 查询；parameters：查询占位符对应的参数值。
+    """
     cursor = connection.execute(sql, parameters)
     columns = [item[0] for item in cursor.description]
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
 def quantities(rows):
+    """按大写商品代码汇总五金数量。
+
+    参数：rows：含商品代码及数量的记录列表。
+    """
     result = Counter()
     for row in rows:
         result[str(row.get('product_code', row.get('productCode', ''))).upper()] += float(row['quantity'])
@@ -32,6 +40,10 @@ def quantities(rows):
 
 
 def plan_repair(connection, reference):
+    """核对工厂单、来源和已成功出库单，生成保留人工五金的恢复计划。
+
+    参数：connection：业务数据库连接；reference：只读历史备份连接。
+    """
     factories = records(connection, "select * from factory_orders where order_id in (?,?) and aimes_status='active' order by factory_order", ORDERS)
     if Counter(row['order_id'] for row in factories) != Counter({'PP0072': 5, 'PP0057': 2}):
         raise ValueError('当前工厂单范围发生变化，停止恢复')
@@ -49,7 +61,7 @@ def plan_repair(connection, reference):
         else:
             desired = [row for row in records(reference,
                 "select * from hardware_items where factory_order=? and source_type='aicnc' order by id", (number,))
-                if row.get('active', 1) == 1]  # Historical backups may still have the removed column.
+                if row.get('active', 1) == 1]  # 历史备份可能仍包含现已删除的字段。
             current_auto = [row for row in before if row['source_type'] == 'aicnc']
             if current_auto and quantities(current_auto) != quantities(desired):
                 raise ValueError(f'{number} 当前自动五金已有其他变化，停止恢复')
@@ -72,11 +84,19 @@ def plan_repair(connection, reference):
 
 
 def digest_documents(connection):
+    """计算出库单及工厂单关联记录摘要，用于检测意外修改。
+
+    参数：connection：业务数据库连接。
+    """
     tables = ['outbound_documents', 'outbound_document_factories']
     return hashlib.sha256(json.dumps({table: records(connection, 'select * from '+table+' order by id') for table in tables}, sort_keys=True).encode()).hexdigest()
 
 
 def main():
+    """解析修复选项并生成计划；明确应用时备份、事务修复并输出审计。
+
+    参数：无；使用脚本配置和命令行选项。
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--database', type=Path, default=Path('data/workflow.sqlite3'))
     parser.add_argument('--reference', type=Path, default=Path('data/database-backups/workflow-2026-08-30.sqlite3'))

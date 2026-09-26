@@ -1,5 +1,17 @@
 #!/bin/bash
+# 构建并打包未签名 App；默认递增末位版本，--minor 用于新增或较大功能。
 set -euo pipefail
+
+if [[ "$#" -gt 1 ]]; then
+  echo "Usage: $0 [--patch|--minor]" >&2
+  exit 2
+fi
+case "${1:---patch}" in
+  --patch) VERSION_BUMP=patch ;;
+  --minor) VERSION_BUMP=minor ;;
+  --help|-h) echo "Usage: $0 [--patch|--minor] (default: --patch)"; exit 0 ;;
+  *) echo "Usage: $0 [--patch|--minor]" >&2; exit 2 ;;
+esac
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_ROOT="${PP_FLOWHUB_BUILD_ROOT:-/tmp/pp-flowhub-build}"
@@ -26,10 +38,8 @@ if [[ "$BUNDLE_IDENTIFIER" != "$EXPECTED_BUNDLE_IDENTIFIER" ]]; then
   exit 2
 fi
 
-# Signing intentionally happens only in scripts/install-app, which must be
-# run from the user's normal Aqua Terminal session. This script is safe to run
-# in the Codex Background Security Session: it never reads the keychain and it
-# never uses ad-hoc signing.
+# 签名只由普通 macOS Terminal/Aqua 会话中的 install-app 执行。
+# 本构建脚本可在 Codex 后台安全会话运行，不读取钥匙串，也不使用临时签名。
 
 if [[ ! -x "$PYTHON_ENV/bin/python3" ]]; then
   echo "Missing Python environment: $PYTHON_ENV" >&2
@@ -71,10 +81,8 @@ for package in playwright playwright-core; do
   fi
 done
 
-# The App copies only the executable, so a Node binary with Homebrew or other
-# non-system dynamic-library dependencies would be broken after installation.
-# Reject it before Swift compilation instead of silently selecting another
-# runtime or producing an App that fails at launch.
+# App 只复制 Node 可执行文件；若依赖 Homebrew 等非系统动态库，安装后会失效。
+# 在 Swift 编译前明确拒绝，不静默更换运行环境，也不生成无法启动的 App。
 if ! NODE_ARCHS="$(/usr/bin/lipo -archs "$NODE_BIN" 2>/dev/null)"; then
   echo "Unable to inspect Node architecture: $NODE_BIN" >&2
   exit 2
@@ -96,9 +104,7 @@ mkdir -p "$BUILD_ROOT"
 mkdir -p "$CONTENTS/MacOS" "$RESOURCES"
 MODULE_CACHE="/tmp/pp-flowhub-module-cache"
 mkdir -p "$MODULE_CACHE"
-# Swift's linker defaults to an ad-hoc linker signature on this toolchain.
-# Disable that default so the Codex build is genuinely unsigned; the Aqua
-# Terminal install step adds the Apple Development signature later.
+# 关闭当前 Swift 链接器默认的临时签名，使产物保持未签名；后续 Aqua 安装步骤添加开发者签名。
 /usr/bin/xcrun --sdk macosx swiftc -target "$SWIFT_TARGET" -Xlinker -no_adhoc_codesign -module-cache-path "$MODULE_CACHE" -Xcc -fmodules-cache-path="$MODULE_CACHE" "$ROOT/tools/keychain_read.swift" -o "$STAGING_DIR/keychain-read" -framework Foundation -framework Security
 /usr/bin/xcrun --sdk macosx swiftc -target "$SWIFT_TARGET" -Xlinker -no_adhoc_codesign -module-cache-path "$MODULE_CACHE" -Xcc -fmodules-cache-path="$MODULE_CACHE" -parse-as-library "$ROOT/macos/OperationLog.swift" "$ROOT/macos/TravelerAssistant.swift" "$ROOT/macos/AssistantView.swift" "$ROOT/macos/OrderDashboardView.swift" -o "$CONTENTS/MacOS/PPFlowHub" -framework SwiftUI -framework AppKit -framework AVFoundation -framework Speech -framework Security
 cp "$INFO_PLIST" "$CONTENTS/Info.plist"
@@ -117,7 +123,7 @@ cp "$NODE_BIN" "$RESOURCES/bin/node"
 cp "$STAGING_DIR/keychain-read" "$RESOURCES/bin/keychain-read"
 cp -RL "$NODE_MODULES/playwright" "$RESOURCES/node_modules/playwright"
 cp -RL "$NODE_MODULES/playwright-core" "$RESOURCES/node_modules/playwright-core"
-# Homebrew's Node runtime may be read-only; xattr cleanup needs owner write.
+# Homebrew 的 Node 文件可能只读；清理扩展属性前需要所有者写权限。
 chmod u+w,a+x "$RESOURCES/bin/node"
 chmod +x "$RESOURCES/bin/keychain-read"
 chmod +x "$RESOURCES/runtime/python/bin/python3"
@@ -153,8 +159,17 @@ if [[ ! -x "$CONTENTS/MacOS/PPFlowHub" ]]; then
   echo "Staged App executable path changed unexpectedly: $CONTENTS/MacOS/PPFlowHub" >&2
   exit 2
 fi
+# 所有打包检查通过后才分配版本；参考现有产物和安装包，避免旧源码使版本倒退。
+# 先保存版本再发布产物；发布失败可以跳号，但不会复用已分配的版本。
+NEXT_VERSION="$("$PYTHON_ENV/bin/python3" "$ROOT/tools/app_version.py" --bump "$VERSION_BUMP" \
+  "$INFO_PLIST" "$OUTPUT_APP/Contents/Info.plist" "/Applications/PP FlowHub.app/Contents/Info.plist")"
+for plist in "$CONTENTS/Info.plist" "$INFO_PLIST"; do
+  /usr/bin/plutil -replace CFBundleShortVersionString -string "$NEXT_VERSION" "$plist"
+  /usr/bin/plutil -replace CFBundleVersion -string "$NEXT_VERSION" "$plist"
+done
 rm -rf "$OUTPUT_APP"
 /usr/bin/ditto --noextattr --noqtn "$APP" "$OUTPUT_APP"
+echo "App version: $NEXT_VERSION"
 echo "Unsigned App bundle assembled for Aqua Terminal signing: $OUTPUT_APP"
 echo "Reminder: a new App was built. Run ./scripts/install-app from a normal macOS Terminal/Aqua session to sign and install it."
 echo "$OUTPUT_APP"

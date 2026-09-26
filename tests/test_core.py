@@ -21,6 +21,8 @@ from traveler_assistant.core import (
 
 
 class CoreTests(unittest.TestCase):
+    # 验证 AIMES 失败解析忽略中间进度，优先采用最终错误。
+    # self：当前测试用例或测试替身实例。
     def test_aimes_failure_parser_ignores_progress_and_prefers_final_error(self):
         stderr = "\n".join([
             json.dumps({"event": "progress", "message": "登录 AIMES 完成", "stage": "login"}, ensure_ascii=False),
@@ -30,14 +32,20 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(_aimes_failure_code(_extract_aimes_failure(stderr)), "aimes_table_schema")
         self.assertNotEqual(_aimes_failure_code(_extract_aimes_failure(stderr)), "aimes_credentials")
 
+    # 验证表格未就绪使用独立错误分类。
+    # self：当前测试用例或测试替身实例。
     def test_aimes_table_not_ready_has_distinct_classification(self):
         error = "AIMES_TABLE_NOT_READY：AIMES 工厂订单表尚未加载完成；表头=；行数=0；可见加载状态=否"
         self.assertEqual(_aimes_failure_code(error), "aimes_table_not_ready")
 
+    # 验证表格缺列仍归入结构错误分类。
+    # self：当前测试用例或测试替身实例。
     def test_aimes_table_schema_still_has_schema_classification(self):
         error = "AIMES 工厂订单表缺少必要列；当前表头：订单号 | 工厂名称"
         self.assertEqual(_aimes_failure_code(error), "aimes_table_schema")
 
+    # 验证 AIMES 最终错误写入日志时脱敏凭据和网址。
+    # self：当前测试用例或测试替身实例。
     def test_aimes_failure_logs_final_error_with_credentials_and_url_redacted(self):
         username = 'qa"account'
         password = 'test fixture "password"'
@@ -52,6 +60,12 @@ class CoreTests(unittest.TestCase):
             f"AIMES 自动查询失败：AIMES 工厂订单表缺少必要列；payload={final_payload}；当前页面=https://aimes.example/oms/factoryOrder?password={password}#fragment",
         ])
 
+        # 逐行发送模拟进度后抛出子进程失败，用于验证最终错误解析。
+        # command：模拟执行的外部命令。
+        # input_text：为兼容真实进程接口保留的标准输入文本。
+        # env：为兼容真实进程接口保留的环境变量。
+        # timeout：模拟等待超时值或异常。
+        # on_stderr_line：接收逐行标准错误或进度的回调。
         def fail_with_progress(command, *, input_text, env, timeout, on_stderr_line):
             for line in stderr.splitlines():
                 on_stderr_line(line)
@@ -89,6 +103,8 @@ class CoreTests(unittest.TestCase):
             self.assertNotIn("?token=", content)
             self.assertNotIn("#fragment", content)
 
+    # 验证真实凭据错误保持凭据错误分类。
+    # self：当前测试用例或测试替身实例。
     def test_aimes_real_credential_error_keeps_credential_classification(self):
         stderr = "\n".join([
             json.dumps({"event": "progress", "message": "登录 AIMES 完成", "stage": "login"}, ensure_ascii=False),
@@ -114,6 +130,8 @@ class CoreTests(unittest.TestCase):
             failure = next(row for row in rows if row["event"] == "backend.aimes.failed")
             self.assertEqual(failure["details"]["code"], "aimes_credentials")
 
+    # 验证关闭操作日志后不写入 AIMES 失败日志。
+    # self：当前测试用例或测试替身实例。
     def test_aimes_failure_log_respects_disabled_operation_logging(self):
         stderr = "AIMES 自动查询失败：账号或密码错误\n"
         with tempfile.TemporaryDirectory() as temp:
@@ -136,6 +154,8 @@ class CoreTests(unittest.TestCase):
                 with self.assertRaises(RuleError):
                     lookup_aimes_names(config, ["F100"])
             self.assertFalse(log_path.exists())
+    # 验证 AIMES 批量读取默认最近 50 行，精确查询不受此限制。
+    # self：当前测试用例或测试替身实例。
     def test_aimes_bulk_defaults_to_50_but_exact_lookup_has_no_bulk_limit(self):
         config = Config()
         with patch(
@@ -152,10 +172,14 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(lookup_aimes_names(config, ["F100"]), {"F100": "PP0035-KITCHEN"})
             self.assertEqual(lookup.call_args.kwargs["recent_limit"], 0)
 
+    # 验证名称标准化移除约定差异并保持可比较形式。
+    # self：当前测试用例或测试替身实例。
     def test_name_normalization(self):
         self.assertEqual(_normalize_name("pp0047-kitchen"), "PP0047KITCHEN")
         self.assertEqual(_normalize_name("PP0047 kitchen"), "PP0047KITCHEN")
 
+    # 验证 AIMES 精确核验把查无记录保留为独立结果。
+    # self：当前测试用例或测试替身实例。
     def test_exact_aimes_verification_preserves_missing_rows_as_a_distinct_result(self):
         config = Config()
         with patch(
@@ -175,6 +199,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["missing"], ["F101"])
         self.assertTrue(lookup.call_args.kwargs["verify_factory_orders"])
 
+    # 验证最近记录读取和精确核验共用一次查询会话。
+    # self：当前测试用例或测试替身实例。
     def test_recent_fetch_and_exact_verification_share_one_lookup_session(self):
         config = Config()
         with patch(
@@ -214,6 +240,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(lookup.call_args.kwargs["recent_limit"], 50)
         self.assertTrue(lookup.call_args.kwargs["verify_factory_orders"])
 
+    # 验证设置仅加载约定的运行路径及截止日期。
+    # self：当前测试用例或测试替身实例。
     def test_settings_load_only_runtime_paths_and_cutoff(self):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
@@ -230,6 +258,8 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(config.source_root, Path("/tmp/orders"))
             self.assertEqual(config.template, bundled_template)
 
+    # 验证无效截止日期被明确拒绝。
+    # self：当前测试用例或测试替身实例。
     def test_invalid_cutoff_date_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
@@ -238,6 +268,8 @@ class CoreTests(unittest.TestCase):
                 Config(state_dir=state).load_settings()
             self.assertEqual(raised.exception.code, "settings_invalid")
 
+    # 验证当前使用本地数据源时，Server 配置仍采用正式路径。
+    # self：当前测试用例或测试替身实例。
     def test_server_profile_uses_production_paths_when_active_source_is_local(self):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
@@ -255,6 +287,8 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(config.order_root, Path("/tmp/production/Order"))
             self.assertEqual(config.backup_root, Path("/tmp/production/Backups"))
 
+    # 验证可单独加载 AIMES 用户名而不读取密码。
+    # self：当前测试用例或测试替身实例。
     def test_aimes_username_is_loaded_without_loading_a_password(self):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
@@ -264,6 +298,8 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(config.aimes_username, "factory-user")
             self.assertFalse(hasattr(config, "aimes_password"))
 
+    # 验证本地配置派生的各类路径相互隔离于正式环境。
+    # self：当前测试用例或测试替身实例。
     def test_local_profile_derives_all_isolated_paths(self):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
@@ -275,6 +311,8 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(config.order_root, local / "Generated Travelers")
             self.assertEqual(config.backup_root, local / "Backups")
 
+    # 验证操作日志设置默认启用，且可从配置加载开关。
+    # self：当前测试用例或测试替身实例。
     def test_operation_log_setting_is_loaded_and_defaults_to_enabled(self):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)

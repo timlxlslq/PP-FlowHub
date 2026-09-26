@@ -13,10 +13,12 @@ from traveler_assistant.order_workflow import _factory_names, _choose_fittings
 from traveler_assistant.order_index import OrderIndexStore, preview_server_changes
 from traveler_assistant.report_read_context import report_read_session
 from traveler_assistant.streaming_process import run_with_progress
-from tests.test_order_workflow import make_fittings
+from tests.test_order_workflow import make_board, make_fittings
 
 
 class ReportSelectionTests(unittest.TestCase):
+    # 验证报告内容变化必须重选，相同内容的副本按指纹去重。
+    # self：当前测试用例或测试替身实例。
     def test_changed_choice_requires_reselection_and_identical_content_deduplicates(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -36,6 +38,8 @@ class ReportSelectionTests(unittest.TestCase):
             selected, _ = _choose_fittings(root)
             self.assertEqual(selected['F100'][0].quantity, 2)
 
+    # 验证多工厂单报告中的来源选择只影响对应工厂单。
+    # self：当前测试用例或测试替身实例。
     def test_choices_apply_per_factory_in_multiblock_files(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -52,6 +56,8 @@ class ReportSelectionTests(unittest.TestCase):
                 selected, _, _, _ = select_latest_fittings([a, b])
             self.assertEqual({f: s.items[0].quantity for f, s in selected.items()}, {'F100': 2, 'F200': 7})
 
+    # 验证归属判断优先采用数据库事实，且不触发网络读取。
+    # self：当前测试用例或测试替身实例。
     def test_database_ownership_precedes_display_prefix_and_no_network(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -68,6 +74,51 @@ class ReportSelectionTests(unittest.TestCase):
                 names, _ = _factory_names(config, root, {'F100', 'F200'}, 'PP9999')
             self.assertEqual(names, {'F100': 'Closet without order prefix'})
 
+    def test_batch_board_uses_confirmed_database_identity_without_pairing_names(self):
+        """合批表头沿用已确认身份，名称顺序及共享目录不能改变归属。"""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / 'state')
+            config.prepare_storage()
+            store = OrderIndexStore(config.workflow_database)
+            for order in ('PP9999', 'PP8888'):
+                store.upsert_order(order)
+            store.upsert_factory('F100', order_id='PP9999', factory_name='Living room', ownership_status='已确认')
+            store.upsert_factory('F200', order_id='PP8888', factory_name='Kitchen', ownership_status='已确认')
+            store.commit()
+            store.close()
+            make_board(root / 'pp-板材清单.xlsx', 'F100-PP9999,F200-PP8888', 'Kitchen,Living room')
+            with patch('traveler_assistant.order_workflow.lookup_aimes_names', side_effect=AssertionError('unexpected network')):
+                self.assertEqual(_factory_names(config, root, {'F100', 'F200'}, 'PP9999')[0], {'F100': 'Living room'})
+                self.assertEqual(_factory_names(config, root, {'F100', 'F200'}, 'PP8888')[0], {'F200': 'Kitchen'})
+
+    def test_batch_board_rejects_unknown_conflicting_deleted_and_malformed_identity(self):
+        """已有订单身份不能掩盖新表头中的未知、冲突、失效或缺失身份。"""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = Config(state_dir=root / 'state')
+            config.prepare_storage()
+            store = OrderIndexStore(config.workflow_database)
+            store.upsert_order('PP9999')
+            store.upsert_factory('F100', order_id='PP9999', factory_name='Living room', ownership_status='已确认')
+            store.upsert_factory('F200', order_id='PP9999', factory_name='Old kitchen', ownership_status='已确认')
+            store.connection.execute("update factory_orders set aimes_status='deleted' where factory_order='F200'")
+            store.commit()
+            store.close()
+            path = root / 'pp-板材清单.xlsx'
+            for identity in ('F100-PP9999,F300-PP9999', 'F100-PP8888', 'F100-PP9999,F200-PP9999', 'F100-PP9999,garbage', ''):
+                with self.subTest(identity=identity):
+                    make_board(path, identity, 'Living room')
+                    with self.assertRaises(RuleError) as error:
+                        _factory_names(config, root, {'F100'}, 'PP9999')
+                    self.assertEqual(error.exception.code, 'board_identity')
+            with patch('traveler_assistant.order_workflow.parse_board_identity', side_effect=RuleError('broken_report', '损坏报表')):
+                with self.assertRaises(RuleError) as error:
+                    _factory_names(config, root, {'F100'}, 'PP9999')
+                self.assertEqual(error.exception.code, 'broken_report')
+
+    # 验证请求内报告缓存返回副本，并在文件变化后重新读取。
+    # self：当前测试用例或测试替身实例。
     def test_report_cache_is_request_local_copied_and_file_change_sensitive(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'Fittingslist.xlsx'
@@ -83,12 +134,15 @@ class ReportSelectionTests(unittest.TestCase):
                 parse_fittings_groups(path)
                 self.assertEqual(context.cache_hits, 0)
 
+    # 验证子进程退出前即可收到进度，超时后子进程会被终止。
+    # self：当前测试用例或测试替身实例。
     def test_process_progress_delivered_before_exit_and_timeout_kills_child(self):
         observed = []
         started = time.monotonic()
         result = run_with_progress(
             [sys.executable, '-c', 'import sys,time; sys.stdin.read(); print("progress", file=sys.stderr, flush=True); time.sleep(.5); print("{}")'],
             input_text='{}', env=os.environ.copy(), timeout=5,
+            # 实时记录每行进度及收到它的相对耗时；line 为标准错误中的一行文本。
             on_stderr_line=lambda line: observed.append((line, time.monotonic() - started)))
         self.assertEqual(result.stdout.strip(), '{}')
         self.assertEqual(observed[0][0], 'progress')
@@ -97,13 +151,19 @@ class ReportSelectionTests(unittest.TestCase):
         with self.assertRaises(subprocess.TimeoutExpired):
             run_with_progress([sys.executable, '-c', 'import time; time.sleep(5)'],
                               input_text='', env=os.environ.copy(), timeout=.1,
-                              on_stderr_line=lambda line: None)
+                              # 实时记录每行进度及收到它的相对耗时；line 为标准错误中的一行文本。
+            on_stderr_line=lambda line: None)
 
+    # 验证 AIMES 适配器将实时进度转发到 App 的标准错误流。
+    # self：当前测试用例或测试替身实例。
     def test_aimes_adapter_forwards_live_events_to_app_stderr(self):
         import io, json, subprocess
         from contextlib import redirect_stderr
         from traveler_assistant.core import _run_aimes_lookup
         output = io.StringIO()
+        # 模拟子进程即时发送进度，再返回成功查询结果。
+        # args：转发给被模拟接口的位置参数。
+        # kwargs：转发给被模拟接口的关键字参数。
         def process(*args, **kwargs):
             kwargs['on_stderr_line'](json.dumps({'event': 'progress', 'message': '查询工厂单名称'}))
             self.assertIn('查询工厂单名称', output.getvalue())
@@ -113,6 +173,8 @@ class ReportSelectionTests(unittest.TestCase):
         self.assertEqual(result['F100'], 'PP9999')
         self.assertNotIn('test-secret', output.getvalue())
 
+    # 验证数量为零的报告仍参与来源判断，不被静默丢弃。
+    # self：当前测试用例或测试替身实例。
     def test_zero_quantity_report_is_not_silently_discarded(self):
         with tempfile.TemporaryDirectory() as temp:
             paths = [Path(temp) / 'Fittingslist-a.xlsx', Path(temp) / 'Fittingslist-b.xlsx']
@@ -122,6 +184,8 @@ class ReportSelectionTests(unittest.TestCase):
                 select_latest_fittings(paths)
             self.assertEqual(error.exception.code, 'fittings_selection_required')
 
+    # 验证已确认来源在内容变化前保持锁定，保留选择可跨重启生效。
+    # self：当前测试用例或测试替身实例。
     def test_confirmed_source_is_fixed_until_content_changes_and_keep_survives_restart(self):
         from tests.test_order_workflow import make_materials, make_product_catalog
         from traveler_assistant.order_index import confirm_server_material_preview_memory
@@ -149,7 +213,7 @@ class ReportSelectionTests(unittest.TestCase):
                 confirm_server_material_preview_memory(config, payload, confirm_write=True)
                 saved = load_source_decisions(config)['F100']
                 self.assertEqual(saved['selected']['path'], str(a.resolve()))
-                # Even an attempted choice of the other existing report cannot change it.
+                # 即使尝试选择另一份已有报告，也不能改变锁定的来源。
                 other = next(c for c in conflict['candidates'] if c['path'] == str(b.resolve()))
                 stable = preview_server_changes(config, [folder], hardware_source_choices={'F100': other['id']})
                 self.assertNotIn('hardware_source_selection', stable)
@@ -160,7 +224,7 @@ class ReportSelectionTests(unittest.TestCase):
                 keep = next(c for c in changed['candidates'] if c['id'].startswith('keep:'))
                 kept = preview_server_changes(config, [folder], hardware_source_choices={'F100': keep['id']})['server_write_preview']
                 confirm_server_material_preview_memory(config, kept, confirm_write=True)
-                # New request/new Config stands in for an App restart.
+                # 使用新请求和新配置模拟 App 重启。
                 reopened = Config(state_dir=config.state_dir, source_root=config.source_root)
                 self.assertNotIn('hardware_source_selection', preview_server_changes(reopened, [folder]))
                 connection = sqlite3.connect(config.workflow_database)
@@ -177,3 +241,16 @@ class ReportSelectionTests(unittest.TestCase):
                 connection.close()
                 with self.assertRaises(RuleError):
                     confirm_server_material_preview_memory(config, payload, confirm_write=True)
+
+    # 验证 macOS 大小写不敏感文件系统下，已确认来源路径大小写变化仍能恢复五金事实。
+    # self：当前测试用例或测试替身实例。
+    def test_confirmed_source_reuses_same_file_when_directory_case_changes(self):
+        from traveler_assistant.fittings import same_selected_fittings_source
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            report = root / 'pp0008' / 'Fittingslist.xlsx'
+            report.parent.mkdir()
+            make_fittings(report, [('F100', 2)])
+            selected, _, _, _ = select_latest_fittings([report])
+            saved_path = Path(str(report).replace('/pp0008/', '/PP0008/'))
+            self.assertTrue(same_selected_fittings_source(selected['F100'], saved_path, selected['F100'].items))

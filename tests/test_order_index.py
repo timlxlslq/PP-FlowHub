@@ -12,6 +12,7 @@ from openpyxl import load_workbook
 from traveler_assistant.core import Config, RuleError, _normalize_name
 from traveler_assistant.database import ensure_schema, server_material_identity_key
 from traveler_assistant.order_index import (
+    install_shared_workflow_connection, clear_shared_workflow_connection,
     OrderIndexStore,
     _aimes_order_fingerprint,
     _aimes_row_issue,
@@ -78,6 +79,16 @@ from traveler_assistant.inventory import InventoryMappings
 
 
 class OrderIndexTests(unittest.TestCase):
+    def start_pending_session(self, config):
+        """模拟 App 同一会话内共享检查结果，清理后普通问题不再保留。"""
+        store = OrderIndexStore(config.workflow_database)
+        install_shared_workflow_connection(config.workflow_database, store.connection)
+        self.addCleanup(store.close)
+        self.addCleanup(clear_shared_workflow_connection)
+
+
+    # 写入订单索引测试所引用的材料和五金商品记录。
+    # connection：隔离测试数据库连接。
     @staticmethod
     def _seed_sku_products(connection):
         rows = [
@@ -120,6 +131,9 @@ class OrderIndexTests(unittest.TestCase):
             ],
         )
 
+    # 在指定隔离配置的业务库中提交测试商品目录。
+    # self：当前测试用例或测试替身实例。
+    # config：隔离测试路径和运行配置。
     def _seed_config_products(self, config):
         store = OrderIndexStore(config.workflow_database)
         try:
@@ -128,6 +142,9 @@ class OrderIndexTests(unittest.TestCase):
         finally:
             store.close()
 
+    # 模拟所有待匹配五金都成功解析到测试铰链 SKU。
+    # _config：为兼容真实调用签名保留的测试配置。
+    # pairs：待解析的来源项目及来源编码配对列表。
     @staticmethod
     def _resolved_hinge_inventory(_config, pairs):
         return {
@@ -140,6 +157,10 @@ class OrderIndexTests(unittest.TestCase):
             ],
         }
 
+    # 保存订单文件夹及永久跳过策略，并记录当前 AIMES 指纹。
+    # store：隔离测试库的订单索引存储对象。
+    # order_id：目标订单编号。
+    # folder：目标测试来源文件夹。
     @staticmethod
     def _set_permanent_server_policy(store, order_id, folder):
         store.upsert_order(order_id, source_folder=str(folder))
@@ -150,8 +171,9 @@ class OrderIndexTests(unittest.TestCase):
             updated_at="2026-08-31T10:00:00",
         )
 
+    # 验证桌面上的指定代切及自有订单样本用作离线内存预览 fixture。
+    # self：当前测试用例或测试替身实例。
     def test_desktop_cs004_and_pp0072_are_offline_memory_preview_fixtures(self):
-        """The desktop copies exercise parsing only, not current Server state."""
         desktop = Path.home() / "Desktop"
         folders = [desktop / "cs004", desktop / "pp0072"]
         if not all(folder.is_dir() for folder in folders):
@@ -173,6 +195,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertIn("write_records", preview)
             self.assertFalse((config.state_dir / "server-previews").exists())
 
+    # 验证 Server 预览汇总实际变化，并排除已出货工厂单。
+    # self：当前测试用例或测试替身实例。
     def test_server_preview_summarizes_changes_and_excludes_shipped_factory_orders(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -271,7 +295,7 @@ class OrderIndexTests(unittest.TestCase):
                 [("F-VANITY", "Fixture Drawer Slide", 4.0)],
             )
             self.assertFalse(order["factories"][0]["has_existing_hardware"])
-            # A persisted zero-quantity row is a baseline; a deleted row is not.
+            # 持久保存的零数量行属于基线，已删除的行则不属于基线。
             current = OrderIndexStore(config.workflow_database)
             current.upsert_factory("F-VANITY", order_id="CS004")
             current.connection.execute(
@@ -290,6 +314,8 @@ class OrderIndexTests(unittest.TestCase):
                 self.assertEqual(len(refreshed["factories"][0]["hardware"]), 1)
             current.close()
 
+    # 验证无效预览目录直接返回路径错误，无需复制数据库。
+    # self：当前测试用例或测试替身实例。
     def test_invalid_preview_folder_reports_path_without_copying_database(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -307,6 +333,8 @@ class OrderIndexTests(unittest.TestCase):
             reports.assert_called_once_with(folder.resolve())
             connect.assert_not_called()
 
+    # 验证 Server 预览必须先确认工厂单才能写入生产事实。
+    # self：当前测试用例或测试替身实例。
     def test_server_preview_requires_factory_confirmation_before_production_write(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -383,6 +411,8 @@ class OrderIndexTests(unittest.TestCase):
             finally:
                 store.close()
 
+    # 验证校验所选 Server 文件夹不触碰其他 AIMES 订单。
+    # self：当前测试用例或测试替身实例。
     def test_selected_server_folder_validation_does_not_touch_other_aimes_orders(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -441,8 +471,9 @@ class OrderIndexTests(unittest.TestCase):
             finally:
                 store.close()
 
+    # 验证 Server 预览保留补料，并要求选择五金来源。
+    # self：当前测试用例或测试替身实例。
     def test_server_preview_preserves_recut_material_and_requires_hardware_choice(self):
-        """A recut board adds material without replacing the base hardware report."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = Config(
@@ -559,6 +590,8 @@ class OrderIndexTests(unittest.TestCase):
                 {str((base_report / "Fittingslist.xlsx").resolve())},
             )
 
+    # 验证完成映射后 Server 确认写入订单材料与工厂单五金。
+    # self：当前测试用例或测试替身实例。
     def test_server_confirmation_writes_materials_and_factory_hardware_after_mapping(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -598,6 +631,9 @@ class OrderIndexTests(unittest.TestCase):
                 code="WJ-UNMAPPED", name="Unmapped Hinge", size="Full", unit="Piece", quantity=2
             )
 
+            # 根据测试数据库中的人工映射返回五金已匹配或缺失结果。
+            # current_config：当前调用采用的隔离配置。
+            # pairs：待解析的来源项目及来源编码配对列表。
             def resolve_items(current_config, pairs):
                 mappings = InventoryMappings(current_config.workflow_database)
                 if not any(item.name == "Unmapped Hinge" for item, _ in pairs):
@@ -732,6 +768,8 @@ class OrderIndexTests(unittest.TestCase):
             )
             store.close()
 
+    # 验证代切订单的 Server 确认可对整单跳过五金。
+    # self：当前测试用例或测试替身实例。
     def test_cut_to_size_server_confirmation_can_skip_hardware_for_entire_order(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -764,12 +802,15 @@ class OrderIndexTests(unittest.TestCase):
 
             resolution_calls = 0
 
+            # 首次允许索引读取，后续预览返回未匹配五金以验证 SKU 门禁。
+            # current_config：当前调用采用的隔离配置。
+            # pairs：待解析的来源项目及来源编码配对列表。
             def unresolved(current_config, pairs):
                 nonlocal resolution_calls
                 resolution_calls += 1
                 if resolution_calls == 1:
-                    # Let the normal read-only index build complete; the
-                    # preview refresh below is the SKU gate under test.
+                    # 先允许正常的只读索引构建完成；
+                    # 随后刷新预览才是本测试校验的 SKU 门禁。
                     return {"missing": [], "ignored": [], "outbound": []}
                 return {
                     "missing": [{
@@ -827,6 +868,8 @@ class OrderIndexTests(unittest.TestCase):
                 )
             finally:
                 store.close()
+    # 验证源文件未修复前，Server 扫描阻止材料预览。
+    # self：当前测试用例或测试替身实例。
     def test_server_scan_blocks_material_preview_until_source_file_is_fixed(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -891,6 +934,8 @@ class OrderIndexTests(unittest.TestCase):
                 "PP9999",
             )
 
+    # 验证 Server 预览先校验材料，再执行房间分配。
+    # self：当前测试用例或测试替身实例。
     def test_server_preview_validates_material_before_room_allocation(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -921,6 +966,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertNotIn("请手工修正 Room/section", str(raised.exception))
             self.assertIn("重新预览", str(raised.exception))
 
+    # 验证共享材料来源的一行可分配到多个订单。
+    # self：当前测试用例或测试替身实例。
     def test_server_material_allocation_splits_one_source_row_between_orders(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -993,6 +1040,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(rows, [("PP8888", 5.0), ("PP9999", 8.0)])
         self.assertEqual(allocations, [("PP8888", 5.0), ("PP9999", 8.0)])
 
+    # 验证 Server 材料分配按业务身份匹配，不依赖过期数据库行标识。
+    # self：当前测试用例或测试替身实例。
     def test_server_material_allocation_ignores_stale_sqlite_row_ids(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1029,8 +1078,8 @@ class OrderIndexTests(unittest.TestCase):
                 ("PP9999", "M0002", 6, "aihouse", source_path,
                  "fingerprint", "now"),
             )
-            # This row has the old panel id but the fields of the plywood
-            # fact.  The former implementation counted it against Ivory Oak.
+            # 该行沿用旧饰面板标识，但其他字段属于夹板
+            # 事实；旧实现曾将其错误计入 Ivory Oak。
             preview.connection.execute(
                 """
                 insert into server_material_allocations(
@@ -1066,6 +1115,8 @@ class OrderIndexTests(unittest.TestCase):
 
         self.assertEqual(rows, [("panel", "Ivory Oak", 3.0), ("plywood", "", 6.0)])
 
+    # 验证映射问题解决后清除过期的订单校验错误。
+    # self：当前测试用例或测试替身实例。
     def test_resolved_mapping_clears_stale_order_validation_error(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1096,6 +1147,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(cleared, 1)
         self.assertEqual(row, ("正常", ""))
 
+    # 验证映射仍未解决时保留订单校验错误。
+    # self：当前测试用例或测试替身实例。
     def test_unresolved_mapping_keeps_order_validation_error(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1126,6 +1179,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(cleared, 0)
         self.assertEqual(row, ("数据异常", "订单存在未完成商品 SKU 处理：LED。"))
 
+    # 验证全部已出货的临时订单不再列入未完成阶段。
+    # self：当前测试用例或测试替身实例。
     def test_fully_shipped_temporary_order_is_excluded_from_unfinished_stage(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1160,6 +1215,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(row["stage"], "已出货")
         self.assertEqual(persisted_stage, "已出货")
 
+    # 验证清理临时投影时不覆盖正式订单。
+    # self：当前测试用例或测试替身实例。
     def test_temporary_projection_is_removed_without_overwriting_formal_order(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1198,6 +1255,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(formal, ("owned", str(formal_folder)))
         self.assertIsNone(orphan)
 
+    # 验证 AIMES 阶段耗时不重复计入汇总，并计入后端开销。
+    # self：当前测试用例或测试替身实例。
     def test_aimes_stage_durations_exclude_aggregate_and_account_for_backend_overhead(self):
         stages = _complete_aimes_stage_durations([
             {"stage": "login", "label": "登录 AIMES", "duration_seconds": 1.2},
@@ -1214,6 +1273,8 @@ class OrderIndexTests(unittest.TestCase):
             places=6,
         )
 
+    # 验证订单备注只保存一个实际安装开始日期。
+    # self：当前测试用例或测试替身实例。
     def test_order_annotations_store_single_actual_installation_start_date(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1267,6 +1328,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(persisted["user_note"], "客户要求安装前确认台面颜色")
             self.assertEqual(persisted["installation"]["actual"]["day_count"], 1)
 
+    # 验证多个实际安装日期会被拒绝。
+    # self：当前测试用例或测试替身实例。
     def test_order_annotations_reject_multiple_actual_installation_dates(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1286,14 +1349,16 @@ class OrderIndexTests(unittest.TestCase):
                 )
             store.close()
 
+    # 验证索引读取时合并历史多条实际安装日期。
+    # self：当前测试用例或测试替身实例。
     def test_order_index_collapses_historical_actual_installation_dates(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = Config(state_dir=root / "state")
             store = OrderIndexStore(config.workflow_database)
             store.upsert_order("PP9997", source_folder="/server/PP9997")
-            # Simulate a legacy database from before the single-start-date
-            # unique index was introduced.
+            # 模拟尚未建立单一安装开始日期
+            # 唯一索引的旧版数据库。
             store.connection.execute("drop index idx_order_installation_actual_start")
             store.connection.executemany(
                 """
@@ -1321,6 +1386,8 @@ class OrderIndexTests(unittest.TestCase):
             reopened.close()
             self.assertEqual(rows, [("2026-07-08", "安装组 A")])
 
+    # 验证安装人员可以缺失，但重复安装日期被拒绝。
+    # self：当前测试用例或测试替身实例。
     def test_order_annotations_allow_missing_installer_but_reject_duplicate_dates(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1363,6 +1430,8 @@ class OrderIndexTests(unittest.TestCase):
                 )
             store.close()
 
+    # 验证 Server 文件夹改名必须找到唯一且内容相同的报告签名。
+    # self：当前测试用例或测试替身实例。
     def test_server_folder_rename_requires_unique_identical_report_signature(self):
         old = "/server/PP0099"
         new = "/server/PP0099-renamed"
@@ -1377,6 +1446,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(_server_folder_rename_pairs(previous, current), [(old, new)])
         current[f"{new}/extra.xlsx"] = {"source_folder": new, "kind": "material", "order_id": "PP0099", "modified_at": 20, "size": 200}
         self.assertEqual(_server_folder_rename_pairs(previous, current), [])
+    # 验证 Server 材料替换时合并旧来源路径的重复记录。
+    # self：当前测试用例或测试替身实例。
     def test_server_material_replacement_collapses_old_source_path_rows(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1414,6 +1485,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(sum(row[2] for row in rows), 2)
             self.assertTrue(all(row[1] for row in rows))
 
+    # 验证材料范围更新移除来自旧 Server 根目录的过期来源。
+    # self：当前测试用例或测试替身实例。
     def test_server_material_scope_retires_rows_from_previous_server_root(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1456,6 +1529,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(rows, [(str(current_path), 22.0)])
             self.assertEqual(source_rows, [(str(current_folder),)])
 
+    # 验证没有等价替换来源时保留原材料事实。
+    # self：当前测试用例或测试替身实例。
     def test_material_scope_preserves_facts_without_equivalent_replacement(self):
         for replacement in ([], [("M0004", 21)], [("M0004", 22)],
                             [("M0004", 22), ("M0003", 6)]):
@@ -1482,6 +1557,8 @@ class OrderIndexTests(unittest.TestCase):
                         "select * from material_items order by id").fetchall(), before)
                 store.close()
 
+    # 验证清理材料来源时保留共享工作簿内其他订单的事实。
+    # self：当前测试用例或测试替身实例。
     def test_material_scope_cleanup_preserves_other_order_in_shared_workbook(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1511,6 +1588,8 @@ class OrderIndexTests(unittest.TestCase):
                 store, {"PP0072": {str(current)}}), set())
             store.close()
 
+    # 验证预处理同步可在导入五金之前先完成材料映射。
+    # self：当前测试用例或测试替身实例。
     def test_prepared_sync_can_resolve_material_mappings_before_fittings_import_path(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1540,6 +1619,8 @@ class OrderIndexTests(unittest.TestCase):
 
             self.assertEqual(result["orders"], [])
 
+    # 验证 Server 读取追踪按文件夹及文件类型分组。
+    # self：当前测试用例或测试替身实例。
     def test_server_read_trace_is_grouped_by_folder_and_file_kind(self):
         items = [
             ("/Volumes/server/CUT TO SIZE/cs001", "/Volumes/server/CUT TO SIZE/cs001", "folder"),
@@ -1557,6 +1638,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertIn("PP0035 文件夹（下属：1 个 material 文件）", summary)
         self.assertNotIn("/Volumes/server/CUT TO SIZE", summary)
 
+    # 验证 Server 读取追踪限制展示的文件夹示例数量。
+    # self：当前测试用例或测试替身实例。
     def test_server_read_trace_limits_folder_examples(self):
         items = [
             (f"/server/CS{i:03d}", f"/server/CS{i:03d}", "folder")
@@ -1569,6 +1652,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertIn("另有 1 个文件夹已省略", summary)
         self.assertNotIn("CS007 文件夹", summary)
 
+    # 验证 Server 扫描同时覆盖自有和代切根目录。
+    # self：当前测试用例或测试替身实例。
     def test_server_scan_covers_owned_and_cut_to_size_roots(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1605,6 +1690,8 @@ class OrderIndexTests(unittest.TestCase):
             store.close()
             self.assertEqual({str(item) for item in folders}, {str(owned), str(cut_to_size)})
 
+    # 验证代切预览成功但没有 AICNC 证据时不宣称已优化。
+    # self：当前测试用例或测试替身实例。
     def test_successful_cut_to_size_preview_does_not_claim_optimization_without_aicnc_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1629,6 +1716,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(result["orders"][0]["optimized_count"], 0)
             self.assertEqual(result["orders"][0]["stage"], "已拆单待优化")
 
+    # 验证代切材料缺失时不能仅凭 XML 标为已优化。
+    # self：当前测试用例或测试替身实例。
     def test_cut_to_size_xml_cannot_mark_optimized_when_material_is_absent(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1659,6 +1748,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertFalse(order["optimization_completed_at"])
             self.assertEqual(order["factories"][0]["optimization_source_path"], "")
 
+    # 验证只有 XML 的同步即使覆盖所有活跃工厂单也不确认优化。
+    # self：当前测试用例或测试替身实例。
     def test_xml_only_sync_never_optimizes_even_with_all_active_factory_artifacts(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1716,6 +1807,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(expanded["orders"][0]["stage"], "已拆单待优化")
             self.assertEqual(expanded["orders"][0]["optimized_count"], 0)
 
+    # 验证优化标记扫描采用已知路径，不递归遍历全部文件。
+    # self：当前测试用例或测试替身实例。
     def test_optimization_marker_scan_uses_known_paths_without_recursive_file_walk(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp) / "PP0099"
@@ -1740,6 +1833,8 @@ class OrderIndexTests(unittest.TestCase):
                 [kitchen_root / "Optimize file.xml", nesting],
             )
 
+    # 验证文件夹总耗时等于最终各文件耗时之和。
+    # self：当前测试用例或测试替身实例。
     def test_folder_timing_total_equals_final_file_timing_sum(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp) / "PP0099"
@@ -1757,6 +1852,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(timing["duration_seconds"], file_total)
             self.assertGreaterEqual(timing["wall_duration_seconds"], timing["duration_seconds"])
 
+    # 验证可见的 Server 扫描不会改变优化确认状态。
+    # self：当前测试用例或测试替身实例。
     def test_visible_server_scan_keeps_optimization_state_unchanged(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1791,6 +1888,8 @@ class OrderIndexTests(unittest.TestCase):
                 ["server_metadata", "scan_finalize"],
             )
 
+    # 验证标准订单文件夹优先于包含混合工厂报告的文件夹。
+    # self：当前测试用例或测试替身实例。
     def test_exact_standard_order_folder_wins_over_mixed_factory_report_folder(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1831,6 +1930,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(source_folders["PP0035"], str(exact_folder))
             self.assertEqual(source_folders["PP0035-2"], str(mixed_folder))
 
+    # 验证代切订单五金报告不持久保存为订单五金。
+    # self：当前测试用例或测试替身实例。
     def test_cut_to_size_fittings_are_not_persisted_as_hardware(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1861,6 +1962,8 @@ class OrderIndexTests(unittest.TestCase):
             connection.close()
             self.assertEqual(count, 0)
 
+    # 验证增量同步复用未变化报告，并重新读取已变化报告。
+    # self：当前测试用例或测试替身实例。
     def test_incremental_sync_reuses_unchanged_server_report_and_rechecks_changes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1903,8 +2006,9 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(third["index_stats"]["parsed_report_count"], 1)
             self.assertEqual(third["index_stats"]["validated_order_count"], 1)
 
+    # 验证报告未变化或映射失败时保留原 Server 五金。
+    # self：当前测试用例或测试替身实例。
     def test_server_sync_preserves_hardware_when_report_is_unchanged_or_mapping_fails(self):
-        """A scan must not erase the last valid hardware projection."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = Config(
@@ -1997,8 +2101,9 @@ class OrderIndexTests(unittest.TestCase):
             finally:
                 store.close()
 
+    # 验证跨来源路径同步按工厂单替换五金事实。
+    # self：当前测试用例或测试替身实例。
     def test_server_sync_replaces_hardware_by_factory_order_across_source_paths(self):
-        """A re-optimization path must replace, not add to, factory hardware."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = Config(
@@ -2093,17 +2198,33 @@ class OrderIndexTests(unittest.TestCase):
             finally:
                 store.close()
 
+    # 验证 Server 快照采用有限只读并发，并完整保留扫描记录。
+    # self：当前测试用例或测试替身实例。
     def test_server_snapshot_uses_bounded_read_only_workers_and_preserves_records(self):
         class TrackingExecutor:
+            # 记录模拟执行器的并发上限。
+            # self：当前测试用例或测试替身实例。
+            # max_workers：模拟执行器允许的最大工作线程数。
             def __init__(self, max_workers):
                 self.max_workers = max_workers
 
+            # 进入模拟执行器上下文并返回自身。
+            # self：当前测试用例或测试替身实例。
             def __enter__(self):
                 return self
 
+            # 退出模拟执行器上下文，不吞掉异常。
+            # self：当前测试用例或测试替身实例。
+            # exc_type：上下文退出时的异常类型。
+            # exc_value：上下文退出时的异常对象。
+            # traceback：上下文退出时的异常堆栈。
             def __exit__(self, exc_type, exc_value, traceback):
                 return False
 
+            # 按输入顺序同步执行文件夹处理函数，便于断言并发配置。
+            # self：当前测试用例或测试替身实例。
+            # function：对每个文件夹调用的处理函数。
+            # folders：按顺序处理的文件夹列表。
             def map(self, function, folders):
                 return [function(folder) for folder in folders]
 
@@ -2117,6 +2238,8 @@ class OrderIndexTests(unittest.TestCase):
 
             executors = []
 
+            # 创建并记录模拟执行器，供并发上限断言。
+            # max_workers：模拟执行器允许的最大工作线程数。
             def make_executor(max_workers):
                 executor = TrackingExecutor(max_workers)
                 executors.append(executor)
@@ -2145,6 +2268,8 @@ class OrderIndexTests(unittest.TestCase):
                 [],
             )
 
+    # 验证同步索引复用扫描快照，并报告各阶段耗时。
+    # self：当前测试用例或测试替身实例。
     def test_sync_index_reuses_scan_snapshot_and_reports_phase_durations(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2182,6 +2307,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertIn("server_metadata_and_report_sync", result["index_stats"]["phase_durations"])
             self.assertIn("索引阶段耗时：", result["operation_trace"]["sync"][-1])
 
+    # 验证初始日期之前的临时文件夹被排除，旧待处理状态被清除。
+    # self：当前测试用例或测试替身实例。
     def test_prebaseline_temporary_folder_is_excluded_and_stale_pending_cleared(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2220,6 +2347,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(reopened.active_issues(), [])
             reopened.close()
 
+    # 验证有明确混合订单名称的文件夹不误标为临时订单。
+    # self：当前测试用例或测试替身实例。
     def test_named_mixed_folder_is_not_marked_as_temporary(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2235,6 +2364,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(folder_change["order_id"], "CS003、PP0047")
             self.assertIn("混单文件夹", folder_change["message"])
 
+    # 验证全部已出货的混合文件夹进入观察，并可被 AIMES 新工厂单重开。
+    # self：当前测试用例或测试替身实例。
     def test_fully_shipped_mixed_folder_is_watched_then_reopened_by_aimes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2283,6 +2414,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(reopened_scan["scan_stats"]["order_folder_count"], 1)
         self.assertEqual(reopened_scan["changes"][0]["path"], str(folder))
 
+    # 验证已出货 Server 订单观察七天后转入永久跳过。
+    # self：当前测试用例或测试替身实例。
     def test_shipped_server_order_becomes_permanent_after_seven_day_watch(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2317,6 +2450,8 @@ class OrderIndexTests(unittest.TestCase):
                 self.assertEqual(store.server_scan_policy("PP9999")["policy"], "permanent")
             store.close()
 
+    # 验证初始日期以前的订单标为已出货，但不伪造出库单据。
+    # self：当前测试用例或测试替身实例。
     def test_initial_date_orders_are_marked_shipped_without_fabricating_documents(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2359,6 +2494,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(shipped_order, ("已出货", "待校验", ""))
         self.assertEqual(shipped_factory, ("已出库", "", "historical_initial_date"))
 
+    # 验证临时文件夹人工完成后进入三天 XML 观察期。
+    # self：当前测试用例或测试替身实例。
     def test_mark_temporary_folder_manual_starts_three_day_xml_watch(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2391,6 +2528,8 @@ class OrderIndexTests(unittest.TestCase):
             store.close()
             self.assertEqual(scan_server_changes(config)["server"]["changes"], [])
 
+    # 验证打开数据库时清理已废弃的文件夹忽略表。
+    # self：当前测试用例或测试替身实例。
     def test_removed_server_folder_ignore_table_is_cleaned_on_open(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2414,6 +2553,8 @@ class OrderIndexTests(unittest.TestCase):
             store.close()
             self.assertIsNone(exists)
 
+    # 验证没有报告的混合订单文件夹仍要求人工检查。
+    # self：当前测试用例或测试替身实例。
     def test_reportless_mixed_folder_requires_review(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2429,6 +2570,8 @@ class OrderIndexTests(unittest.TestCase):
             issue = next(item for item in first["current_issues"] if item["kind"] == "server_missing_report")
             self.assertIn("缺少可识别的报表", issue["message"])
 
+    # 验证已处理临时文件夹观察 XML 三天后永久跳过。
+    # self：当前测试用例或测试替身实例。
     def test_processed_temporary_folder_uses_three_day_xml_watch_then_is_permanent(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2488,6 +2631,8 @@ class OrderIndexTests(unittest.TestCase):
             )
             store.close()
 
+    # 验证临时处理失败后继续保留在 Server 待处理变化中。
+    # self：当前测试用例或测试替身实例。
     def test_failed_temporary_processing_remains_in_pending_server_changes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2496,6 +2641,7 @@ class OrderIndexTests(unittest.TestCase):
             folder.mkdir(parents=True)
             (folder / "material.xlsx").write_bytes(b"not-a-workbook")
 
+            self.start_pending_session(config)
             result = process_server_changes(config)
 
             self.assertTrue(result["temporary_processing"]["failed"])
@@ -2521,6 +2667,8 @@ class OrderIndexTests(unittest.TestCase):
                 for item in repeated["changes"]
             ))
 
+    # 验证临时五金报告在用户批准处理前不解析。
+    # self：当前测试用例或测试替身实例。
     def test_temporary_fittings_report_is_deferred_until_user_approves_processing(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2537,6 +2685,8 @@ class OrderIndexTests(unittest.TestCase):
                 for issue in result["current_issues"]
             ))
 
+    # 验证临时订单人工出库记录 Server 基线时忽略路径大小写差异。
+    # self：当前测试用例或测试替身实例。
     def test_manual_temporary_outbound_records_server_baseline_case_insensitively(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2574,6 +2724,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(len(source_paths), 4)
             self.assertFalse(scan_server_changes(config)["server"]["changed"])
 
+    # 验证已出货临时文件夹跳过处理，不重新扫描报告。
+    # self：当前测试用例或测试替身实例。
     def test_shipped_temporary_folder_is_skipped_without_report_rescan(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2611,6 +2763,8 @@ class OrderIndexTests(unittest.TestCase):
                 for call in report_files.call_args_list
             ))
 
+    # 验证较旧临时文件夹在重扫报告之前被过滤。
+    # self：当前测试用例或测试替身实例。
     def test_old_temporary_folder_is_filtered_before_report_rescan(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2633,6 +2787,8 @@ class OrderIndexTests(unittest.TestCase):
                 for call in report_files.call_args_list
             ))
 
+    # 验证临时处理生成材料 Traveler 并执行对应出库流程。
+    # self：当前测试用例或测试替身实例。
     def test_temporary_processing_generates_material_traveler_and_outbounds(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2661,6 +2817,8 @@ class OrderIndexTests(unittest.TestCase):
             outbound.assert_called_once()
             self.assertEqual(result["pending_server_changes"], [])
 
+    # 验证临时处理可在 Traveler 和出库中同时跳过五金。
+    # self：当前测试用例或测试替身实例。
     def test_temporary_processing_can_skip_hardware_in_traveler_and_outbound(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2692,6 +2850,8 @@ class OrderIndexTests(unittest.TestCase):
             ))
             outbound.assert_called_once()
 
+    # 验证没有 AIMES 身份的临时订单各处一致使用文件夹名称。
+    # self：当前测试用例或测试替身实例。
     def test_temporary_folder_without_aimes_identity_uses_folder_name_everywhere(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2734,6 +2894,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(record["outbound_document"], "OUT-B12")
             store.close()
 
+    # 验证临时文件夹内容未变化时不重复出库。
+    # self：当前测试用例或测试替身实例。
     def test_temporary_outbound_is_not_repeated_when_folder_content_is_unchanged(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2759,6 +2921,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(second["temporary_processing"]["succeeded"], [])
             outbound.assert_called_once()
 
+    # 验证出库失败后的重试复用未变化的已生成 Traveler。
+    # self：当前测试用例或测试替身实例。
     def test_failed_outbound_reuses_unchanged_generated_traveler_on_retry(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2793,6 +2957,8 @@ class OrderIndexTests(unittest.TestCase):
             updater.assert_not_called()
             self.assertEqual(outbound.call_count, 2)
 
+    # 验证临时文件夹存在唯一 AIMES 待核验匹配时采用该身份。
+    # self：当前测试用例或测试替身实例。
     def test_temporary_folder_uses_unique_aimes_review_match_when_available(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2835,12 +3001,16 @@ class OrderIndexTests(unittest.TestCase):
                 for row in range(1, workbook["Picking List"].max_row + 1)
             ))
             outbound.assert_called_once()
+    # 验证工厂单初始日期过滤使用名称中嵌入的日期。
+    # self：当前测试用例或测试替身实例。
     def test_factory_order_initial_date_cutoff_uses_embedded_date(self):
         self.assertTrue(_factory_order_before_initial_date("F2605260119", "", "2026-07-22"))
         self.assertFalse(_factory_order_before_initial_date("F2608010001", "", "2026-07-22"))
         self.assertTrue(_factory_order_before_initial_date("F100", "2026-07-21 10:00:00", "2026-07-22"))
         self.assertFalse(_factory_order_before_initial_date("F100", "", "2026-07-22"))
 
+    # 验证初始日期过滤会清理旧归属问题，且不重新建立。
+    # self：当前测试用例或测试替身实例。
     def test_initial_date_removes_stale_ownership_issue_and_does_not_recreate_it(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2882,12 +3052,16 @@ class OrderIndexTests(unittest.TestCase):
             ))
             reopened.close()
 
+    # 验证 Server 变化提示明确说明订单、工厂单及变化数据。
+    # self：当前测试用例或测试替身实例。
     def test_server_change_message_identifies_order_factory_and_data(self):
         self.assertEqual(
             _server_data_change_message("modified", ["PP0035-2"], "F20050502", "五金信息"),
             "修改订单 PP0035-2（工厂单 F20050502）的五金信息",
         )
 
+    # 验证 Server 变化提示包含可执行操作及相关路径。
+    # self：当前测试用例或测试替身实例。
     def test_server_change_message_explains_action_and_path(self):
         item = {"kind": "folder", "order_id": "PP0035-2", "manual_only": False}
         self.assertEqual(
@@ -2901,6 +3075,8 @@ class OrderIndexTests(unittest.TestCase):
             "新增订单 PP0035-2（工厂单 F20050502）的五金信息（来源：/Volumes/server/Optimized Orders/pp0035-2/Fittingslist.xlsx）",
         )
 
+    # 验证无效和测试 AIMES 行仅形成警告，不进入正式业务事实。
+    # self：当前测试用例或测试替身实例。
     def test_invalid_and_test_aimes_rows_are_warnings_only(self):
         invalid = _aimes_row_issue({
             "factory_order": "F200",
@@ -2947,6 +3123,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(unassigned_visible, [])
         self.assertEqual(unassigned_warnings[0]["suggested_order_id"], "CS001")
 
+    # 验证 AIMES 工厂单名称的订单前缀冲突仅报告警告。
+    # self：当前测试用例或测试替身实例。
     def test_aimes_factory_name_order_prefix_mismatch_is_a_warning(self):
         issue = _aimes_row_issue({
             "factory_order": "F2608190230",
@@ -2968,6 +3146,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(visible, [])
         self.assertEqual(warnings[0]["factory_order"], "F2608190230")
 
+    # 验证五金工厂单归属解析使用订单文件夹提示。
+    # self：当前测试用例或测试替身实例。
     def test_fittings_factory_order_uses_order_folder_hint(self):
         candidates = {}
         _merge_candidate(
@@ -2983,6 +3163,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(result["order_id"], "PP0037")
         self.assertEqual(result["ownership_status"], "已确认")
 
+    # 验证未知归属工厂单通过精确 AIMES 名称推导订单。
+    # self：当前测试用例或测试替身实例。
     def test_unowned_factory_uses_exact_aimes_name_to_derive_order(self):
         candidates = {}
         _merge_candidate(
@@ -3004,6 +3186,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(result["order_id"], "PP0037")
         self.assertEqual(result["name_source"], "AIMES精确查询")
 
+    # 验证数据库已有工厂单身份时跳过 AIMES 精确查询。
+    # self：当前测试用例或测试替身实例。
     def test_existing_database_factory_skips_exact_aimes_lookup(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config(state_dir=Path(temp) / "state")
@@ -3042,6 +3226,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(result["factory_name"], "PP0035-ROOM 5")
         self.assertEqual(result["name_source"], "server_report")
 
+    # 验证活跃问题会持久保存，解决后更新状态。
+    # self：当前测试用例或测试替身实例。
     def test_active_issue_is_persisted_and_resolved(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "order-index.sqlite3"
@@ -3060,6 +3246,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(store.active_issues(), [])
             store.close()
 
+    # 验证 AIMES 已删除工厂单仅供审计，不计入业务汇总。
+    # self：当前测试用例或测试替身实例。
     def test_deleted_aimes_factory_is_audit_only_and_not_in_summaries(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "order-index.sqlite3"
@@ -3085,7 +3273,9 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual([item["factory_order"] for item in summary["factories"]], ["F101"])
         self.assertEqual(tuple(status), ("deleted", "2026-08-16T11:00:00"))
 
-    def test_invalid_aimes_rows_persist_for_reopen_without_entering_business_tables(self):
+    # 验证无效 AIMES 行可跨重启展示，但不进入业务表。
+    # self：当前测试用例或测试替身实例。
+    def test_invalid_aimes_rows_are_session_only_without_entering_business_tables(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config()
             config.state_dir = Path(temp) / "state"
@@ -3109,14 +3299,16 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(result["aimes_issues"], [])
             self.assertEqual(result["aimes_warnings"][0]["factory_order"], "F200")
             store = OrderIndexStore(config.workflow_database)
-            self.assertEqual(store.connection.execute("select count(*) from aimes_review_rows").fetchone()[0], 1)
+            self.assertEqual(store.connection.execute("select count(*) from aimes_review_rows").fetchone()[0], 0)
             self.assertEqual(store.connection.execute("select count(*) from factory_orders").fetchone()[0], 0)
             store.close()
 
             reopened = list_order_index(config)
-            self.assertEqual(reopened["aimes_warnings"][0]["factory_order"], "F200")
+            self.assertEqual(reopened["aimes_warnings"], [])
 
-    def test_skipped_aimes_refresh_keeps_persisted_warning_visible_after_reopen(self):
+    # 验证未执行新检查时，重开不会将历史警告视为当前问题。
+    # self：当前测试用例或测试替身实例。
+    def test_skipped_aimes_refresh_does_not_restore_old_warning(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config(state_dir=Path(temp) / "state")
             config.prepare_storage()
@@ -3145,13 +3337,16 @@ class OrderIndexTests(unittest.TestCase):
             result = sync_aimes_index(config, if_needed=True)
 
             self.assertFalse(result["aimes"]["attempted"])
-            self.assertEqual(result["aimes"]["warning_count"], 1)
-            self.assertEqual(result["aimes_warnings"][0]["factory_order"], "F2608190230")
+            self.assertEqual(result["aimes"]["warning_count"], 0)
+            self.assertEqual(result["aimes_warnings"], [])
 
-    def test_persisted_aimes_warning_can_be_assigned_when_valid_cache_excludes_it(self):
+    # 验证即使有效缓存排除了警告行，同一会话仍可为最新警告指定归属。
+    # self：当前测试用例或测试替身实例。
+    def test_session_aimes_warning_can_be_assigned_when_valid_cache_excludes_it(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config(state_dir=Path(temp) / "state")
             config.prepare_storage()
+            self.start_pending_session(config)
             store = OrderIndexStore(config.workflow_database)
             store.upsert_order("PP0072", validation_status="正常", stage="已出货")
             store.upsert_factory(
@@ -3193,7 +3388,7 @@ class OrderIndexTests(unittest.TestCase):
                 ("F2608190230",),
             ).fetchone()
             review_count = reopened.connection.execute(
-                "select count(*) from aimes_review_rows where ignore_key = ?",
+                "select count(*) from pending_aimes_reviews where ignore_key = ?",
                 ("factory:F2608190230",),
             ).fetchone()[0]
             reopened.close()
@@ -3201,6 +3396,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(tuple(outbound), ("已出库",))
             self.assertEqual(review_count, 0)
 
+    # 验证精确核验的 AIMES 工厂单持久保存为 AIMES 身份来源。
+    # self：当前测试用例或测试替身实例。
     def test_exactly_verified_aimes_factory_is_persisted_as_aimes_identity(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config()
@@ -3250,6 +3447,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(tuple(row[:5]), ("PP0035", "PP0035-ROOM 5", "PP0035", "2026-08-19T10:00:00", "AIMES"))
         self.assertTrue(row[5])
 
+    # 验证业务错误提示可指导操作，并隐藏技术内部细节。
+    # self：当前测试用例或测试替身实例。
     def test_business_errors_are_actionable_and_hide_technical_details(self):
         validation = _business_validation_message(
             RuntimeError('Traceback: sqlite3.OperationalError: database is locked')
@@ -3265,6 +3464,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertIn("FittingslistPC123.xlsx", report)
         self.assertIn("重新扫描 Server", report)
 
+    # 验证 AIMES 业务提示优先按明确错误类型分类，再考虑错误文本。
+    # self：当前测试用例或测试替身实例。
     def test_business_aimes_message_uses_explicit_error_type_before_message_words(self):
         table_error = RuleError(
             "aimes_table_schema",
@@ -3279,6 +3480,8 @@ class OrderIndexTests(unittest.TestCase):
         not_ready_error = RuleError("aimes_table_not_ready", "AIMES_TABLE_NOT_READY：表头")
         self.assertIn("尚未加载完成", _business_aimes_message(not_ready_error))
 
+    # 验证迁移旧状态时保留对应校验原因。
+    # self：当前测试用例或测试替身实例。
     def test_old_status_is_migrated_and_validation_reason_is_persisted(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "order-index.sqlite3"
@@ -3313,6 +3516,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(row["validation_message"], "")
         self.assertEqual(version, 11)
 
+    # 验证结构迁移通过唯一订单文件夹解决旧归属警告。
+    # self：当前测试用例或测试替身实例。
     def test_schema_migration_resolves_legacy_warning_from_unique_order_folder(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -3342,6 +3547,8 @@ class OrderIndexTests(unittest.TestCase):
             )
             reopened.close()
 
+    # 验证 AIMES 确认的归属优先于过期 Server 归属。
+    # self：当前测试用例或测试替身实例。
     def test_aimes_owner_wins_over_stale_server_owner(self):
         candidate = {
             "names": {
@@ -3365,6 +3572,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(result["name_source"], "AIMES")
         self.assertEqual(result["ownership_status"], "已确认")
 
+    # 验证 AIMES 订单校验同时过滤测试订单。
+    # self：当前测试用例或测试替身实例。
     def test_aimes_order_validation_and_test_filter(self):
         self.assertEqual(_valid_aimes_order_id("PP0035"), "PP0035")
         self.assertEqual(_valid_aimes_order_id("PP0035-2"), "PP0035-2")
@@ -3386,6 +3595,8 @@ class OrderIndexTests(unittest.TestCase):
             "split_time": "2026-08-10 08:30:00",
         }))
 
+    # 验证历史 PP 订单的 Server 路径仍处于看板范围。
+    # self：当前测试用例或测试替身实例。
     def test_historical_pp_server_paths_are_in_dashboard_scope(self):
         root = Path("/Volumes/server/Optimized Orders")
 
@@ -3395,6 +3606,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertTrue(_source_path_in_dashboard_scope(root, str(root / "PP0035-2" / "report.xlsx")))
         self.assertTrue(_source_path_in_dashboard_scope(root, str(root / "CS123")))
 
+    # 验证订单摘要正确汇总下属工厂单状态。
+    # self：当前测试用例或测试替身实例。
     def test_summary_aggregates_factory_status(self):
         with tempfile.TemporaryDirectory() as temp:
             store = OrderIndexStore(Path(temp) / "order-index.sqlite3")
@@ -3434,6 +3647,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(row["outbound_progress"], "1 / 2")
         self.assertEqual(row["latest_split_time"], "2026-08-02T10:00:00")
 
+    # 验证标准出库状态完成对账，重开后保持一致。
+    # self：当前测试用例或测试替身实例。
     def test_standard_outbound_status_reconciles_and_survives_reopen(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config(state_dir=Path(temp) / "state")
@@ -3475,6 +3690,8 @@ class OrderIndexTests(unittest.TestCase):
             reopened.close()
             self.assertEqual(row, ("已出库", "QTCK20260815001", "2026-08-15T16:20:00"))
 
+    # 验证全部工厂单已出货时订单为已完成，即使缺少优化证据。
+    # self：当前测试用例或测试替身实例。
     def test_fully_shipped_order_is_completed_even_if_optimization_evidence_is_missing(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config(state_dir=Path(temp) / "state")
@@ -3500,6 +3717,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(row["shipped_count"], 2)
         self.assertEqual(row["stage"], "已出货")
 
+    # 验证重新索引后合并出库单据与所有关联工厂单对账。
+    # self：当前测试用例或测试替身实例。
     def test_grouped_outbound_document_reconciles_all_factory_orders_after_reindex(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config(state_dir=Path(temp) / "state")
@@ -3574,6 +3793,8 @@ class OrderIndexTests(unittest.TestCase):
             },
         )
 
+    # 验证订单层级出库记录不会广播为每个拆分工厂单的出货事实。
+    # self：当前测试用例或测试替身实例。
     def test_order_level_outbound_record_is_not_broadcast_to_split_factories(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config(state_dir=Path(temp) / "state")
@@ -3607,6 +3828,8 @@ class OrderIndexTests(unittest.TestCase):
             store.close()
             self.assertEqual(statuses, [("未出库",), ("未出库",)])
 
+    # 验证部分字段更新保留已有持久业务状态。
+    # self：当前测试用例或测试替身实例。
     def test_partial_factory_upsert_preserves_persisted_business_statuses(self):
         with tempfile.TemporaryDirectory() as temp:
             store = OrderIndexStore(Path(temp) / "order-index.sqlite3")
@@ -3639,6 +3862,8 @@ class OrderIndexTests(unittest.TestCase):
             store.close()
             self.assertEqual(row, ("已发现", "已确认", 1, 1, "已出库", "QTCK-ONE"))
 
+    # 验证全部已出货的 AIMES 订单不进入 Server 扫描候选。
+    # self：当前测试用例或测试替身实例。
     def test_fully_shipped_aimes_order_is_not_a_server_scan_candidate(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config(state_dir=Path(temp) / "state")
@@ -3665,6 +3890,8 @@ class OrderIndexTests(unittest.TestCase):
 
         self.assertNotIn("PP9999", candidates)
 
+    # 验证出库对账期间不会将材料来源文件误作 Traveler 解析。
+    # self：当前测试用例或测试替身实例。
     def test_scan_does_not_parse_material_source_as_traveler_during_outbound_reconcile(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -3715,6 +3942,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertFalse(result["server"]["changed"])
             self.assertEqual(result["server"]["changes"], [])
 
+    # 验证全部已出货文件夹清理过期材料校验问题。
+    # self：当前测试用例或测试替身实例。
     def test_fully_shipped_folder_resolves_stale_material_validation_issue(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -3728,6 +3957,7 @@ class OrderIndexTests(unittest.TestCase):
             material_path = folder / "PP9999 materials.xlsx"
             material_path.write_bytes(b"invalid source retained for history")
 
+            self.start_pending_session(config)
             store = OrderIndexStore(config.workflow_database)
             store.upsert_aimes_factory(
                 "F100",
@@ -3766,7 +3996,7 @@ class OrderIndexTests(unittest.TestCase):
             ))
             reopened = OrderIndexStore(config.workflow_database)
             issue = reopened.connection.execute(
-                "select status, resolved_at from active_issues where issue_key = ?",
+                "select status, resolved_at from pending_issues where issue_key = ?",
                 (f"material_validation:PP9999:{material_path}",),
             ).fetchone()
             reopened.close()
@@ -3774,6 +4004,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(issue[0], "resolved")
         self.assertTrue(issue[1])
 
+    # 验证本地生产完成后清理不再适用的材料问题。
+    # self：当前测试用例或测试替身实例。
     def test_completed_production_resolves_post_production_material_issue(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -3787,6 +4019,7 @@ class OrderIndexTests(unittest.TestCase):
             material_path = folder / "PP0063-2 materials.xlsx"
             material_path.write_bytes(b"source retained; preview owns validation")
 
+            self.start_pending_session(config)
             store = OrderIndexStore(config.workflow_database)
             self._seed_sku_products(store.connection)
             store.upsert_order("PP0063-2", source_folder=str(folder))
@@ -3847,7 +4080,7 @@ class OrderIndexTests(unittest.TestCase):
             ))
             reopened = OrderIndexStore(config.workflow_database)
             issue = reopened.connection.execute(
-                "select status, resolved_at from active_issues where issue_key = ?",
+                "select status, resolved_at from pending_issues where issue_key = ?",
                 (issue_key,),
             ).fetchone()
             order = reopened.connection.execute(
@@ -3863,6 +4096,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(order[0], "板材 · 封边")
         self.assertEqual(change[0], "material_validation_reconciled")
 
+    # 验证全部已出货文件夹清理过期五金来源选择问题。
+    # self：当前测试用例或测试替身实例。
     def test_fully_shipped_folder_resolves_stale_hardware_selection_issue(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -3874,6 +4109,7 @@ class OrderIndexTests(unittest.TestCase):
             folder = config.source_root / "PP9999"
             folder.mkdir(parents=True)
 
+            self.start_pending_session(config)
             store = OrderIndexStore(config.workflow_database)
             store.upsert_aimes_factory(
                 "F100",
@@ -3913,7 +4149,7 @@ class OrderIndexTests(unittest.TestCase):
             ))
             reopened = OrderIndexStore(config.workflow_database)
             issue = reopened.connection.execute(
-                "select status, resolved_at from active_issues where issue_key = ?",
+                "select status, resolved_at from pending_issues where issue_key = ?",
                 (issue_key,),
             ).fetchone()
             reopened.close()
@@ -3921,6 +4157,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(issue[0], "resolved")
         self.assertTrue(issue[1])
 
+    # 验证全部已出货文件夹清理过期订单校验问题。
+    # self：当前测试用例或测试替身实例。
     def test_fully_shipped_folder_resolves_stale_order_validation_issue(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -3932,6 +4170,7 @@ class OrderIndexTests(unittest.TestCase):
             folder = config.source_root / "PP9999"
             folder.mkdir(parents=True)
 
+            self.start_pending_session(config)
             store = OrderIndexStore(config.workflow_database)
             store.upsert_aimes_factory(
                 "F100",
@@ -3971,7 +4210,7 @@ class OrderIndexTests(unittest.TestCase):
             ))
             reopened = OrderIndexStore(config.workflow_database)
             issue = reopened.connection.execute(
-                "select status, resolved_at from active_issues where issue_key = ?",
+                "select status, resolved_at from pending_issues where issue_key = ?",
                 (issue_key,),
             ).fetchone()
             reopened.close()
@@ -3979,6 +4218,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(issue[0], "resolved")
         self.assertTrue(issue[1])
 
+    # 验证自动快照跳过已出货订单，直至 AIMES 新增工厂单。
+    # self：当前测试用例或测试替身实例。
     def test_automatic_server_snapshot_skips_shipped_order_until_aimes_adds_factory(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -4023,14 +4264,14 @@ class OrderIndexTests(unittest.TestCase):
                 }],
             ):
                 _, snapshot = _server_snapshot(config, store)
-                # A newly confirmed shipped order is watched for seven days;
-                # it is not skipped immediately.
+                # 刚确认出货的订单需要观察七天，
+                # 不会立即跳过扫描。
                 self.assertIn(str(shipped_folder), snapshot)
                 self.assertIn(str(active_folder), snapshot)
                 self.assertIn(str(unindexed_folder), snapshot)
 
-                # A newly persisted AIMES factory order reopens the order for
-                # the next automatic scan.
+                # 新保存的 AIMES 工厂单会重新开启所属订单，
+                # 使它参加下一次自动扫描。
                 store.upsert_aimes_factory(
                     "F101",
                     order_id="PP9999",
@@ -4045,6 +4286,8 @@ class OrderIndexTests(unittest.TestCase):
 
         self.assertIn(str(shipped_folder), reopened_snapshot)
 
+    # 验证 AIMES 新增当前工厂单后，订单重新进入 Server 扫描候选。
+    # self：当前测试用例或测试替身实例。
     def test_new_current_aimes_factory_reopens_server_scan_candidate(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config(
@@ -4071,6 +4314,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual(result["sync"]["server_folder_count"], 1)
         self.assertEqual(result["orders"][0]["order_id"], "PP9999")
 
+    # 验证跳过普通订单扫描时不擅自解决其旧问题。
+    # self：当前测试用例或测试替身实例。
     def test_skipped_standard_order_does_not_resolve_its_old_issue(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config(
@@ -4080,6 +4325,7 @@ class OrderIndexTests(unittest.TestCase):
             config.source_root.mkdir()
             folder = config.source_root / "PP9999"
             folder.mkdir()
+            self.start_pending_session(config)
             store = OrderIndexStore(config.workflow_database)
             self._set_permanent_server_policy(store, "PP9999", folder)
             store.upsert_active_issue(
@@ -4097,6 +4343,8 @@ class OrderIndexTests(unittest.TestCase):
 
             self.assertTrue(any(item["issue_key"] == "factory_ownership:F100" for item in result["current_issues"]))
 
+    # 验证订单按最新工厂拆单时间排序。
+    # self：当前测试用例或测试替身实例。
     def test_orders_sort_by_latest_factory_split_time(self):
         with tempfile.TemporaryDirectory() as temp:
             store = OrderIndexStore(Path(temp) / "order-index.sqlite3")
@@ -4113,6 +4361,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual([row["order_id"] for row in rows], ["PP0034", "PP0035", "PP0036"])
         self.assertEqual([row["factory_order"] for row in rows[1]["factories"]], ["F101", "F100"])
 
+    # 验证归属普通订单的已确认 Server 工厂单计入摘要。
+    # self：当前测试用例或测试替身实例。
     def test_summary_includes_confirmed_server_report_factory_assigned_to_normal_order(self):
         with tempfile.TemporaryDirectory() as temp:
             store = OrderIndexStore(Path(temp) / "order-index.sqlite3")
@@ -4132,6 +4382,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertEqual([item["factory_order"] for item in summary["factories"]], ["F100"])
         self.assertEqual(summary["factory_count"], 1)
 
+    # 验证按需 AIMES 刷新在当天成功后只执行一次。
+    # self：当前测试用例或测试替身实例。
     def test_aimes_if_needed_runs_once_per_day_after_success(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config()
@@ -4165,6 +4417,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(refresh.call_args.args[1], 50)
             self.assertEqual(second["orders"][0]["order_id"], "PP9999")
 
+    # 验证仅 AIMES 同步先报告变化，当天成功后后续调用跳过。
+    # self：当前测试用例或测试替身实例。
     def test_aimes_only_sync_reports_change_then_skips_after_daily_success(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config()
@@ -4194,6 +4448,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertEqual(refresh.call_count, 1)
             self.assertEqual(refresh.call_args.args[1], 50)
 
+    # 验证完整处理前，Server 扫描不改写业务事实。
+    # self：当前测试用例或测试替身实例。
     def test_server_scan_is_non_mutating_until_full_processing(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config()
@@ -4313,6 +4569,8 @@ class OrderIndexTests(unittest.TestCase):
             sync_order_index(config)
             self.assertFalse(scan_server_changes(config)["server"]["changed"])
 
+    # 验证没有材料的确认不会建立 XML 扫描基线。
+    # self：当前测试用例或测试替身实例。
     def test_confirm_without_materials_does_not_establish_xml_scan_baseline(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -4359,6 +4617,8 @@ class OrderIndexTests(unittest.TestCase):
             finally:
                 store.close()
 
+    # 验证优化证据预览只包含所选订单范围。
+    # self：当前测试用例或测试替身实例。
     def test_preview_scopes_optimization_artifacts_to_selected_order(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -4397,6 +4657,8 @@ class OrderIndexTests(unittest.TestCase):
                 [("PP0062", "F2609060245")],
             )
 
+    # 验证业务确认持久保存优化证据，使列表索引可读取。
+    # self：当前测试用例或测试替身实例。
     def test_business_confirmation_persists_optimization_evidence_for_list_index(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -4453,6 +4715,8 @@ class OrderIndexTests(unittest.TestCase):
             finally:
                 store.close()
 
+    # 验证内存确认幂等写入所选优化证据，不生成重复记录。
+    # self：当前测试用例或测试替身实例。
     def test_memory_confirmation_upserts_selected_optimization_evidence_idempotently(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -4534,6 +4798,8 @@ class OrderIndexTests(unittest.TestCase):
             finally:
                 store.close()
 
+    # 验证基线保存失败时回滚本次内存证据确认。
+    # self：当前测试用例或测试替身实例。
     def test_memory_evidence_confirmation_rolls_back_on_baseline_failure(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -4565,6 +4831,8 @@ class OrderIndexTests(unittest.TestCase):
                 bootstrap.close()
                 shared.close()
 
+    # 验证 Server 扫描基线同时覆盖两个 Server 根目录。
+    # self：当前测试用例或测试替身实例。
     def test_server_scan_baseline_covers_both_server_roots(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -4610,6 +4878,8 @@ class OrderIndexTests(unittest.TestCase):
         self.assertFalse(repeated["changed"])
         self.assertEqual(repeated["changes"], [])
 
+    # 验证仅扫描 XML 时，报告内容编辑不会被判为 XML 变化。
+    # self：当前测试用例或测试替身实例。
     def test_report_edits_are_ignored_by_xml_only_server_scan(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -4655,6 +4925,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertFalse(after_edit["changed"])
             self.assertFalse(any(item["path"] == str(materials) for item in after_edit["changes"]))
 
+    # 验证所选 Server 文件夹复用单文件夹索引处理流程。
+    # self：当前测试用例或测试替身实例。
     def test_selected_server_folder_reuses_index_processing_for_one_folder(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config()
@@ -4683,6 +4955,8 @@ class OrderIndexTests(unittest.TestCase):
             self.assertIn(str(folder.resolve()), source_paths)
             self.assertFalse(scan_server_changes(config)["server"]["changed"])
 
+    # 验证不属于订单的所选目录被拒绝，不递归处理子目录。
+    # self：当前测试用例或测试替身实例。
     def test_selected_non_order_folder_is_rejected_without_processing_children(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config()
@@ -4698,6 +4972,8 @@ class OrderIndexTests(unittest.TestCase):
 
             self.assertFalse((config.workflow_database).exists())
 
+    # 验证非标准订单目录有可识别报告时按临时订单处理。
+    # self：当前测试用例或测试替身实例。
     def test_selected_non_order_folder_with_recognized_report_is_temporary_order(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config()
@@ -4720,6 +4996,8 @@ class OrderIndexTests(unittest.TestCase):
             )
             self.assertFalse(scan_server_changes(config)["server"]["changed"])
 
+    # 验证扫描发现未处理的非订单目录时只提示人工处理。
+    # self：当前测试用例或测试替身实例。
     def test_scan_reports_unprocessed_non_order_folder_as_manual_only(self):
         with tempfile.TemporaryDirectory() as temp:
             config = Config()

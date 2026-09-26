@@ -171,3 +171,19 @@ OrderDashboardView.body.onAppear
 - 库存比对在本次观察期间保持加载状态，因此只审查了加载态，没有声称库存结果页通过。
 - 没有执行生产、出货、Server 确认或“稍后处理”，所以这些写入流程只根据源码入口和可见按钮进行审查。
 - 截图和本报告用于 Product Design 的后续审查、设计探索和方案对比，不是业务数据正确性的替代验证。
+
+## 工厂单状态标签落地（2026-09-21）
+
+用户选择浅底标签方案，并要求未完成文字更浅、列标题与内容居中。`OrderDashboardView.swift` 的 `factoryCell` 将完成状态显示为绿色勾和浅绿底，未完成状态使用空心圆、浅灰文字（RGB 0.57 / 0.60 / 0.65）和淡灰底；状态文字为 13 pt、中等字重，标签高 24 pt。
+
+这里用 `Bool?` 区分三种显示：`nil` 为标题/普通文字，`true` 为完成，`false` 为未完成；只改变 SwiftUI 显示，不改变 Python 状态判定或 SQLite 事实。不能把 `false` 当成不显示标签，否则未完成行又会回到旧的纯文字样式。标题与内容共用 `orderDashboardFactoryColumnWidths`，整个图标和文字组合在列内居中；不是只居中文字而把图标额外偏移到一侧。长出库文本保持单行截断，悬停可读完整状态和单据号。
+
+浅灰是用户指定的视觉弱化，不代表禁止操作；是否可选择仍由原有业务规则控制。视觉可读性需以安装版实际尺寸检查，放大的方案图和 Swift 编译通过均不能替代这一步。
+
+验证记录：沙盒首次运行在 SwiftUI StateMacro 启动处被拒绝，普通执行环境重跑 `scripts/test-release` 通过（422 Python 测试，跳过 1；macOS UI、AIMES 离线表格、PP0067 workbook 和差异检查通过）。一次串行 `scripts/build-app` 通过，打包 Node v24.19.0；产物 `/tmp/pp-flowhub-build/PP FlowHub.app`，Bundle `com.pacificpride.ppflowhub`，0.4.1 (5)，可执行文件时间 2026-09-21 22:38:31 PDT，SHA-256 `a3e2ec8e0eb0d83e5bdd7e46110430630bf2f32ef813f27bbacb25be2a791bd9`。电脑控制工具明确拒绝 Terminal，正式签名安装与安装版视觉验收未完成，详见根目录 `design-qa.md`。
+
+### 状态列细化（2026-09-21）
+
+用户进一步要求四种状态均匀排列、未完成无背景、文字恢复原大小。状态区域总宽 510 pt 保持不变，拆单/优化/生产/出库各为 127.5 pt，表头和单元格共用这些宽度，列中心间距相等。状态文字恢复原来的 `.caption`（不再指定 13 pt medium），未完成背景为 `Color.clear`，浅灰文字和空心圆保留。完成状态仍有浅绿背景。出库长单据号可能较早截断，悬停仍可查看完整内容。此段取代上文 13 pt 文字和未完成淡灰底的初版说明。
+
+细化版本完整发布门禁通过（422 Python，跳过 1；macOS UI、AIMES 离线表格、PP0067 workbook），一次串行构建通过。当前待签名产物仍在 `/tmp/pp-flowhub-build/PP FlowHub.app`，可执行 SHA-256 更新为 `fd97148ad1e288eed02fe6bca8a0df93c0d722f360edcdb6e1ca2c4864f323c3`，此前初版 hash 不再代表当前产物。正式签名安装及视觉验收仍未完成。

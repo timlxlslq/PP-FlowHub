@@ -10,6 +10,8 @@ from traveler_assistant.order_index import OrderIndexStore
 
 
 class OrderDetailsTests(unittest.TestCase):
+    # 验证五金详情采用商品目录属性，不被映射显示别名覆盖。
+    # self：当前测试用例或测试替身实例。
     def test_hardware_detail_uses_catalog_not_mapping_display_alias(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -44,6 +46,8 @@ class OrderDetailsTests(unittest.TestCase):
             self.assertNotIn("source_code", hardware[0])
             self.assertEqual(hardware[0]["product_code"], "M1001")
             self.assertEqual(hardware[0]["display_name"], "Unihopper Hinge")
+    # 验证不同厚度的同色饰面板投影使用相同的颜色图片标识。
+    # self：当前测试用例或测试替身实例。
     def test_panel_projection_uses_one_color_image_identity_across_thicknesses(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Config(state_dir=Path(directory) / "state")

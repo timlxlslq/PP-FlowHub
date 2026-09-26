@@ -1,3 +1,4 @@
+// 从标准输入读取请求，登录 AIMES 并查询工厂单，输出结构化结果。参数：输入 JSON 提供登录信息、查询条件及动作选项。
 import { chromium } from "playwright";
 import fs from "node:fs";
 import { readAimesTable } from "./aimes_table.mjs";
@@ -7,6 +8,9 @@ for await (const chunk of process.stdin) chunks.push(chunk);
 const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
 const processStartedAt = performance.now();
 const timings = [];
+/** 读取当前页面地址并移除查询参数，读取失败返回空串。
+ * 参数：无；使用当前 page。
+ */
 const safePageURL = () => {
   try {
     if (!page) return "";
@@ -16,12 +20,18 @@ const safePageURL = () => {
     return "";
   }
 };
+/** 向标准错误输出包含页面地址的结构化进度日志。
+ * 参数：message：进度文案；details：补充日志字段。
+ */
 const log = (message, details = {}) => process.stderr.write(`${JSON.stringify({
   event: "progress",
   message: `[+${((performance.now() - processStartedAt) / 1000).toFixed(2)}s] ${message}`,
   page_url: safePageURL(),
   ...details,
 })}\n`);
+/** 记录阶段耗时并输出完成日志。
+ * 参数：stage：阶段标识；label：阶段名称；startedAt：计时起点。
+ */
 const recordStage = (stage, label, startedAt) => {
   const durationSeconds = Number(((performance.now() - startedAt) / 1000).toFixed(2));
   timings.push({ stage, label, duration_seconds: durationSeconds });
@@ -29,7 +39,10 @@ const recordStage = (stage, label, startedAt) => {
 };
 let browser;
 let page;
-// Retrying an authenticated read reuses the current browser and login session.
+// 重试已认证的读取操作时复用当前浏览器和登录会话。
+/** 复用当前登录会话重试只读页面步骤，最多两次。
+ * 参数：label：步骤名称；action：待执行的异步操作。
+ */
 const retryPageStep = async (label, action) => {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -60,10 +73,10 @@ try {
   page = await browser.newPage();
   const login = "https://passport.3vjia.com/login?pageTitle=%E9%A6%96%E9%A1%B5&appId=aimes-web&extKey=&redirect_uri=https%3A%2F%2Faimes.3vjia.com%2Fdashboard%2Fworkbench";
   const loginStartedAt = performance.now();
-  log("打开 AIMES 登录网页（网址参数已省略）");
+  log("打开 AIMES 登录网页");
   await page.goto(login, { waitUntil: "domcontentloaded", timeout: 30000 });
   if (!page.url().includes("/dashboard/")) {
-    log("在 AIMES 登录页填写账号和密码（内容已省略）");
+    log("在 AIMES 登录页填写账号和密码");
     await page.locator('input[type="text"]').fill(request.username);
     await page.locator('input[type="password"]').fill(request.password);
     log("提交 AIMES 登录");
@@ -91,9 +104,7 @@ try {
       requireMetadata: Boolean(request.includeOrderMetadata),
     });
 
-    // Keep the original AIMES behavior: read only the current page of 50
-    // factory orders. Select 50 explicitly in case the browser remembers a
-    // previous page-size choice.
+    // 保留原有 AIMES 行为：只读当前页的 50 条工厂单；显式选择 50 条，避免沿用浏览器记住的其他分页设置。
     const pageSizeControl = page.locator([
       '.el-pagination .el-select',
       '.ant-pagination-options .ant-select',
@@ -122,6 +133,9 @@ try {
       });
       firstTableSnapshot = null;
       const { headers, rows } = table;
+      /** 在当前表头中查找任一别名对应的列下标。
+       * 参数：aliases：允许的列名别名列表。
+       */
       const findColumn = aliases => headers.findIndex(header => aliases.some(alias => header === alias || header.includes(alias)));
       const factoryColumn = findColumn(["工厂单号"]);
       const factoryNameColumn = findColumn(["工厂单名称"]);
@@ -201,7 +215,7 @@ try {
       ? request.factoryOrders.filter(factoryOrder => !recentFactoryOrders.has(String(factoryOrder).toUpperCase()))
       : request.factoryOrders;
     for (const factoryOrder of verificationOrders) {
-      log("在 AIMES 工厂订单页精确核验工厂单存在性（内容已省略）");
+      log("在 AIMES 工厂订单页精确核验工厂单存在性");
       const beforeQuery = await page.locator("tbody").innerText().catch(() => "");
       await input.fill(factoryOrder);
       await page.getByRole("button", { name: "查询", exact: true }).click();

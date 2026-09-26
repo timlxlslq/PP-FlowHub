@@ -1,9 +1,7 @@
-"""Shared configuration, validation and external-identity helpers.
+"""共享配置、校验和外部身份查询辅助能力。
 
-This module is a low-level support layer for the workflow modules.  It owns
-configuration resolution, business-facing rule errors, common normalization,
-and the AIMES lookup boundary.  It should not decide which UI action to run;
-that decision belongs to the CLI/router and tool gateway.
+本模块为工作流提供配置解析、业务错误、通用标准化及 AIMES 查询边界。
+界面动作的选择由 CLI、路由和工具网关负责，不在此处决定。
 """
 
 from __future__ import annotations
@@ -43,13 +41,14 @@ AIMES_BULK_FETCH_LIMIT = 50
 
 class RuleError(RuntimeError):
     def __init__(self, code: str, message: str, **context):
+        """建立带错误码和上下文的业务异常；code 为错误码，message 为提示，context 为定位字段。"""
         super().__init__(message)
         self.code = code
         self.context = context
 
 
 def _extract_aimes_failure(stderr: str) -> str:
-    """Extract the final helper error while ignoring JSON progress lines."""
+    """从标准错误文本 stderr 提取最终 AIMES 错误，跳过 JSON 进度并移除附带页面地址。"""
     plain_lines: list[str] = []
     final_errors: list[str] = []
     for raw_line in str(stderr or "").splitlines():
@@ -69,16 +68,14 @@ def _extract_aimes_failure(stderr: str) -> str:
             plain_lines.append(line)
     if final_errors:
         error = final_errors[-1]
-        # The helper appends the current page only as diagnostic context. The
-        # URL sanitizer also runs later, but dropping it here keeps the
-        # business error and its classification independent of page details.
+        # 当前页面地址只是诊断信息；先去掉它，使业务错误及分类不依赖页面细节，后续仍会脱敏。
         error = re.split(r"[;；]\s*当前页面\s*[:：]", error, maxsplit=1)[0]
         return error.strip()
     return plain_lines[-1] if plain_lines else ""
 
 
 def _aimes_failure_code(error: str) -> str:
-    """Map a final AIMES error to a stable business-facing RuleError code."""
+    """把最终错误说明 error 分类为稳定的业务错误码，供界面和调用方识别。"""
     message = str(error or "").strip().casefold()
     if any(marker in message for marker in ("账号或密码错误", "用户名或密码", "登录失败", "凭证无效")):
         return "aimes_credentials"
@@ -94,18 +91,16 @@ def _aimes_failure_code(error: str) -> str:
 
 
 def factory_name_order_prefix(factory_name: str) -> str:
-    """Return an explicit order-like prefix from an AIMES factory name."""
+    """从工厂单名称 factory_name 提取明确的订单号前缀，未识别时返回空字符串。"""
     match = FACTORY_NAME_ORDER_PREFIX_RE.match(str(factory_name or "").strip())
     return match.group(1).upper() if match else ""
 
 
 def factory_name_order_mismatch(factory_name: str, sales_order_name: str) -> tuple[str, str] | None:
-    """Return mismatched name/order prefixes without guessing a correction.
+    """检查工厂单名称与销售订单归属，不猜测修正值。
 
-    A split suffix such as ``PP0072-2`` is valid when the sales order is the
-    parent ``PP0072``. Names without an explicit order-like prefix are left
-    alone because older AIMES rows may use room names such as ``Kitchen``.
-    """
+    参数：factory_name 为工厂单名称；sales_order_name 为销售订单号。主单允许对应分单后缀；
+    没有明确订单前缀的旧房间名称不判为冲突，不一致时返回两个前缀。"""
     prefix = factory_name_order_prefix(factory_name)
     order = str(sales_order_name or "").strip().upper()
     if not prefix or not order or prefix == order:
@@ -116,6 +111,7 @@ def factory_name_order_mismatch(factory_name: str, sales_order_name: str) -> tup
 
 
 def progress(message: str, **details) -> None:
+    """输出并记录一条进度 JSON；message 为说明，details 为阶段、耗时等附加字段。"""
     payload = {"event": "progress", "message": message, **details}
     log_progress_payload(payload)
     print(json.dumps(payload, ensure_ascii=False), file=sys.stderr, flush=True)
@@ -126,8 +122,7 @@ class Config:
     source_root: Path = Path("/Volumes/server/Optimized Orders")
     order_root: Path = Path.home() / "Documents/pp-flowhub/runtime/travelers"
     template: Path = Path(__file__).resolve().parent.parent / "resources/templates/Work Order Traveler.xlsx"
-    # Traveler file backups remain configurable. Database backups use the
-    # local project state directory so they are independent from that setting.
+    # Traveler 文件备份路径可配置；数据库备份使用本地状态目录，与此设置独立。
     backup_root: Path = Path("/Volumes/server/g/pp-flowhub/database-backups")
     state_dir: Path = Path.home() / "Documents/pp-flowhub/data"
     initial_date: str = "2026-07-22"
@@ -139,34 +134,31 @@ class Config:
     operation_log_enabled: bool = True
     storage_prepared: bool = False
     test_source: bool = False
-    # Server previews use one process-local database connection.  It is
-    # intentionally not part of persisted settings or command-line state.
+    # Server 预览复用进程内连接，不将连接对象写入设置或命令行状态。
     workflow_connection: sqlite3.Connection | None = None
-    # One-shot maintenance/diagnostic commands may request a repair pass.
-    # The resident App service sets this false so normal reads consume the
-    # transactionally maintained status directly.
+    # 一次性维护或诊断可请求重算；App 常驻服务关闭此项，普通读取直接使用事务维护的状态。
     reconcile_outbound_on_read: bool = True
 
     @property
     def operation_log_file(self) -> Path:
+        """返回当前状态目录中的操作日志路径；无显式参数。"""
         return self.state_dir / "operation-log.jsonl"
 
     @property
     def workflow_database(self) -> Path:
+        """返回当前状态目录中的中央业务数据库路径；无显式参数。"""
         return database_path(self.state_dir)
 
     @property
     def database_backup_root(self) -> Path:
+        """返回当前状态目录中的数据库备份目录；无显式参数，与 Traveler 备份设置独立。"""
         return self.state_dir / "database-backups"
 
     def prepare_storage(self) -> None:
-        """Prepare the canonical database for normal application use.
+        """检查测试来源隔离并确保中央数据库结构可用；无显式参数。
 
-        Legacy storage was migrated once during the database cutover and is
-        now kept only under ``migration-archives``.  Startup must not inspect
-        or mutate those files again: ``workflow.sqlite3`` is the sole runtime
-        source of durable application facts.
-        """
+        旧存储已在数据库切换时迁移到归档目录，启动不再读取或修改旧文件；
+        workflow.sqlite3 是运行时持久事实的唯一来源。"""
         from .hardware_facts import assert_source_isolation
         assert_source_isolation(self.workflow_database, [self.source_root], test_mode=self.test_source)
         self.storage_prepared = True
@@ -174,9 +166,11 @@ class Config:
 
     @property
     def settings_file(self) -> Path:
+        """返回当前状态目录中的设置文件路径；无显式参数。"""
         return self.state_dir / "settings.json"
 
     def load_settings(self, source_profile: str | None = None) -> None:
+        """读取设置并校验日期；source_profile 为 server、local 或默认来源配置选择。"""
         self.test_source = source_profile == "local"
         if not self.settings_file.is_file():
             return
@@ -209,9 +203,7 @@ class Config:
                 if key in values:
                     setattr(self, attribute, Path(str(values[key])).expanduser())
                     break
-        # iCloud Traveler backup paths were part of the old design. They are
-        # intentionally ignored so a stale settings file cannot reintroduce
-        # cloud persistence after the database cutover.
+        # 忽略旧版 iCloud Traveler 备份路径，避免过期设置在数据库切换后重新引入云端持久化。
         if "icloud" in str(self.backup_root).lower() or "mobile documents" in str(self.backup_root).lower():
             self.backup_root = Path("/Volumes/server/g/pp-flowhub/database-backups")
         if "initial_date" in values:
@@ -233,18 +225,22 @@ class Config:
 
     @property
     def factory_names_file(self) -> Path:
+        """返回历史工厂单名称文件的路径；无显式参数，仅计算路径，不读取文件。"""
         return self.state_dir / "factory-names.json"
 
     @property
     def aimes_orders_file(self) -> Path:
+        """返回历史 AIMES 订单文件的路径；无显式参数，仅计算路径，不读取文件。"""
         return self.state_dir / "aimes-orders.json"
 
     @property
     def material_assignments_file(self) -> Path:
+        """返回历史材料归属文件的路径；无显式参数，仅计算路径，不读取文件。"""
         return self.state_dir / "material-assignments.json"
 
     @property
     def node_path(self) -> str:
+        """查找 Node 运行程序，依次使用环境配置、随包程序、工作区程序或系统命令；无显式参数。"""
         configured = os.environ.get("TRAVELER_NODE", "").strip()
         if configured:
             return configured
@@ -256,10 +252,12 @@ class Config:
 
     @property
     def playwright_node_modules(self) -> Path:
+        """返回 Playwright 依赖目录，优先读取环境变量配置；无显式参数。"""
         return Path(os.environ.get("TRAVELER_NODE_MODULES", Path(__file__).resolve().parent.parent / "node_modules"))
 
 
 def load_factory_name_cache(config: Config) -> dict[str, str]:
+    """读取并标准化工厂单名称缓存；config 提供中央数据库配置。"""
     values = read_cache(config.workflow_database, "factory_names", None, {})
     if not isinstance(values, dict):
         return {}
@@ -267,10 +265,12 @@ def load_factory_name_cache(config: Config) -> dict[str, str]:
 
 
 def save_factory_name_cache(config: Config, values: dict[str, str]) -> None:
+    """保存工厂单名称缓存；config 为数据库配置，values 为工厂单号到名称的映射。"""
     write_cache(config.workflow_database, "factory_names", dict(sorted(values.items())))
 
 
 def load_aimes_order_cache(config: Config) -> list[dict[str, str]]:
+    """读取并标准化已有 AIMES 订单缓存，过滤无工厂单号的记录；config 为数据库配置。"""
     values = read_cache(config.workflow_database, "aimes_orders", None, [])
     if not isinstance(values, list):
         return []
@@ -287,15 +287,18 @@ def load_aimes_order_cache(config: Config) -> list[dict[str, str]]:
 
 
 def save_aimes_order_cache(config: Config, values: list[dict[str, str]]) -> None:
+    """保存 AIMES 订单记录缓存；config 为数据库配置，values 为订单记录列表。"""
     write_cache(config.workflow_database, "aimes_orders", values)
 
 
 def load_material_assignments(config: Config) -> dict[str, str]:
+    """读取材料归属映射并过滤空路径；config 为数据库配置。"""
     values = read_cache(config.workflow_database, "material_assignments", None, {})
     return {str(key): str(value) for key, value in values.items() if str(value).strip()}
 
 
 def save_material_assignment(config: Config, key: str, path: str) -> None:
+    """更新一项材料归属并保存映射；config 为配置，key 为归属键，path 为所选路径。"""
     values = load_material_assignments(config)
     values[str(key)] = str(path)
     write_cache(config.workflow_database, "material_assignments", dict(sorted(values.items())))
@@ -309,6 +312,10 @@ def _run_aimes_lookup(
     include_order_metadata: bool = False,
     verify_factory_orders: bool = False,
 ):
+    """读取钥匙串凭据并执行 AIMES 查询，处理进度、超时、重试及业务错误。
+
+    参数：config 为连接和运行配置；factory_orders 为待查工厂单号；recent_limit 为最近记录数；
+    include_order_metadata 决定是否返回完整订单字段；verify_factory_orders 决定是否精确核验存在性。"""
     missing = [order.upper() for order in factory_orders if order]
     if not missing and not recent_limit:
         return {"rows": []} if include_order_metadata else {}
@@ -340,6 +347,7 @@ def _run_aimes_lookup(
     sensitive_values = tuple(value for value in (config.aimes_username, password) if value)
 
     def consume_progress(stderr: str, attempt_timings: list[dict[str, object]]) -> None:
+        """解析并脱敏转发进度；stderr 为标准错误文本，attempt_timings 为本次查询阶段耗时的收集列表。"""
         nonlocal last_progress_stage
         for line in stderr.splitlines():
             try:
@@ -388,9 +396,7 @@ def _run_aimes_lookup(
                 for item in node_timings
                 if isinstance(item, dict) and str(item.get("label", item.get("stage", ""))).strip()
             ]
-            # The attempt duration is an envelope around the helper process,
-            # not a child stage. Keep only non-overlapping stages here; the
-            # caller owns the authoritative end-to-end duration.
+            # 单次尝试耗时覆盖整个辅助进程，不是子阶段；此处只保留不重叠阶段，总耗时由调用方记录。
             result["_aimes_timings"] = operation_timings + (normalized_timings or attempt_timings)
             result["_aimes_retry_count"] = attempt
             return result
@@ -424,8 +430,7 @@ def _run_aimes_lookup(
                 f"AIMES 第 {attempt + 1}/2 次尝试失败，准备重试",
                 retry_attempt=attempt + 1,
             )
-        # Authenticated page/query failures are retried inside the same browser.
-        # Relaunch only for a failed process/session, never for known data errors.
+        # 登录后的页面或查询失败在同一浏览器内重试；只有进程或会话失败才重启，已知数据错误不重启。
         if _aimes_failure_code(last_error) in {
             "aimes_credentials",
             "aimes_table_schema",
@@ -465,6 +470,7 @@ def _run_aimes_lookup(
 
 
 def lookup_aimes_names(config: Config, factory_orders: list[str], recent_limit: int = 0) -> dict[str, str]:
+    """查询并校验工厂单名称；config 为配置，factory_orders 为工厂单号列表，recent_limit 为附加近期读取数。"""
     missing = [order.upper() for order in factory_orders if order]
     result = _run_aimes_lookup(config, missing, recent_limit=recent_limit)
     if not isinstance(result, dict):
@@ -485,6 +491,9 @@ def lookup_aimes_recent_orders(
     *,
     include_trace: bool = False,
 ) -> list[dict[str, str]] | tuple[list[dict[str, str]], list[dict[str, object]]]:
+    """读取最近 AIMES 订单并标准化字段。
+
+    参数：config 为配置；limit 为读取数量；include_trace 决定是否同时返回各阶段耗时。"""
     result = _run_aimes_lookup(config, [], recent_limit=limit, include_order_metadata=True)
     rows = result.get("rows") if isinstance(result, dict) else None
     if not isinstance(rows, list):
@@ -506,7 +515,7 @@ def lookup_aimes_recent_orders(
 
 
 def _non_aggregate_aimes_timings(values: object) -> list[dict[str, object]]:
-    """Return only flat AIMES stages, excluding an old aggregate timing item."""
+    """从耗时数据 values 保留独立阶段，过滤旧的尝试和总计项，避免重复累计。"""
     if not isinstance(values, list):
         return []
     return [
@@ -518,7 +527,9 @@ def _non_aggregate_aimes_timings(values: object) -> list[dict[str, object]]:
 
 
 def verify_aimes_factory_orders(config: Config, factory_orders: list[str]) -> dict[str, list[dict[str, str]] | list[str]]:
-    """Check exact AIMES existence without treating a missing row as a transport error."""
+    """精确查询工厂单存在性，区分记录缺失和传输失败。
+
+    参数：config 为配置；factory_orders 为待核验工厂单号。返回找到的记录及缺失单号。"""
     requested = [str(order).upper().strip() for order in factory_orders if str(order).strip()]
     result = _run_aimes_lookup(config, requested, verify_factory_orders=True)
     rows = result.get("rows") if isinstance(result, dict) else None
@@ -548,7 +559,9 @@ def refresh_aimes_recent_orders_and_verify(
     *,
     timing_sink: list[dict[str, object]] | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, list[dict[str, str]] | list[str]]]:
-    """Fetch the recent page and exact-check stale local factories in one session."""
+    """在同一浏览器会话读取最近订单并核验指定工厂单。
+
+    参数：config 为配置；limit 为近期读取数；factory_orders 为精确核验列表；timing_sink 为可选耗时收集列表。"""
     result = _run_aimes_lookup(
         config,
         [str(order).upper().strip() for order in factory_orders if str(order).strip()],
@@ -563,6 +576,7 @@ def refresh_aimes_recent_orders_and_verify(
         raise RuleError("aimes_unavailable", "AIMES 返回的获取与精确核验格式无效")
 
     def normalize(rows: list[object]) -> list[dict[str, str]]:
+        """标准化订单列表 rows 的身份、名称及拆单时间字段，过滤非字典记录。"""
         return [
             {
                 "factory_order": str(row.get("factory_order", "")).upper().strip(),
@@ -589,12 +603,10 @@ def refresh_aimes_recent_orders(
     persist: bool = True,
     timing_sink: list[dict[str, object]] | None = None,
 ) -> list[dict[str, str]]:
-    """Fetch structured AIMES rows, optionally persisting the raw result.
+    """获取结构化 AIMES 订单，可选择保存原始结果。
 
-    The order-index workflow passes ``persist=False`` so it can validate the
-    rows first. Invalid sales-order names are warnings only and must never be
-    written to the business mapping cache.
-    """
+    参数：config 为配置；limit 为近期读取数；persist 为缓存写入开关；timing_sink 为可选耗时收集列表。
+    订单索引传入 persist=False 以先校验；无效销售订单名只能作为警告，不能进入业务映射缓存。"""
     traced = lookup_aimes_recent_orders(config, limit, include_trace=True)
     rows, timings = traced
     if timing_sink is not None:
@@ -613,7 +625,7 @@ def refresh_aimes_recent_orders(
 
 
 def refresh_aimes_recent_names(config: Config, limit: int = AIMES_BULK_FETCH_LIMIT) -> dict[str, str]:
-    """Fetch and cache the newest AIMES factory-order rows."""
+    """读取最近 AIMES 工厂单名称但不保存缓存；config 为配置，limit 为近期读取数。"""
     rows = refresh_aimes_recent_orders(config, limit, persist=False)
     return {
         row["factory_order"]: row["factory_name"]
@@ -632,10 +644,12 @@ class FittingItem:
 
 
 def _text(value) -> str:
+    """把 value 转为去除首尾空白的文本；None 转为空字符串。"""
     return "" if value is None else str(value).strip()
 
 
 def _number(value) -> float:
+    """把 value 转为浮点数；空值按零处理，其他无法解析的值抛出业务错误。"""
     if value in (None, ""):
         return 0.0
     try:
@@ -645,6 +659,7 @@ def _number(value) -> float:
 
 
 def _normalize_name(value: str) -> str:
+    """去除名称 value 中的空白、下划线和连字符并转为大写，供五金名称比较。"""
     return re.sub(r"[\s_-]+", "", value).upper()
 
 
@@ -660,7 +675,11 @@ def parse_fittings_groups(
     *,
     allow_missing_factory: bool = False,
     fallback_factory: str = "",
+    included_factories: tuple[str, ...] | None = None,
 ) -> list[tuple[str, list[FittingItem]]]:
+    """解析并校验五金报表，按工厂单返回五金记录，并合并数量一致的左右导轨。
+
+    参数：path 为报表路径；allow_missing_factory 是否允许缺少有效工厂单号；fallback_factory 为替代单号。"""
     invalid_dimension = False
     try:
         with zipfile.ZipFile(path) as archive:
@@ -691,36 +710,40 @@ def parse_fittings_groups(
 
     groups = []
     for index, start in enumerate(starts):
-        factory = _text(sheet.cell(start, 3).value).upper()
+        factory = next((_text(sheet.cell(start, col).value).upper()
+                        for col in range(2, sheet.max_column + 1)
+                        if FACTORY_RE.fullmatch(_text(sheet.cell(start, col).value).upper())), "")
         if not FACTORY_RE.fullmatch(factory):
             if allow_missing_factory and fallback_factory:
                 factory = fallback_factory.strip()
             else:
                 raise RuleError("fittings_identity", f"五金清单工厂单号异常：{factory}")
+        if included_factories is not None and factory not in included_factories:
+            continue
         header = start + 5
-        # Both AICNC versions use the same columns and block offsets.
+        # 按标题定位，兼容新版紧凑报表；已出货区块在读取数量前跳过。
         legacy = re.sub(r"\s+", "", _text(sheet.cell(start, 1).value)) == "订单号"
-        expected = ({3: "名称", 5: "编号", 6: "尺寸", 11: "数量"} if legacy
-                    else {3: "Name", 5: "Code", 6: "Size", 11: "Quantity"})
-        if any(_text(sheet.cell(header, col).value) != label for col, label in expected.items()):
+        labels = {_text(sheet.cell(header, col).value): col for col in range(1, sheet.max_column + 1)}
+        expected = ("名称", "编号", "尺寸", "数量") if legacy else ("Name", "Code", "Size", "Quantity")
+        if any(label not in labels for label in expected):
             raise RuleError("fittings_schema", f"五金清单第 {start} 行开始的区块字段发生变化")
+        name_col, code_col, size_col, qty_col = (labels[label] for label in expected)
+        unit_col = labels.get("单位" if legacy else "Unit", 9)
         end = starts[index + 1] if index + 1 < len(starts) else sheet.max_row + 1
         items = []
         for row in range(header + 1, end):
-            name = _text(sheet.cell(row, 3).value)
+            name = _text(sheet.cell(row, name_col).value)
             if not name or name in {"Total", "小计", "合计"}:
                 continue
             items.append(FittingItem(
                 name=name,
-                code=_text(sheet.cell(row, 5).value),
-                size=_text(sheet.cell(row, 6).value),
-                unit=_text(sheet.cell(row, 9).value),
-                quantity=_number(sheet.cell(row, 11).value),
+                code=_text(sheet.cell(row, code_col).value),
+                size=_text(sheet.cell(row, size_col).value),
+                unit=_text(sheet.cell(row, unit_col).value),
+                quantity=_number(sheet.cell(row, qty_col).value),
             ))
-        # A left/right rail pair represents one physical rail set.  Validate
-        # and canonicalize it here so every downstream consumer receives one
-        # source row per physical set.  The same rule applies to high and
-        # lower rails, whose source names are different in the Fittingslist.
+        # 左右导轨一对表示一套实物，在此校验并合并，使下游每套只收到一条来源记录。
+        # 高导轨和低导轨使用相同规则，但五金报表中的名称不同。
         for left_name, right_name, left_label, right_label in RAIL_PAIR_NAMES:
             left = [item for item in items if _normalize_name(item.name) == left_name]
             right = [item for item in items if _normalize_name(item.name) == right_name]

@@ -281,7 +281,10 @@ class Symbol:
 
 
 def tracked_files() -> list[str]:
-    """返回当前 Git 追踪的文件列表。"""
+    """返回当前 Git 追踪的文件列表。
+
+    参数：无。
+    """
     result = subprocess.run(
         ["git", "ls-files"], cwd=ROOT, check=True, capture_output=True, text=True
     )
@@ -289,14 +292,20 @@ def tracked_files() -> list[str]:
 
 
 def split_words(name: str) -> list[str]:
-    """把 snake_case 或 camelCase 标识符拆成便于翻译的词。"""
+    """把 snake_case 或 camelCase 标识符拆成便于翻译的词。
+
+    参数：name：待拆分或翻译的代码标识符。
+    """
     clean = name.strip("_")
     clean = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", clean)
     return [part.lower() for part in re.split(r"_+", clean) if part]
 
 
 def translated_subject(name: str) -> str:
-    """从标识符提取稳定、保守的中文业务主题。"""
+    """从标识符提取稳定、保守的中文业务主题。
+
+    参数：name：待拆分或翻译的代码标识符。
+    """
     words = split_words(name)
     translated: list[str] = []
     for word in words:
@@ -307,7 +316,10 @@ def translated_subject(name: str) -> str:
 
 
 def symbol_purpose(symbol: Symbol) -> str:
-    """为符号生成中文简要用途；关键入口使用人工维护的精确说明。"""
+    """为符号生成中文简要用途；关键入口使用人工维护的精确说明。
+
+    参数：symbol：待说明或渲染的符号记录。
+    """
     if symbol.name in SYMBOL_PURPOSES:
         return SYMBOL_PURPOSES[symbol.name]
     subject = translated_subject(symbol.name)
@@ -334,7 +346,10 @@ def symbol_purpose(symbol: Symbol) -> str:
 
 
 def file_purpose(path: str) -> str:
-    """返回每个项目文件的中文职责说明。"""
+    """返回每个项目文件的中文职责说明。
+
+    参数：path：待读取或写入的文件路径。
+    """
     if path in FILE_PURPOSES:
         return FILE_PURPOSES[path]
     if path.startswith("tests/test_"):
@@ -385,7 +400,10 @@ def file_purpose(path: str) -> str:
 
 
 def annotation_text(node: ast.expr | None) -> str:
-    """把 Python 类型注解转成简洁文本。"""
+    """把 Python 类型注解转成简洁文本。
+
+    参数：node：待解析或访问的语法树节点。
+    """
     if node is None:
         return "未声明"
     try:
@@ -395,7 +413,10 @@ def annotation_text(node: ast.expr | None) -> str:
 
 
 def python_parameter_text(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
-    """提取 Python 参数、类型和默认值。"""
+    """提取 Python 参数、类型和默认值。
+
+    参数：node：待解析或访问的语法树节点。
+    """
     args = node.args
     positional = [*args.posonlyargs, *args.args]
     default_offset = len(positional) - len(args.defaults)
@@ -427,23 +448,43 @@ class DirectCallVisitor(ast.NodeVisitor):
     """只收集当前函数体的调用，不把嵌套函数的调用误算给外层。"""
 
     def __init__(self, root: ast.AST) -> None:
+        """初始化直接调用收集器并记录需要遍历的根节点。
+
+        参数：self：当前语法树访问器实例；root：限定调用收集范围的语法树根节点。
+        """
         self.root = root
         self.calls: list[str] = []
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        """只遍历目标函数，避免混入嵌套函数的调用。
+
+        参数：self：当前语法树访问器实例；node：待解析或访问的语法树节点。
+        """
         if node is self.root:
             self.generic_visit(node)
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
+        """跳过匿名函数，避免混入其内部调用。
+
+        参数：self：当前语法树访问器实例；node：待解析或访问的语法树节点。
+        """
         return
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        """仅在类为目标根节点时继续收集调用。
+
+        参数：self：当前语法树访问器实例；node：待解析或访问的语法树节点。
+        """
         if node is self.root:
             self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
+        """记录当前调用名称并继续遍历其子表达式。
+
+        参数：self：当前语法树访问器实例；node：待解析或访问的语法树节点。
+        """
         try:
             name = ast.unparse(node.func)
         except Exception:
@@ -454,13 +495,20 @@ class DirectCallVisitor(ast.NodeVisitor):
 
 
 def python_symbols(path: Path) -> list[Symbol]:
-    """用 AST 提取一个 Python 文件里的类、函数和方法。"""
+    """用 AST 提取一个 Python 文件里的类、函数和方法。
+
+    参数：path：待读取或写入的文件路径。
+    """
     relative = path.relative_to(ROOT).as_posix()
     source = path.read_text(encoding="utf-8", errors="replace")
     tree = ast.parse(source, filename=relative)
     symbols: list[Symbol] = []
 
     def walk(body: Iterable[ast.stmt], parents: list[str]) -> None:
+        """递归遍历语句与控制块，登记带完整父级名称的类和函数。
+
+        参数：body：需要递归扫描的语句列表；parents：外层类和函数的名称路径。
+        """
         for node in body:
             if isinstance(node, ast.ClassDef):
                 qualified = ".".join([*parents, node.name])
@@ -521,12 +569,18 @@ SWIFT_PROPERTY_RE = re.compile(
 
 
 def line_number(source: str, offset: int) -> int:
-    """把字符偏移转换为一基行号。"""
+    """把字符偏移转换为一基行号。
+
+    参数：source：待分析的完整源码；offset：声明在源码中的字符偏移。
+    """
     return source.count("\n", 0, offset) + 1
 
 
 def declaration_end(source: str, start: int) -> int:
-    """找到 Swift 声明主体的第一个左花括号。"""
+    """找到 Swift 声明主体的第一个左花括号。
+
+    参数：source：待分析的完整源码；start：声明起始字符偏移。
+    """
     parens = 0
     brackets = 0
     in_string = False
@@ -562,7 +616,10 @@ def declaration_end(source: str, start: int) -> int:
 
 
 def matching_brace(source: str, opening: int) -> int:
-    """近似匹配 Swift/JS 的主体花括号，忽略字符串和行注释。"""
+    """近似匹配 Swift/JS 的主体花括号，忽略字符串和行注释。
+
+    参数：source：待分析的完整源码；opening：主体左花括号的位置。
+    """
     if opening >= len(source) or source[opening] != "{":
         return opening
     depth = 0
@@ -620,7 +677,10 @@ def matching_brace(source: str, opening: int) -> int:
 
 
 def swift_parameter_list(signature: str) -> list[str]:
-    """提取 Swift 声明的参数文本；保留外部参数名和默认值。"""
+    """提取 Swift 声明的参数文本；保留外部参数名和默认值。
+
+    参数：signature：完整声明签名文本。
+    """
     opening = signature.find("(")
     if opening < 0:
         return []
@@ -644,7 +704,10 @@ def swift_parameter_list(signature: str) -> list[str]:
 
 
 def swift_return_type(signature: str, raw_kind: str) -> str:
-    """读取参数列表之后的返回类型，避免把闭包参数的箭头误认为函数返回值。"""
+    """读取参数列表之后的返回类型，避免把闭包参数的箭头误认为函数返回值。
+
+    参数：signature：完整声明签名文本；raw_kind：Swift 原始声明类别。
+    """
     opening = signature.find("(")
     if opening < 0:
         return "所属类型" if raw_kind == "init" else "未声明"
@@ -669,7 +732,10 @@ def swift_return_type(signature: str, raw_kind: str) -> str:
 
 
 def swift_symbols(path: Path) -> list[Symbol]:
-    """静态提取 Swift 类型、函数、初始化器和重要计算属性。"""
+    """静态提取 Swift 类型、函数、初始化器和重要计算属性。
+
+    参数：path：待读取或写入的文件路径。
+    """
     relative = path.relative_to(ROOT).as_posix()
     source = path.read_text(encoding="utf-8", errors="replace")
     symbols: list[Symbol] = []
@@ -691,6 +757,10 @@ def swift_symbols(path: Path) -> list[Symbol]:
             type_ranges.append((opening, matching_brace(source, opening), name))
 
     def container_name(offset: int) -> str | None:
+        """根据声明位置查找包围它的最内层 Swift 类型。
+
+        参数：offset：声明在源码中的字符偏移。
+        """
         containing = [item for item in type_ranges if item[0] < offset < item[1]]
         if not containing:
             return None
@@ -748,7 +818,10 @@ SHELL_FUNCTION_RE = re.compile(r"^\s*(?:function\s+)?(?P<name>[A-Za-z_][A-Za-z0-
 
 
 def js_symbols(path: Path) -> list[Symbol]:
-    """提取一方 Node.js 脚本里的命名函数。"""
+    """提取一方 Node.js 脚本里的命名函数。
+
+    参数：path：待读取或写入的文件路径。
+    """
     relative = path.relative_to(ROOT).as_posix()
     source = path.read_text(encoding="utf-8", errors="replace")
     symbols: list[Symbol] = []
@@ -770,7 +843,10 @@ def js_symbols(path: Path) -> list[Symbol]:
 
 
 def shell_symbols(path: Path) -> list[Symbol]:
-    """提取 shell 函数，并登记脚本顶层过程。"""
+    """提取 shell 函数，并登记脚本顶层过程。
+
+    参数：path：待读取或写入的文件路径。
+    """
     relative = path.relative_to(ROOT).as_posix()
     source = path.read_text(encoding="utf-8", errors="replace")
     symbols = [
@@ -792,7 +868,10 @@ def shell_symbols(path: Path) -> list[Symbol]:
 
 
 def project_source_paths(files: list[str]) -> list[Path]:
-    """选择需要做符号级索引的一方代码，明确排除第三方依赖。"""
+    """选择需要做符号级索引的一方代码，明确排除第三方依赖。
+
+    参数：files：Git 追踪文件的相对路径列表。
+    """
     result: list[Path] = []
     for item in files:
         if item.startswith("vendor/"):
@@ -803,7 +882,10 @@ def project_source_paths(files: list[str]) -> list[Path]:
 
 
 def collect_symbols(files: list[str]) -> list[Symbol]:
-    """按语言调用对应静态分析器。"""
+    """按语言调用对应静态分析器。
+
+    参数：files：Git 追踪文件的相对路径列表。
+    """
     symbols: list[Symbol] = []
     for path in project_source_paths(files):
         relative = path.relative_to(ROOT).as_posix()
@@ -822,7 +904,10 @@ def collect_symbols(files: list[str]) -> list[Symbol]:
 
 
 def resolve_calls(symbols: list[Symbol]) -> None:
-    """把直接调用名称尽可能映射到项目文件；歧义项保留为待运行时确认。"""
+    """把直接调用名称尽可能映射到项目文件；歧义项保留为待运行时确认。
+
+    参数：symbols：已提取的项目符号列表。
+    """
     by_name: dict[str, list[Symbol]] = {}
     for symbol in symbols:
         by_name.setdefault(symbol.name, []).append(symbol)
@@ -868,12 +953,18 @@ def resolve_calls(symbols: list[Symbol]) -> None:
 
 
 def markdown_escape(value: str) -> str:
-    """避免签名破坏 Markdown 行内代码。"""
+    """避免签名破坏 Markdown 行内代码。
+
+    参数：value：需要放入 Markdown 行内代码的签名文本。
+    """
     return value.replace("`", "'").replace("\n", " ")
 
 
 def render_symbol(symbol: Symbol) -> list[str]:
-    """把一个符号渲染为稳定、可搜索的中文条目。"""
+    """把一个符号渲染为稳定、可搜索的中文条目。
+
+    参数：symbol：待说明或渲染的符号记录。
+    """
     inputs = "；".join(f"`{markdown_escape(item)}`" for item in symbol.parameters) or "无显式参数（可能读取所属对象状态）"
     calls = "；".join(symbol.project_calls[:12]) or "未静态识别到一方函数调用；可能只做计算、调用系统/第三方 API，或通过动态类型分发"
     if len(symbol.project_calls) > 12:
@@ -890,13 +981,19 @@ def render_symbol(symbol: Symbol) -> list[str]:
 
 
 def write_text(path: Path, lines: list[str]) -> None:
-    """以 UTF-8 和统一末尾换行写入生成文档。"""
+    """以 UTF-8 和统一末尾换行写入生成文档。
+
+    参数：path：待读取或写入的文件路径；lines：按行组织的文档内容。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
 def render_file_map(files: list[str], symbols: list[Symbol], git_tracked_count: int) -> None:
-    """生成覆盖全部 Git 追踪文件及本地运行时文件的中文地图。"""
+    """生成覆盖全部 Git 追踪文件及本地运行时文件的中文地图。
+
+    参数：files：Git 追踪文件的相对路径列表；symbols：已提取的项目符号列表；git_tracked_count：Git 追踪文件总数。
+    """
     counts: dict[str, int] = {}
     for symbol in symbols:
         counts[symbol.path] = counts.get(symbol.path, 0) + 1
@@ -949,7 +1046,10 @@ def render_file_map(files: list[str], symbols: list[Symbol], git_tracked_count: 
 
 
 def reference_header(title: str, scope: str, count: int) -> list[str]:
-    """生成符号索引的统一说明。"""
+    """生成符号索引的统一说明。
+
+    参数：title：参考文档标题；scope：参考文档覆盖范围说明；count：本页登记的符号数量。
+    """
     return [
         f"# {title}",
         "",
@@ -967,7 +1067,10 @@ def reference_header(title: str, scope: str, count: int) -> list[str]:
 
 
 def render_reference(path: Path, title: str, scope: str, symbols: list[Symbol]) -> None:
-    """按文件分组生成符号参考。"""
+    """按文件分组生成符号参考。
+
+    参数：path：待读取或写入的文件路径；title：参考文档标题；scope：参考文档覆盖范围说明；symbols：已提取的项目符号列表。
+    """
     lines = reference_header(title, scope, len(symbols))
     grouped: dict[str, list[Symbol]] = {}
     for symbol in symbols:
@@ -981,7 +1084,10 @@ def render_reference(path: Path, title: str, scope: str, symbols: list[Symbol]) 
 
 
 def main() -> int:
-    """生成四份文档并打印覆盖统计。"""
+    """生成四份代码参考文档并打印覆盖统计。
+
+    参数：无；使用脚本配置和命令行选项。
+    """
     files = tracked_files()
     git_tracked_count = len(files)
     # 生成器本身在第一次运行前可能尚未进入 Git 索引，仍应纳入当前文档。

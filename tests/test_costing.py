@@ -11,6 +11,9 @@ from traveler_assistant.inventory import Product, _replace_product_database
 
 
 class CostingTests(unittest.TestCase):
+    # 创建隔离的成本测试配置，并导入带价格的商品样本。
+    # self：当前测试用例或测试替身实例。
+    # root：隔离测试目录根路径。
     def _config(self, root: Path) -> Config:
         config = Config(
             state_dir=root / "state",
@@ -26,6 +29,8 @@ class CostingTests(unittest.TestCase):
         ])
         return config
 
+    # 验证订单总成本采用订单材料汇总及未显示舍入的原始数量。
+    # self：当前测试用例或测试替身实例。
     def test_order_total_uses_order_material_summary_and_raw_quantities(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = self._config(Path(temporary))
@@ -63,6 +68,8 @@ class CostingTests(unittest.TestCase):
             self.assertNotIn("待分配", summary_values)
             workbook.close()
 
+    # 验证缺失成本价被标记为缺失，不当作零成本。
+    # self：当前测试用例或测试替身实例。
     def test_missing_cost_price_is_not_treated_as_zero(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = self._config(Path(temporary))
@@ -81,7 +88,17 @@ class CostingTests(unittest.TestCase):
             self.assertEqual(report["status"], "待补充")
             self.assertTrue(report["missing_items"])
 
+    # 验证成本明细按材料业务顺序显示，并合并相同五金。
+    # self：当前测试用例或测试替身实例。
     def test_display_lines_use_material_business_order_and_aggregate_hardware(self):
+        # 构造成本明细，按数量和单价计算金额。
+        # category：成本项目类别。
+        # code：商品 SKU 编码。
+        # name：测试样本名称。
+        # quantity：测试项目数量。
+        # factory：明细所属工厂单或材料汇总标签。
+        # unit：商品计量单位。
+        # price：单件成本价。
         def line(category, code, name, quantity, *, factory="材料汇总", unit="pcs", price=1.0):
             return {
                 "category": category,

@@ -56,12 +56,14 @@ INSTRUCTIONS = """你是工作流程助手的轻量路由 Agent。你只把用�
 
 
 def _load_api_key() -> None:
+    """从本地环境文件补充 API 凭据并检查是否存在；无参数，不覆盖已有环境变量。"""
     load_dotenv(Path.home() / "Documents" / "工作流程助手" / ".env.local", override=False)
     if not os.environ.get("OPENAI_API_KEY"):
         raise RuntimeError("未配置 OPENAI_API_KEY。")
 
 
 async def _run(text: str) -> AgentRouteResult:
+    """调用模型生成结构化路由决定及用量统计；text 为用户命令，不在此执行业务动作。"""
     _load_api_key()
     set_tracing_disabled(True)
     agent = Agent(
@@ -86,6 +88,7 @@ async def _run(text: str) -> AgentRouteResult:
 
 
 def route_with_agent(text: str) -> AgentRouteResult:
+    """同步运行路由并把计费、余额错误转换为中文提示；text 为待理解的用户命令。"""
     try:
         return asyncio.run(_run(text))
     except RateLimitError as exc:

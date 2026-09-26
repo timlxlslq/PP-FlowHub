@@ -1,4 +1,4 @@
-"""Bounded subprocess capture with live stderr progress delivery."""
+"""在超时限制内收集子进程输出，并实时传递标准错误中的进度。"""
 import codecs
 import os
 import selectors
@@ -7,6 +7,11 @@ import time
 
 
 def run_with_progress(command, *, input_text, env, timeout, on_stderr_line):
+    """执行子进程并返回完整输出，超时或异常时终止进程，非零退出时报错。
+
+    参数：command 为命令列表；input_text 为标准输入；env 为环境变量；timeout 为超时秒数；
+    on_stderr_line 为逐行接收标准错误的回调。
+    """
     started = time.monotonic()
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, env=env) as process:

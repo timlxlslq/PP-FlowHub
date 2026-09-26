@@ -1,4 +1,5 @@
 #!/bin/bash
+# 复制 PP0067 样本到临时目录，验证材料及 Traveler 生成、公式和渲染；无位置参数。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -12,8 +13,10 @@ VERIFY_DIR="$TEST_ROOT/verify"
 MATERIAL_VERIFY_DIR="$TEST_ROOT/material-verify"
 
 if command -v rg >/dev/null 2>&1; then
+  # 判断文件是否匹配正则；$1 为表达式，$2 为文件路径，退出码表示是否命中。
   search_text() { rg -q "$1" "$2"; }
 else
+  # 使用系统工具判断正则匹配；$1 为表达式，$2 为文件路径，退出码表示是否命中。
   search_text() { /usr/bin/grep -Eq "$1" "$2"; }
 fi
 
@@ -89,7 +92,7 @@ assert "SUMIF($I$3:$I$13,C$16,$G$3:$G$13)" in ws["C18"].value
 assert "SUMIF($I$3:$I$13,C$16,$H$3:$H$13)" in ws["C19"].value
 _, materials, edges = parse_order_materials("PP0067", material)
 assert next(item.quantity for item in materials if item.kind == "panel" and item.color == "Woodline 4") == 1
-# The template displays the Color Table edge total as whole meters.
+# 模板将颜色汇总表的封边总量显示为整数米。
 assert ws["C19"].number_format.split(";", 1)[0] == "0"
 assert edges["Woodline 4"] == 18
 ' "$TEST_ROOT"

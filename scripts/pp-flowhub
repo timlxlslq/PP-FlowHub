@@ -1,4 +1,5 @@
 #!/bin/bash
+# 选择 Python 运行环境并分发命令；$1 为入口名称，其余参数原样交给对应模块。
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"

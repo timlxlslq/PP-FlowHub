@@ -1,4 +1,5 @@
 #!/bin/bash
+# 在隔离状态目录编译并运行 Swift 界面回归；无位置参数，架构和部署目标可由环境变量指定。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

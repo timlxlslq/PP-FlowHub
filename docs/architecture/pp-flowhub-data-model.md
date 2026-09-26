@@ -20,7 +20,22 @@ AICNC 五金和人工五金在同一张表中，用 `source_type` 区分；`hard
 
 原始 Excel、XML、CSV 不复制进数据库，数据库保存路径、指纹、解析结果和同步时间。设置、待办、操作审计仍使用 JSON/JSONL，因为它们不是订单业务事实。
 
-## 优化状态与文件基线
+## 新版优化台账（显式批准迁移后启用）
+
+普通启动不创建新版表。`tools/migrate_aicnc_import.py` 默认只读列出范围，明确批准后使用 `--apply --backup-dir …` 做 SQLite 在线备份，再原子添加以下四张表。原有表、字段、索引及业务数据不重建、不删除。
+
+| 表 | 字段与约束 | 用途 |
+| --- | --- | --- |
+| `aicnc_import_settings` | `key` 主键、`value` 非空 | 启用时间与清理提醒关闭标记 |
+| `aicnc_optimizations` | `optimization_id` 主键；`source_folder`、`status`、`plan_json`、`created_at`、`completed_at`；状态限 processing/completed/ignored | 优化编号去重、确认快照、外部恢复；已处理后不读文件 |
+| `aicnc_material_allocations` | 联合主键：优化编号＋订单＋用途＋SKU；非负 `quantity`；用途 normal/rework；优化编号及 SKU 外键 | 混单及正常/返工的分配来源 |
+| `aicnc_legacy_watch` | `path` 主键、`files_json`、`retired_at` | 切换时旧范围与原文件清单证据；退出后不再激活 |
+
+确认后材料写入既有 `material_items`，`source_type=aicnc_optimization`，实际来源目录保存在 `source_path`；完整原报表数量、工厂单身份及人工决策留在 `plan_json`。正常工厂单优化时间来自 AICNC 编号，记录到 `optimization_artifacts`。返工生产记录使用 `production_records.source=aicnc_rework`，只有材料消耗，不重新关联工厂单；补单使用 `outbound_documents.document_type=rework_materials`，不建立出货工厂单关联。库存操作日志使用 `aicnc_rework`，保存唯一备注、明细和返回单据号。
+
+新分配表的 SKU 外键为更新级联、删除限制；普通生产累计出库排除已经独立扣库的返工消耗，订单总消耗仍包含返工。迁移验证原表逐行一致、完整性及外键；回滚须先停止 App，再恢复迁移前数据库和原 App，保留迁移后的库供核对。
+
+## 优化状态与文件基线（文件基线部分仅适用于旧范围）
 
 `material_items` 中已校验并确认写入的有效材料是完成优化的前提；`factory_orders.stage` 只将本次已确认材料覆盖且尚未生产/出货的工厂单推进为已优化，订单状态按有效工厂单汇总。仅有 `optimization_artifacts` 不能把订单推进为已优化。
 
@@ -86,3 +101,13 @@ SKU（`product_code`）是唯一商品身份。人工和自动五金均移除 `s
 ### 五金人工处理版本合同（2026-09-21）
 
 不新增表/字段/索引。`hardware_source_decisions.decision_json` 在既有 selected/observed_contents 基础上支持 `handling: manual`、`report_versions: {报表路径: SHA-256}`；对应 `hardware_source_versions` 保留空投影指纹及 row_count=0。人工决定、空投影版本、自动五金清理及索引版本在确认事务中写入，手工五金与生产/出货事实不变。变版来源需重新确认，不能将旧 manual 标志带入新来源决定。维护审计比较本地索引版本；实时文件变化由报表读取/预览识别。
+
+### 当前检查结果与恢复记录（2026-09-24）
+
+`pending_issues`、`pending_aimes_reviews` 是 SQLite 连接内的 TEMP 表，不存在于磁盘主库 schema。常驻订单服务在会话内共享；一次性命令只在该命令及其嵌套调用期间共享。连接关闭后结果丢弃。历史主库 `active_issues` 和 `aimes_review_rows` 保留，不参与当前待办投影，不执行删表或清空迁移。订单详情不读取历史问题。
+
+`inventory_operations` 保持原有结构；`submitting`、`verification_required`、`external_confirmed`、`partial_external_confirmed` 投影为库存恢复项，`local_committed` 不再显示。原有 `payload_json` 内附带来源上下文，原始 documents 和 production_draft 用于恢复；来源上下文不参与操作幂等身份。外部返回先保存操作结果，再提交本地业务事务，关闭程序后仍可核对。普通检查结果不能代替外部操作记录，也不能修改历史出库事实。
+
+### 零材料消耗生产（2026-09-24）
+
+不新增或改变任何数据库结构。使用现有 `production_records` 保存生产时间，`factory_orders.production_record_id` 关联所选工厂单；本次全零时不新增 `production_materials`，原订单材料与历史消耗不变。没有生产方式或原因字段，事务与生产一次性约束沿用现有实现。实施状态见 [零消耗生产计划](../plans/remainder-production.md)。

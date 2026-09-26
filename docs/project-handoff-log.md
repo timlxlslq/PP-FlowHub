@@ -1,5 +1,27 @@
 # 项目交接记录
 
+## 2026-09-24 标题栏版本与自动版本升级
+
+- 后续微调：用户要求 `V` 前保留两个空格并跳过测试，标题已改为 `PP FlowHub  V0.4.3`。未运行测试；单次重新构建成功并自动升级到 `0.4.3`，构建日志为 `/tmp/pp-flowhub-version-spacing-build.log`。此前 Terminal 的明确安全限制仍未解除，未重试受限操作；新产物留在原构建路径，签名安装和现场标题核对仍待完成。
+
+- 窗口标题从当前 App 包读取版本，显示 `PP FlowHub V0.4.2`；不展示独立构建号。
+- 普通修改使用 `build-app`，自动递增末位；新增或修改较大功能使用 `build-app --minor`，递增中间位并将末位归零。比较源码、已有构建包、已安装包的最高三段数字版本，写回源码和新包的两个系统版本字段；安装重试不递增。规则同步到 AGENTS、发布文档和接手学习指南。
+- 保留工作树已有修改；本次没有业务代码或数据库结构变更。数据库、runtime store、订单索引、生产模块与当前已安装包逐字节一致。
+- 验证：版本专项 3 项通过；完整发布门禁通过（434 项 Python，跳过 1 项；Swift UI、AIMES 离线、PP0067 workbook 和差异检查通过）。第一次门禁因沙盒阻止 Swift 宏插件失败，在普通权限下重新运行完整门禁通过；较早的独立构建号方案验证在用户更正规则后主动停止，不计为最终证据。
+- 单次正式构建完成：源码与 `/tmp/pp-flowhub-build/PP FlowHub.app` 均为 `0.4.2`，Node/Playwright 打包检查通过；未签名可执行文件 SHA-256 为 `3d554071d39c113ae88dce3c611b1078c4ac67e89331ff700a00319d53ba140a`。日志在 `/tmp/pp-flowhub-version-release.log`、`/tmp/pp-flowhub-version-build.log`。
+- 交付阻碍：Computer Use 返回 `Computer Use is not allowed to use the app 'com.apple.Terminal' for safety reasons.`，未执行签名安装，未完成安装版标题栏验收。保留构建包；普通 Terminal 执行绝对路径 `/Users/lantian/Documents/pp-flowhub/scripts/install-app` 后退出并重开 App，预期主窗口标题为 `PP FlowHub V0.4.2`。不使用降级签名，不把构建成功报告成安装成功。
+
+## 2026-09-24 合批板材表头的过渡期身份校验
+
+- 范围：仅修正 `order_workflow.py` 的订单身份校验，不切换完整新版报表模式，不修改 Server 工作簿、真实业务事实或数据库结构。保留工作树已有修改。
+- 原因：PP0064 的新版表头使用 `F2609180267-PP0064,F2609180274-PP0064,F2609180277-PP0064`；旧 `parse_board_identity()` 要求单一 F 单号，导致 `_factory_names()` 即使已取得中央库身份仍阻断。
+- 修正：严格提取合批身份引用；只有每个工厂单在中央库有效、归属已确认且订单号一致时，才沿用中央库名称继续订单校验。不按名称列表顺序配对，不放行未知、已删除、冲突、损坏身份；材料数量、五金解析和确认门禁保持原规则。
+- 回归：新增合批顺序/共享订单隔离和错误边界测试；Python 430 项通过、跳过 1 项。完整门禁首次在沙盒 Swift 宏启动失败，随后普通权限下 UI 回归通过，并继续完成 AIMES 离线表格、PP0067 workbook 与差异检查，全部通过。
+- 现场证据：只读 Server 文件、复制真实 SQLite 到 `/tmp/pp-flowhub-board-identity-fix/` 隔离运行预览，禁止非隔离库访问、Server 写入和外部进程；五金冲突仅在隔离验收选择保留已确认五金。PP0064 校验正常；PP0089 随后暴露 material 房间归属错误（ADU、空白行）。用户明确此次只处理 PP0064，并指出 PP0089 已中止，正式库确认 `orders.stage='已中止'`。
+- 补充修正：`order_index.py` 的校验范围跳过已中止订单，预览及待写业务记录排除已中止订单及其工厂单、独立来源。新增共享目录预览→隔离确认回归，验证有效订单可以写入、已中止订单的四类业务表记录逐字段不变；不移动 Server 报表、不删除历史数据、不绕过材料分配校验。
+- 最终验证：完整 `./scripts/test-release` 通过（431 项 Python、跳过 1 项；UI、AIMES 离线、workbook 和差异检查全部通过）。真实文件的隔离预览仅含 PP0064、校验正常、无五金映射阻断；隔离确认返回 PP0064，PP0089 四类业务事实不变，完整性及外键检查通过。正式库和初始化后的隔离库 schema 一致（52 个非内部对象），不需要结构迁移。
+- 构建与交付边界：最终串行构建成功，产物 `/tmp/pp-flowhub-build/PP FlowHub.app`，两个业务模块与受测源码逐字节一致。Computer Use 明确拒绝访问 `com.apple.Terminal`（安全限制），未执行 Apple Development 签名安装，未完成安装版验收；未使用降级签名。用户需退出旧 App，在普通 Terminal 运行 `/Users/lantian/Documents/pp-flowhub/scripts/install-app` 后重新打开并重读预览。完整新版报表模式尚未切换。
+
 ## 2026-09-17 AIMES 仅核验未生产工厂单
 
 - 用户确认：最近 50 条照常读取；仅对窗口之外、本地尚未生产的有效工厂单逐单核验。生产完成后以本地生产事实为准。
@@ -1861,3 +1883,110 @@ Terminal 电脑控制工具明确安全拒绝，正式安装尚未完成。为�
 ### 2026-09-18：订单展开修复正式安装验收完成
 
 用户已安装后核对归档构建哈希、安装/归档 UUID 和 Apple Development 正式签名均通过；退出旧进程并重开安装版完成 PP0064 四次展开、多次收起、滚动、勾选取消、双击详情、订单安排取消、助手卡片跳转及 PP0089 小订单回归。四次展开请求到主线程完成记录为 0.002–0.100 秒（非完整绘制时间），旧版记录为 4.35 / 11.74 秒。20 秒采样未采到 lstat；本次进程没有新增布局循环异常，崩溃报告无新增。材料、五金、生产材料和出库相关五表逐行摘要不变。验收 App 已退出，详细证据见 `docs/superpowers/plans/2026-09-18-order-expansion-performance.md`。
+
+
+## 2026-09-24：待处理实时检查与库存恢复（构建 0.5.0，安装阻塞）
+
+按用户确认实施：普通 Server/AIMES/业务问题仅保留会话检查结果；已产生影响但未核对完成的库存操作继续持久化。待处理中心可重新扫描、同步检查、重新校验具体问题，以及核对外部单据并恢复本地记录。库存恢复不重新扣减；外部响应在本地业务提交之前保存到已有操作日志。未更改真实业务库结构，也未清除历史问题表。
+
+完整门禁通过（443 项 Python、1 项原有跳过，SwiftUI、AIMES 离线、workbook E2E），一次串行次版本构建得到 0.5.0；包内代码一致性和打包后端隔离验收通过。Terminal 被电脑操作工具安全策略明确拒绝，未正式签名安装，未进行安装版窗口或真实金蝶验收。完整路径、哈希、测试与阻碍见 [实施记录](plans/pending-center-recovery.md)。
+
+
+## 2026-09-24：待处理历史库存误报修复（0.5.1 构建，未安装）
+
+PP0072 的 8 月历史双单操作保留待核对状态，但两张本地单据已完整，第二张有后续完成的出货操作。待处理列表现在按原计划、明确单号、SKU/数量和工厂关联逐张只读确认后不再显示旧提示；不删除历史操作，不修改真实业务事实。无法完整证明的情况仍保留核对入口。
+
+修复库存页面筛选把 async 函数直接传给数组 filter 的错误，等待判断完成，并校验打开页面的单号和数量列。读取失败文案改为“自动核对未完成”；UI 增加“待核对”分类、历史日期和外部修复后重新核对的说明。
+
+验证：96 项定向测试、完整门禁 447 项 Python（1 skip）及 UI/AIMES/workbook 通过；完整门禁首轮的旧分类断言已按新增分类更新后重跑。一次构建 0.5.1 成功，包内后端只读读取真实库时旧提示已消失且无写入。日志和可执行哈希见 `docs/plans/pending-center-recovery.md`。正式安装仍被会话内 Terminal 工具明确拒绝阻塞，安装目录仍为 0.5.0；未声称新版窗口验收或真实金蝶核对完成。
+
+
+## 2026-09-24：隐藏空待处理入口、简化 AIMES 操作记录（0.5.2 构建）
+
+顶部待处理入口仅在当前队列非空时显示，关闭空面板的判断也不再受 AIMES 历史记录影响。AIMES 网页脚本移除“内容已省略”“网址参数已省略”固定后缀，旧日志读取时移除对应括号说明；不修改历史日志，不恢复原敏感内容或改变脱敏规则。
+
+完整发布门禁通过：447 项 Python（1 项原有跳过）、SwiftUI、AIMES 离线页面、PP0067 workbook E2E、差异检查；日志 `/tmp/pending-entry-log-release.log`。一次串行构建 **0.5.2** 成功，包内 AIMES 脚本与源码一致；构建日志 `/tmp/pending-entry-log-build.log`，可执行 SHA-256 `049da77b427ec72386959f6dc25ca44dbd0ed47de8b11a40cd95604489a2e4bb`。
+
+本轮检查安装目录为 **0.5.1**。新产物 `/tmp/pp-flowhub-build/PP FlowHub.app` 尚未签名安装，因本会话电脑操作工具明确禁止控制 Terminal，未绕过限制；未验收新版安装窗口。未执行真实业务写入或数据库结构变化。
+
+
+## 2026-09-24：恢复 AIMES 启动每日按需获取（0.5.3 构建）
+
+修正待处理会话改造时扩大了范围的启动强制刷新：`loadOrderDashboardCache` 恢复 `syncDashboardAimes(force: false, scanServerAfter: true)`，当天已有成功记录时跳过联网；当天没有成功记录时尝试获取。手动按钮仍使用 `--refresh-aimes`，启动路径使用 `--aimes-if-needed`，随后继续 Server 扫描。跳过时明确显示使用本地数据，不声称刚刚核对外部最新状态。未修改业务数据库结构、缓存或异常持久化规则；缓存只保留有效身份，退出后未保存的异常需下次实际获取时重新发现。
+
+隔离每日成功后跳过回归通过；完整发布门禁通过（447 项 Python，1 项原有跳过；SwiftUI、AIMES 离线、PP0067 workbook E2E 和差异检查）。既有 Swift 启动与手动获取回归增加准确命令参数断言，覆盖此次绕过每日判断的缺陷。日志 `/tmp/aimes-daily-release.log`。
+
+一次串行构建 0.5.3 成功，日志 `/tmp/aimes-daily-build.log`，可执行 SHA-256 `50815ee886010cb55d32fb3ee990d8b6a935ea365a5504441f355b212f37c695`。当前安装目录为 0.5.2。由于本会话工具已明确禁止控制 Terminal，新版仍未签名安装，未绕过该限制，也未声称安装版启动现场验收完成。
+
+## 2026-09-24 — 零材料消耗也可确认工厂单生产
+
+- 用户确认板材和封边按订单管理，工厂单使用 leftover 或此前已领料时，本次可不新增材料消耗。
+- 生产面板全零时显示“仅确认生产，不扣减材料”，仅保存选中工厂单生产完成及时间；正消耗保留原库存流程。无需余料分类或原因，不变更 schema。
+- 此前未安装的 V0.5.4 新增字段方案已撤销，真实库从未执行该迁移。
+- 定向 18 项生产回归通过；非法数量、非法工厂单状态、重复提交、库存待恢复与事务失败均有隔离验证。完整门禁、构建及安装验收待本轮收尾记录。
+
+### 验证范围
+
+使用临时库验证全部写入路径，真实 PP0008 只打开面板并取消，不执行生产或库存确认。最终证据见 [实施计划](plans/remainder-production.md)。
+
+本轮收尾：18 项定向及完整门禁通过（454 项 Python，1 项原有跳过；Swift UI/AIMES/workbook 通过）。真实库副本 31 表/2,929 行/schema 完全不变。V0.5.5 一次串行构建成功，包内后端隔离验证全零生产、重复拒绝及其他事实不变；真实 PP0008 未确认生产，生产表没有新增字段。电脑操作工具以安全限制拒绝 Terminal，后台没有有效 Apple Development 身份，故未签名安装、未执行安装版窗口验收；安装版仍为 V0.5.3，产物保留。完整日志、哈希和报告见实施计划。
+
+### V0.5.5 生产弹窗按钮仍禁用的修复
+
+用户安装 V0.5.5 后反馈全零按钮仍不可点击。源码与 11:54 预览日志确认：订单中心先读取一次，弹窗又读取一次，后一次被 `runOrder` 忙碌保护静默丢弃，`previewReady` 未置为真。已删除入口预读，统一由弹窗读取；忙碌明确失败回调，弹窗提供重读入口。新增实际挂载弹窗的无障碍按钮状态回归。当前仅修改 UI 读取时序，不改变数据库或生产规则；验证及构建结果见实施计划后续记录。
+
+修复收尾：实际挂载弹窗测试确认全零成功后按钮启用，读取中禁用、失败重试和忙碌回调通过；完整门禁通过（454 项 Python，1 项原有跳过；SwiftUI/AIMES/workbook 通过）。一次串行构建 V0.5.6 成功，日志与哈希见实施计划。此前 Terminal 工具安全限制仍未解除，未签名安装；构建后核对安装版仍为 V0.5.5。未提交真实生产或库存操作。
+
+
+## 2026-09-25 — 人工五金固定新增区与搜索结果布局
+
+用户要求新增人工五金置顶固定、只滚动下方工厂单列表；搜索结果框左边与标签齐平，新增的 98 点宽度分配给规格列，搜索表头和各列内容水平居中。已在 `ManualHardwareSheet` 完成布局调整，取消结果每行固定 44 点高度；长规格自然换行，多结果每页完整展示一项，上一项/下一项保留已选 SKU，修改查询重置页码及选择。新增、删除与保存业务路径未修改，无数据库结构或业务事实写入。
+
+定向 Swift UI 回归首次被沙盒 `sandbox_apply` 阻断；普通环境重试通过。完整 `./scripts/test-release` 通过：476 项 Python，1 项原有跳过；Swift UI、AIMES 离线、PP0067 workbook 和差异检查通过。日志 `/tmp/manual-hardware-ui-test.log`、`/tmp/manual-hardware-release.log`。
+
+一次串行构建 V0.6.2 成功，打包 Node v24.19.0 及 Playwright 检查通过；产物 `/tmp/pp-flowhub-build/PP FlowHub.app`，可执行 SHA-256 `92553f27f6c1ad5f514ce7c623f6718730a3ad49826d81a799511e0ded2aad5f`，构建日志 `/tmp/manual-hardware-build.log`。电脑操作工具明确拒绝访问 `com.apple.Terminal`，原因是安全限制，因此未执行正式签名安装，也未完成安装版长规格/翻页/固定滚动视觉验收。安装目录核对仍为 V0.6.1；保留未签名产物，不使用降级签名或绕过 Terminal 限制。
+
+
+## 2026-09-25 — 人工五金顶部、底栏和滚动视口收紧
+
+按用户截图的三处标注调整 `ManualHardwareSheet`：订单号移到标题右侧并按文字基线对齐，顶部和底部上下内边距从 20 点减为 10 点；移除列表内容内部的纵向留白，改在滚动区外侧保留顶部 14 点、底部 8 点，让滚动条轨道与列表可视区域等高。弹窗仍为 820×620 点，新增表单固定、列表独立滚动，未改业务流程。
+
+修改前通过电脑操作工具确认安装版 V0.6.2 现场弹窗与截图问题一致。完整发布门禁通过（476 项 Python，1 项原有跳过；SwiftUI、AIMES 离线、PP0067 workbook、diff 检查通过）；日志 `/tmp/manual-hardware-compact-release.log`。一次串行构建 V0.6.4 成功，Node v24.19.0 与 Playwright 检查通过，Bundle `com.pacificpride.ppflowhub`，可执行 SHA-256 `8facaabcdcdc918cd444f49174cbcbec548d43e0796fb7c8b2c1bbe78a6d4288`；日志 `/tmp/manual-hardware-compact-build.log`。
+
+正式安装仍受本会话 Terminal 工具安全限制阻断，未重复尝试或绕过；安装目录当前为 V0.6.2。新版未取得实际窗口截图，不声称视觉验收通过。Product Design 验收状态及待办追加到 `design-qa.md`（final result: blocked）；下一步在普通 Terminal 运行正式安装脚本后核对同行标题、紧凑底栏、轨道边界和列表滚动。
+
+
+## 2026-09-25 — 新增人工五金卡片底部留白微调
+
+按用户标注，仅把 `ManualHardwareSheet.addForm` 的底部内边距从 16 点调为 8 点，顶部及两侧仍为 16 点。底部数量行受到操作按钮 44 点最小布局框影响，视觉留白比顶部大；微调用于平衡可见空白，不改变控件点击区域、字体、卡片宽度、滚动或业务行为。修改前已查看安装版 V0.6.4 现场截图。
+
+完整门禁通过：476 项 Python，1 项原有跳过；Swift UI、AIMES 离线、PP0067 workbook、差异检查通过。日志 `/tmp/manual-hardware-inset-release.log`。一次串行构建 V0.6.5 成功，Node v24.19.0 与 Playwright 检查通过，Bundle `com.pacificpride.ppflowhub`，可执行 SHA-256 `7b5dcb7e35d960739dd46d4658141dd15be38e556daff5426f8fea5c7194ea80`；日志 `/tmp/manual-hardware-inset-build.log`。
+
+本会话此前 Terminal 工具安全限制没有解除证据，未绕过，未签名安装；安装目录核对仍为 V0.6.4。新版视觉验收待安装后截图比较，`design-qa.md` 标记 blocked，不把源码边距数值和回归通过当作视觉通过。
+
+
+## 2026-09-25 — 按红色标注统一弹窗标题栏与操作栏高度
+
+用户明确指出目标是整个弹窗的顶部标题栏和底部操作栏；此前误将问题理解为新增卡片内部留白。根因是两栏相同纵向 padding 叠加了不同内容高度：底部按钮自身最小 44 点，标题内容更矮。本次仅将两栏总高统一为 `AppLayout.controlHeight`（44 点），移除额外纵向 padding，内容居中；卡片内部维持现状。
+
+完整发布门禁通过（476 项 Python，1 项原有跳过；Swift UI、AIMES 离线、workbook、diff 通过），日志 `/tmp/manual-hardware-bars-release.log`。一次串行构建 V0.6.6 成功，打包 Node v24.19.0 与 Playwright 检查通过，Bundle `com.pacificpride.ppflowhub`，可执行 SHA-256 `f6d52422100f700ea1d5d765efa8f59f23b2d4d06fe0824bcca68cfea97be87d`；构建日志 `/tmp/manual-hardware-bars-build.log`。
+
+本会话此前 Terminal 工具安全限制仍无解除证据，未绕过、未签名安装；安装目录当前为 V0.6.5。正式视觉验收仍待新版安装后截图，`design-qa.md` 记录 blocked。未保存真实人工五金草稿或修改业务数据。
+
+
+## 2026-09-25 — 人工五金标题栏和操作栏统一 50 点
+
+按用户明确指定，将两栏总高度由 44 点改为弹窗内共享常量 `barHeight = 50`，继续垂直居中；不修改全局控件高度或业务路径。当前学习说明和发布验收要求已同步为 50 点。
+
+完整门禁通过（476 Python，1 项原有跳过；Swift UI、AIMES 离线、PP0067 workbook、diff 通过），日志 `/tmp/manual-hardware-50pt-release.log`。一次串行构建 V0.6.7 成功，Node v24.19.0 与 Playwright 检查通过；Bundle `com.pacificpride.ppflowhub`，可执行 SHA-256 `f4360b4943719d4111017c52eacea76e1a8e40d66ba0127fc7bcb1c94f07b1f2`，构建日志 `/tmp/manual-hardware-50pt-build.log`。
+
+本会话既有 Terminal 工具安全限制未解除，未绕过或降级签名；安装目录仍为 V0.6.6，本轮正式安装和实际窗口验收未完成，产物保留在 `/tmp/pp-flowhub-build/PP FlowHub.app`。
+
+
+## 2026-09-25 — 隐藏只读工厂单人工五金删除入口
+
+用户指出已出库工厂单即使禁止点击也不应显示“删除”。本轮只调整 `ManualHardwareSheet` 展示，沿用后端 `editable`：已出库或失效分组保留“仅查看”，删除按钮不生成，“操作”标题不显示，保留列宽；可编辑分组的删除/撤销和运行中禁用行为不变。后端保存权限、数据结构与业务事实均未修改。
+
+完整门禁通过（476 项 Python，1 项原有跳过；Swift UI、AIMES 离线、workbook、diff 通过），包括 `test_shipped_or_inactive_factory_is_read_only` 现有增删拒绝回归。日志 `/tmp/manual-hardware-readonly-release.log`。一次串行构建 V0.6.8 成功，Node v24.19.0 与 Playwright 检查通过；Bundle `com.pacificpride.ppflowhub`，可执行 SHA-256 `8eda06ef4ff031f86b76e267ef8365683a8ef57b811dff92f8a0caaeba04c264`，日志 `/tmp/manual-hardware-readonly-build.log`。
+
+既有 Terminal 工具安全限制仍无解除证据，未绕过或降级签名。当前安装版 V0.6.7，新版正式安装及实际窗口删除按钮不可见验收未完成，保留构建产物。

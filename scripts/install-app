@@ -1,4 +1,5 @@
 #!/bin/bash
+# 使用 Apple Development 身份签名、校验并安装构建产物；无位置参数，路径和签名身份由环境变量配置。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -65,10 +66,8 @@ if [[ "$SOURCE_HASH" != "$STAGED_HASH" ]]; then
   exit 1
 fi
 
-# `keychain-read` lives in the embedded project resources rather than in one
-# of the bundle locations traversed by `codesign --deep`. Sign it explicitly;
-# otherwise macOS can kill the helper before Security.framework returns a
-# status, which the App would incorrectly report as a missing password.
+# keychain-read 位于内嵌项目资源中，深度签名不会遍历该位置，必须显式签名。
+# 否则系统可能在安全框架返回状态前终止它，App 会误报为密码缺失。
 KEYCHAIN_READER="$STAGED_DEST/Contents/Resources/project/bin/keychain-read"
 if [[ ! -x "$KEYCHAIN_READER" ]]; then
   echo "Built App is missing the keychain reader: $KEYCHAIN_READER" >&2
@@ -96,9 +95,7 @@ if [[ -z "$TEAM_IDENTIFIER" ]]; then
   exit 1
 fi
 
-# The value in parentheses in `security find-identity` is a certificate
-# identifier, not the signing TeamIdentifier. Compare the actual signed
-# metadata with the currently installed App instead of guessing it.
+# 身份查询输出括号内的是证书标识，不是签名团队标识；与已安装 App 的实际签名元数据比较。
 if [[ -d "$DEST_APP" ]]; then
   EXISTING_SIGNATURE_DETAILS="$(/usr/bin/codesign -dv --verbose=4 "$DEST_APP" 2>&1 || true)"
   EXISTING_TEAM_IDENTIFIER="$(printf '%s\n' "$EXISTING_SIGNATURE_DETAILS" | /usr/bin/sed -n 's/^TeamIdentifier=//p' | head -1)"
@@ -124,10 +121,8 @@ mv "$STAGED_DEST" "$DEST_APP"
 /usr/bin/codesign -dv --verbose=4 "$DEST_APP" 2>&1
 INSTALLED_KEYCHAIN_READER="$DEST_APP/Contents/Resources/project/bin/keychain-read"
 /usr/bin/codesign --verify --strict --verbose=4 "$INSTALLED_KEYCHAIN_READER"
-# Probe a guaranteed-missing account without printing or reading any password.
-# A signed helper must reach Security.framework and return errSecItemNotFound
-# through the helper's stable exit code 3; an unsigned helper is killed with
-# SIGKILL (137) before it can return a useful status.
+# 使用不存在的账户探测，不读取或输出密码；正确签名后应到达安全框架，
+# 将未找到项目错误转换为稳定退出码 3；未签名时可能先被系统终止，退出码为 137。
 PROBE_ACCOUNT="__workflow_assistant_keychain_probe__"
 set +e
 "$INSTALLED_KEYCHAIN_READER" "$PROBE_ACCOUNT" >/dev/null 2>/dev/null
@@ -143,8 +138,7 @@ if [[ "$SIGNED_HASH" != "$DEST_HASH" ]]; then
   exit 1
 fi
 
-# The build is only an installation input. Keep it recoverable outside the
-# project so Finder does not present it as a second app alongside /Applications.
+# 构建产物仅是安装输入，归档到项目外保留恢复能力，避免 Finder 将其显示为第二个 App。
 mkdir -p "$BUILD_ARCHIVE_DIR"
 BUILD_STAMP="$(date +%Y%m%d-%H%M%S)"
 mv "$SOURCE_APP" "$BUILD_ARCHIVE_DIR/PP FlowHub-$BUILD_STAMP.app"

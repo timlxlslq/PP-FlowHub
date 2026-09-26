@@ -1,10 +1,8 @@
-"""Traveler interpretation, product mapping, stock checks, and outbound flow.
+"""Traveler 解析、商品映射、库存检查及出库流程。
 
-The module separates local requirement calculation from browser automation.
-Parsing and mapping can be tested offline; only the final confirmed outbound
-operation crosses into the inventory system.  Central SQLite stores product
-facts, mappings, operation state, and verified results needed to recover the
-workflow after a process or browser failure.
+本模块将本地需求计算与浏览器自动化分开：解析和映射可离线执行，只有最终
+确认的出库操作会写入库存系统；中央 SQLite 保存商品事实、映射、操作状态
+及已核验结果，用于进程或浏览器故障后的恢复。
 """
 
 from __future__ import annotations
@@ -40,7 +38,7 @@ from .core import (
     factory_name_order_mismatch,
     progress,
 )
-from .operation_log import configure_operation_log, log_database_statement, log_progress_payload
+from .operation_log import configure_operation_log, log_database_statement, log_progress_payload, safe_exception_details, safe_rule_error_text
 from .database import (
     catalog_material_attributes,
     connect_database,
@@ -68,16 +66,10 @@ INVENTORY_WORKBENCH_PREFIXES = (
     "http://www.jdy.com/workbench/",
 )
 INVENTORY_DOMAIN_SUFFIX = ".jdy.com"
-# This is a per-document browser subprocess guard.  The App-level guard is an
-# inactivity watchdog with a separate, longer budget so a multi-document
-# operation is not cancelled merely because the first document took time.
+# 这是每张单据的浏览器子进程超时保护；App 另有更长的无活动监控时限，避免多单操作仅因首单耗时就被取消。
 INVENTORY_DOCUMENT_TIMEOUT_SECONDS = 90
 
-# These are presentation defaults for hardware whose source codes are stable
-# across reports.  They are deliberately keyed by canonical inventory SKU so
-# aliases such as Hinge/TestFullHinge and left/right rail source names share
-# one customer-facing name.  They never participate in material mapping or
-# inventory outbound payload construction.
+# 以下是跨报表来源代码稳定的五金默认显示名，以规范库存 SKU 为键，使 Hinge/TestFullHinge 及左右导轨别名共用名称；不参与材料匹配或出库载荷构造。
 HARDWARE_PRODUCT_DISPLAY_NAMES = {
     "M1001": "Hinge",
     "M1002": "H-Rail",
@@ -96,12 +88,9 @@ class TravelerItem:
     product_code: str = ""
 
     def source_snapshot(self) -> dict:
-        """Serialize the historical source shape used by raw fingerprints.
+        """序列化用于原始指纹的五个历史来源字段。规范 SKU 独立保存，不改变旧 Traveler 快照、出库原始指纹或待处理操作载荷。
 
-        ``product_code`` is a separate canonical identity for database-backed
-        facts.  It must not change old Traveler snapshots, outbound raw
-        fingerprints, or pending-operation payloads, all of which were defined
-        in terms of these five source fields.
+        参数：self：当前实例。
         """
         return {
             "row": self.row,
@@ -113,12 +102,9 @@ class TravelerItem:
 
 
 def _with_product_code(item: TravelerItem, product_code: str) -> TravelerItem:
-    """Attach canonical SKU without changing serialized source identity.
+    """给来源条目绑定规范 SKU 并返回该条目，保持历史序列化来源身份不变。显式字段使 SKU 在 dataclasses.replace 等正常复制中仍得以保留。
 
-    ``TravelerItem`` snapshots and raw outbound fingerprints predate SKU-backed
-    material facts and intentionally contain the human source name only.
-    ``source_snapshot`` preserves that shape while this explicit field makes
-    SKU identity survive ``dataclasses.replace`` and other normal copies.
+    参数：item：当前来源材料或五金条目；product_code：已确认的库存商品 SKU。
     """
     item.product_code = str(product_code or "").strip().upper()
     return item
@@ -137,6 +123,10 @@ class TravelerData:
     fingerprint: str
 
     def content_snapshot(self) -> dict:
+        """按单据备注排序生成来源快照，包含正数量与零数量条目。
+
+        参数：self：当前实例。
+        """
         return {
             "order_id": self.order_id,
             "documents": {
@@ -185,31 +175,30 @@ class InventoryPreview:
     missing_items: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     selected_document_remarks: tuple[str, ...] = ()
-    # Order-level material documents can cover one or more explicitly
-    # selected factory orders.  Keep the selection on the preview so the
-    # successful document can be linked to those exact identities when it is
-    # persisted; an order-only record must still never be broadcast to a
-    # split order implicitly.
+    # 订单级材料单可覆盖一个或多个明确选择的工厂单；预览保留该选择，成功持久化时仅关联对应身份，不能把订单级记录隐式扩散到拆分订单。
     selected_factory_orders: tuple[str, ...] = ()
     source_type: str = "traveler"
     scope_decisions: list[dict] = field(default_factory=list)
     excluded_items: list[dict] = field(default_factory=list)
     no_outbound_required: bool = False
-    # A room-scoped preview intentionally covers only one factory-room slice
-    # of an order.  Existing order-level outbound records must not be treated
-    # as disappeared documents when this partial slice is saved.
+    # 房间预览只覆盖订单的一个工厂房间片段；保存局部范围时，不得将已有订单级出库记录视为已消失单据。
     partial_scope: bool = False
-    # Some workflows operate on only one document kind from a mixed order.
-    # Direct factory shipment is hardware-only and must not compare its
-    # preview with an order-level materials record from an earlier production
-    # operation.
+    # 部分流程只处理混合订单的一种单据；直接工厂出货只处理五金，不应把预览与早先生产的订单级材料记录比较。
     document_kinds: tuple[str, ...] = ()
 
     @property
     def ready(self) -> bool:
+        """判断预览是否已解决全部缺失映射。
+
+        参数：self：当前实例。
+        """
         return not self.missing_items
 
     def payload(self) -> dict:
+        """组装可序列化的出库预览，包含来源、映射问题、范围决定及单据明细。
+
+        参数：self：当前实例。
+        """
         documents = self.document_payloads()
         selected = self._selected_document_set()
         return {
@@ -223,9 +212,7 @@ class InventoryPreview:
                 "fingerprint": self.traveler.fingerprint,
             },
             "outbound_items": [asdict(item) for item in self.outbound_items],
-            # Keep zero quantities in the machine-readable result for
-            # diagnostics, but the Swift preview intentionally does not
-            # render them as outbound rows.
+            # 结构化结果保留零数量以便诊断，但 Swift 预览有意不将其渲染为出库行。
             "zero_items": [
                 item.source_snapshot() for item in self.traveler.zero_items
                 if not selected or _normalize_name(item.document_remark) in selected
@@ -241,6 +228,10 @@ class InventoryPreview:
         }
 
     def _selected_document_set(self) -> set[str]:
+        """规范化所选单据备注；选择工厂单时同时纳入订单级材料单。
+
+        参数：self：当前实例。
+        """
         selected = {
             _normalize_name(remark)
             for remark in self.selected_document_remarks
@@ -251,10 +242,18 @@ class InventoryPreview:
         return selected
 
     def _document_is_selected(self, remark: str) -> bool:
+        """检查单据备注是否在当前选择范围，未指定范围时全部纳入。
+
+        参数：self：当前实例；remark：用于单据识别的备注。
+        """
         selected = self._selected_document_set()
         return not selected or _normalize_name(remark) in selected
 
     def document_payloads(self) -> list[dict]:
+        """按来源单据备注分组已映射和忽略条目，并标明单据类型。
+
+        参数：self：当前实例。
+        """
         mapped: dict[str, list[OutboundItem]] = {}
         for item in self.outbound_items:
             mapped.setdefault(item.document_remark, []).append(item)
@@ -278,11 +277,9 @@ class InventoryPreview:
 
 
 def stock_requirements(preview: InventoryPreview, include_hardware: bool = False) -> list[dict]:
-    """Return one current-stock requirement per SKU.
+    """按 SKU 汇总实时库存需求；默认只覆盖订单级材料。显式包含五金时跨工厂单合并，因为库存余额按 SKU 返回；本步骤不写出库。
 
-    Stock checks are read-only and, by default, cover the order-level material
-    document only.  Hardware can be included explicitly and is then aggregated
-    across factory orders because the balance page reports stock by SKU.
+    参数：preview：已解析 SKU 及出库范围的预览；include_hardware：是否同时统计五金；默认仅板材和封边。
     """
     if not preview.ready:
         raise RuleError(
@@ -298,6 +295,10 @@ def stock_requirements(preview: InventoryPreview, include_hardware: bool = False
 
 
 def _group_stock_requirements(items: Iterable[OutboundItem]) -> list[dict]:
+    """按 SKU 汇总需求数量并保留来源名称及单位。
+
+    参数：items：待汇总、解析或计算指纹的材料/五金条目。
+    """
     grouped: dict[str, dict] = {}
     for item in items:
         row = grouped.setdefault(item.product_code, {
@@ -314,7 +315,10 @@ def _group_stock_requirements(items: Iterable[OutboundItem]) -> list[dict]:
 
 
 def database_stock_requirements(config: Config, order_id: str) -> tuple[str, list[dict]]:
-    """Build order-level stock requirements from SQLite facts only."""
+    """仅根据 SQLite 材料事实生成订单级库存需求，未映射时阻止查询。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；order_id：销售订单号。
+    """
     normalized_order_id = order_id.strip().upper()
     detail, _ = _database_factory_rows(config, normalized_order_id)
     if not detail.get("materials"):
@@ -342,7 +346,10 @@ def database_stock_requirements(config: Config, order_id: str) -> tuple[str, lis
 
 
 def order_stock_requirements(config: Config, order_folder: Path) -> tuple[str, list[dict]]:
-    """Map the current source-order material preview to inventory SKUs."""
+    """读取当前订单来源材料预览并解析为库存 SKU 需求。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；order_folder：订单来源文件夹。
+    """
     database_order_id = order_folder.name.strip().upper()
     if database_order_id:
         try:
@@ -397,6 +404,10 @@ def order_stock_requirements(config: Config, order_folder: Path) -> tuple[str, l
 
 
 def _database_factory_rows(config: Config, order_id: str) -> tuple[dict, dict[str, dict]]:
+    """读取订单详情并按非空编号建立工厂单索引，空订单号时报错。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；order_id：销售订单号。
+    """
     from .order_details import order_detail
 
     normalized_order_id = order_id.strip().upper()
@@ -412,7 +423,10 @@ def _database_factory_rows(config: Config, order_id: str) -> tuple[dict, dict[st
 
 
 def _usable_hardware_factory_orders(detail: dict) -> set[str]:
-    """Return factory orders with active, positive-quantity hardware facts."""
+    """从订单详情提取含正数量五金事实的工厂单集合。
+
+    参数：detail：订单详情及材料五金事实。
+    """
     result: set[str] = set()
     for row in detail.get("hardware", []):
         factory_order = str(row.get("factory_order", "")).strip().upper()
@@ -428,7 +442,10 @@ def _usable_hardware_factory_orders(detail: dict) -> set[str]:
 
 
 def database_outbound_fingerprint(config: Config, order_id: str, factory_order: str) -> str:
-    """Fingerprint the persisted facts relevant to one database outbound."""
+    """计算指定工厂单对应的持久出库来源事实指纹。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；order_id：销售订单号；factory_order：工厂单编号。
+    """
     normalized_order_id = order_id.strip().upper()
     normalized_factory_order = factory_order.strip().upper()
     detail, factory_rows = _database_factory_rows(config, normalized_order_id)
@@ -457,7 +474,10 @@ def mark_customer_supplied_outbound(
     order_id: str,
     selected_factory_orders: Iterable[str] | None = None,
 ) -> dict:
-    """Complete a customer-material outbound without creating an inventory document."""
+    """为客户提供材料的订单登记所选工厂单完成状态，不创建库存出库单。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；order_id：销售订单号；selected_factory_orders：明确选择的工厂单编号集合；为空时按订单范围处理。
+    """
     normalized_order_id = order_id.strip().upper()
     detail, factory_rows = _database_factory_rows(config, normalized_order_id)
     scope = outbound_scope_decisions(config, normalized_order_id, selected_factory_orders)
@@ -545,12 +565,9 @@ def mark_no_hardware_outbound(
     order_id: str,
     selected_factory_orders: Iterable[str] | None = None,
 ) -> dict:
-    """Mark shipment status when the selected factories have no hardware facts.
+    """为没有正数量有效五金的所选工厂单登记出货状态。出货是工作流状态，五金出库单是可选副作用；存在未映射五金时仍须预检失败，不能直接标为已出货。
 
-    Shipment is a workflow state, while a hardware inventory document is an
-    optional side effect.  This path is intentionally limited to a selection
-    with no active, positive-quantity hardware; unmapped hardware must still
-    fail preflight instead of being silently marked as shipped.
+    参数：config：包含状态库、订单来源及备份路径的运行配置；order_id：销售订单号；selected_factory_orders：明确选择的工厂单编号集合；为空时按订单范围处理。
     """
     normalized_order_id = order_id.strip().upper()
     _, factory_rows = _database_factory_rows(config, normalized_order_id)
@@ -640,12 +657,9 @@ def database_document_items(
     production_materials: Iterable[dict] | None = None,
     shipment_only: bool = False,
 ) -> tuple[str, dict[str, list[TravelerItem]], list[TravelerItem], dict[str, dict]]:
-    """Build outbound source documents directly from persisted order facts.
+    """直接从持久事实组织出库来源条目，不读写 Traveler。材料按订单号分单，五金按工厂名称分单，并沿用 Traveler 的规范名称以定位历史出库记录。
 
-    The returned documents intentionally use the same normalized names as a
-    Traveler, but no workbook is created or read.  The order-level material
-    document is keyed by order id; hardware documents are keyed by the factory
-    name so existing outbound records remain addressable.
+    参数：config：包含状态库、订单来源及备份路径的运行配置；order_id：销售订单号；selected_factory_orders：明确选择的工厂单编号集合；为空时按订单范围处理；production_request_id：本次生产请求的幂等标识；production_materials：本次明确指定的生产材料；为空时使用订单材料；shipment_only：是否只组织发货五金而排除订单材料。
     """
     detail, factory_rows = _database_factory_rows(config, order_id)
     normalized_order_id = order_id.strip().upper()
@@ -777,11 +791,9 @@ def outbound_scope_decisions(
     order_id: str,
     selected_factory_orders: Iterable[str] | None = None,
 ) -> dict:
-    """Return explicit outbound-scope decisions without changing source facts.
+    """读取显式出库范围决定而不修改来源事实。缺少决定时保守处理：已有事实视为需要出库，无事实的订单保持未决，不能自动归为余料生产。
 
-    A missing decision is conservative: existing facts are treated as required
-    for outbound, while an order with no facts remains unresolved and cannot be
-    silently classified as remnant production.
+    参数：config：包含状态库、订单来源及备份路径的运行配置；order_id：销售订单号；selected_factory_orders：明确选择的工厂单编号集合；为空时按订单范围处理。
     """
     detail, factory_rows = _database_factory_rows(config, order_id)
     normalized = order_id.strip().upper()
@@ -853,6 +865,10 @@ def set_outbound_scope(
     factory_order: str = "",
     reason: str = "",
 ) -> dict:
+    """校验订单类型、材料或五金范围及理由，保存明确的出库范围决定。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；order_id：销售订单号；scope_type：material 材料范围或 hardware 五金范围；requirement：需要出库、客户提供、余料或无需出库的明确决定；factory_order：工厂单编号；reason：忽略规则或不出库决定的原因。
+    """
     normalized = order_id.strip().upper()
     scope_type = scope_type.strip().lower()
     requirement = requirement.strip().lower()
@@ -908,7 +924,10 @@ def build_database_preview(
     production_materials: Iterable[dict] | None = None,
     shipment_only: bool = False,
 ) -> InventoryPreview:
-    """Map persisted SQLite order facts without generating a Traveler file."""
+    """根据 SQLite 事实生成 SKU 出库预览并收集映射冲突，不生成 Traveler 文件。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；order_id：销售订单号；selected_factory_orders：明确选择的工厂单编号集合；为空时按订单范围处理；production_request_id：本次生产请求的幂等标识；production_materials：本次明确指定的生产材料；为空时使用订单材料；shipment_only：是否只组织发货五金而排除订单材料。
+    """
     _assert_single_server_material_source(config, order_id)
     normalized_order_id, documents, zero_items, _ = database_document_items(
         config, order_id, selected_factory_orders,
@@ -1050,11 +1069,9 @@ def build_database_preview(
 
 
 def _assert_single_server_material_source(config: Config, order_id: str) -> None:
-    """Stop inventory preparation when multiple base Server roots are present.
+    """阻止同一订单同时使用多个基础 Server 材料根目录。补单按设计可叠加，但两份非补单工作簿可能是迁移残留，不能合计造成重复出库。
 
-    Recut reports are additive by design.  Two non-recut material workbooks
-    for one order, however, mean that a path migration or stale fixture was
-    not retired; summing them would create a duplicate material outbound.
+    参数：config：包含状态库、订单来源及备份路径的运行配置；order_id：销售订单号。
     """
     normalized_order_id = str(order_id or "").strip().upper()
     if not normalized_order_id:
@@ -1094,13 +1111,9 @@ def build_factory_room_preview(
     order_id: str,
     factory_order: str,
 ) -> InventoryPreview:
-    """Build a partial outbound preview for one explicitly named Server room.
+    """为明确指定的 Server 房间生成局部出库预览。订单材料仍是 SQLite 订单级事实；仅读取用户已确认且工作簿明确归属的房间行，并加入所选工厂单五金，不从其他房间推算数量。
 
-    Standard order materials remain order-level facts in SQLite.  This helper
-    is only for a user-confirmed room slice whose ownership is explicit in the
-    Server materials workbook, such as ``PP0035-OFFICE``.  It reads the source
-    workbook room rows, adds hardware for the selected factory order, and does
-    not infer quantities from sibling rooms.
+    参数：config：包含状态库、订单来源及备份路径的运行配置；order_id：销售订单号；factory_order：工厂单编号。
     """
     from .order_workflow import parse_material_room_rows
 
@@ -1141,6 +1154,10 @@ def build_factory_room_preview(
         )
 
     def material_identity(kind: str, color: str, thickness: object) -> tuple[str, str, float]:
+        """规范化材料种类、颜色及厚度，生成房间材料与已确认事实的比较键。
+
+        参数：kind：材料种类；color：材料颜色；thickness：材料标称厚度。
+        """
         try:
             normalized_thickness = round(float(str(thickness or "0")), 4)
         except ValueError:
@@ -1164,6 +1181,10 @@ def build_factory_room_preview(
             )].add(code)
 
     def confirmed_material_code(kind: str, color: str, thickness: object) -> str:
+        """按材料身份提取唯一已确认 SKU，不允许通过名称重新匹配。
+
+        参数：kind：房间材料种类；color：材料颜色；thickness：材料标称厚度。
+        """
         identity = material_identity(kind, color, thickness)
         codes = material_codes.get(identity, set())
         if len(codes) != 1:
@@ -1276,7 +1297,10 @@ def changed_factory_orders_for_documents(
     selected_factory_orders: Iterable[str],
     documents: Iterable[dict],
 ) -> set[str]:
-    """Translate changed outbound document remarks back to factory orders."""
+    """将已变化单据的备注映射回所选工厂单编号。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；order_id：销售订单号；selected_factory_orders：明确选择的工厂单编号集合；为空时按订单范围处理；documents：待反查工厂单的出库单据。
+    """
     _, factory_rows = _database_factory_rows(config, order_id)
     changed_remarks = {
         _normalize_name(document.get("remark", ""))
@@ -1295,11 +1319,19 @@ def changed_factory_orders_for_documents(
 
 
 def _fingerprint(payload: dict) -> str:
+    """对排序且紧凑编码的 JSON 计算稳定 SHA-256 摘要。
+
+    参数：payload：待序列化或登记的结构化载荷。
+    """
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
 def _find_header(row: Iterable, label: str) -> int | None:
+    """查找行中唯一匹配表头并返回一基列号，重复表头时报错。
+
+    参数：row：工作表一行的单元格值；label：目标表头或错误提示中的字段名。
+    """
     matches = [index for index, value in enumerate(row, 1) if _text(value) == label]
     if len(matches) > 1:
         raise RuleError("traveler_schema", f"Picking List 同一行出现多个“{label}”表头")
@@ -1307,6 +1339,10 @@ def _find_header(row: Iterable, label: str) -> int | None:
 
 
 def _order_name_candidates(ws) -> list[str]:
+    """扫描工厂单名称标签右侧的首个非空值，收集名称候选。
+
+    参数：ws：待读取的工作表。
+    """
     candidates = []
     for row in ws.iter_rows():
         for index, cell in enumerate(row):
@@ -1320,10 +1356,18 @@ def _order_name_candidates(ws) -> list[str]:
 
 
 def _normalized_label(value) -> str:
+    """去除表头空白并转小写，便于统一匹配。
+
+    参数：value：待规范化或校验的原始值。
+    """
     return re.sub(r"\s+", "", _text(value)).lower()
 
 
 def _find_label_row(ws, label: str) -> int:
+    """在工作表中查找规范化标签所在行，缺失时报错。
+
+    参数：ws：待读取的工作表；label：目标表头或错误提示中的字段名。
+    """
     wanted = _normalized_label(label)
     for row in range(1, ws.max_row + 1):
         if any(_normalized_label(ws.cell(row, col).value) == wanted for col in range(1, ws.max_column + 1)):
@@ -1332,6 +1376,10 @@ def _find_label_row(ws, label: str) -> int:
 
 
 def _displayed_integer(cell, label: str) -> float:
+    """读取非负板材数量，按整数显示格式四舍五入；无法解释为整数时报错。
+
+    参数：cell：含数值及显示格式的单元格；label：目标表头或错误提示中的字段名。
+    """
     value = cell.value
     if value in (None, ""):
         return 0.0
@@ -1349,6 +1397,10 @@ def _displayed_integer(cell, label: str) -> float:
 
 
 def _nonnegative_number(cell, label: str) -> float:
+    """读取有限非负数量，空单元格按零处理，非法值时报错。
+
+    参数：cell：含数值及显示格式的单元格；label：目标表头或错误提示中的字段名。
+    """
     value = cell.value
     if value in (None, ""):
         return 0.0
@@ -1361,6 +1413,10 @@ def _nonnegative_number(cell, label: str) -> float:
 
 
 def _canonical_usage_color(value: str) -> str:
+    """将 Usage List 的 Khaki 别名归一为 Penelope FA44，其他颜色原样返回。
+
+    参数：value：待规范化或校验的原始值。
+    """
     color = _text(value)
     if re.fullmatch(r"khaki(?:\s*\(7x9\))?", color, re.IGNORECASE):
         return "Penelope FA44"
@@ -1368,6 +1424,10 @@ def _canonical_usage_color(value: str) -> str:
 
 
 def _usage_list_items(ws, order_id: str) -> tuple[list[TravelerItem], list[TravelerItem]]:
+    """校验 Usage List 表头及颜色，汇总板材和封边并分别返回正数量与零数量条目。
+
+    参数：ws：待读取的工作表；order_id：销售订单号。
+    """
     total_row = _find_label_row(ws, "Total Qty:")
     header_map = {
         _normalized_label(ws.cell(2, col).value): col
@@ -1390,6 +1450,10 @@ def _usage_list_items(ws, order_id: str) -> tuple[list[TravelerItem], list[Trave
     totals: dict[str, tuple[int, float, bool]] = {}
 
     def accumulate(row: int, name: str, value, integer: bool) -> None:
+        """校验非负数量并按材料名称累计，保留首次行号及整数数量标志。
+
+        参数：row：待读取的行或来源行号；name：来源材料名称或查询名称；value：待规范化或校验的原始值；integer：是否在最终汇总时按整数处理数量。
+        """
         if value in (None, ""):
             number = 0.0
         elif isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
@@ -1444,6 +1508,10 @@ def _usage_list_items(ws, order_id: str) -> tuple[list[TravelerItem], list[Trave
 
 
 def parse_traveler(path: Path) -> TravelerData:
+    """校验 Traveler 文件及表格结构，提取材料、五金、单据和来源指纹。
+
+    参数：path：待解析的 Traveler 文件。
+    """
     if not path.is_file() or path.suffix.lower() != ".xlsx":
         raise RuleError("traveler_missing", f"Traveler 文件不存在或格式不是 xlsx：{path}")
     try:
@@ -1563,6 +1631,10 @@ def parse_traveler(path: Path) -> TravelerData:
 
 
 def _catalog_cost_price(value, label: str) -> float | None:
+    """解析非负有限的预计采购价，空值保留未知，非法数字时报错。
+
+    参数：value：待规范化或校验的原始值；label：目标表头或错误提示中的字段名。
+    """
     if value in (None, ""):
         return None
     if isinstance(value, bool):
@@ -1578,12 +1650,20 @@ def _catalog_cost_price(value, label: str) -> float | None:
 
 class ProductCatalog:
     def __init__(self, path: Path):
+        """读取商品工作簿并初始化商品及代码索引。
+
+        参数：self：当前实例；path：待读取或初始化的文件路径。
+        """
         self.path = path
         self.products: list[Product] = []
         self.by_code: dict[str, list[Product]] = {}
         self._load()
 
     def _load(self) -> None:
+        """读取商品工作簿的必要列和可选属性，建立商品列表及代码索引。
+
+        参数：self：当前实例。
+        """
         if not self.path.is_file():
             raise RuleError("product_catalog_missing", f"尚未导入库存商品资料：{self.path}")
         try:
@@ -1629,6 +1709,10 @@ class ProductCatalog:
             self.by_code.setdefault(code.upper(), []).append(product)
 
     def require_code(self, code: str) -> Product:
+        """要求商品代码唯一、名称完整且启用，否则抛出可诊断错误。
+
+        参数：self：当前实例；code：库存商品代码。
+        """
         matches = self.by_code.get(code.upper(), [])
         if len(matches) != 1:
             raise RuleError("product_conflict", f"商品编号 {code} 匹配到 {len(matches)} 条记录", product_code=code)
@@ -1641,6 +1725,10 @@ class ProductCatalog:
 
     def find(self, *, category: str | None = None, name: str | None = None, contains: str | None = None,
              spec_thickness: float | None = None) -> list[Product]:
+        """按可选分类、名称、关键词及规格厚度筛选商品，厚度使用已有别名容差规则。
+
+        参数：self：当前实例；category：可选商品分类条件；name：来源材料名称或查询名称；contains：可选模糊查询关键词；spec_thickness：可选规格厚度，使用现行别名及容差规则。
+        """
         results = self.products
         if category:
             results = [item for item in results if _normalize_name(item.category) == _normalize_name(category)]
@@ -1664,6 +1752,10 @@ class ProductCatalog:
 
 
 def _ensure_product_cost_column(connection: sqlite3.Connection) -> None:
+    """检查商品表并在缺失时新增采购价字段后提交。
+
+    参数：connection：现有 SQLite 连接。
+    """
     columns = {
         str(row[1])
         for row in connection.execute("pragma table_info(products)").fetchall()
@@ -1674,6 +1766,10 @@ def _ensure_product_cost_column(connection: sqlite3.Connection) -> None:
 
 
 def _ensure_product_brand_column(connection: sqlite3.Connection) -> None:
+    """检查商品表并在缺失时新增品牌字段后提交。
+
+    参数：connection：现有 SQLite 连接。
+    """
     columns = {
         str(row[1])
         for row in connection.execute("pragma table_info(products)").fetchall()
@@ -1684,9 +1780,13 @@ def _ensure_product_brand_column(connection: sqlite3.Connection) -> None:
 
 
 class ProductDatabase:
-    """SQLite-backed product catalog used by runtime lookups."""
+    """供运行时查询使用的 SQLite 商品目录。"""
 
     def __init__(self, path: Path):
+        """连接并校验商品数据库，按现有流程补齐可选字段。
+
+        参数：self：当前实例；path：待读取或初始化的文件路径。
+        """
         self.path = path
         if not path.is_file():
             raise RuleError("product_database_missing", f"尚未导入库存商品数据库：{path}")
@@ -1694,8 +1794,7 @@ class ProductDatabase:
             self.connection = connect_database(path)
             self.connection.set_trace_callback(lambda statement: log_database_statement(path, statement))
             version = int(self.connection.execute("pragma user_version").fetchone()[0])
-            # The product catalog lives in the shared workflow database, whose
-            # user_version is owned by the workflow schema.
+            # 商品目录位于共享业务数据库，user_version 由业务数据库结构统一管理。
             if version not in (0, INVENTORY_DATABASE_VERSION) and version < 1:
                 raise RuleError("product_database_schema", f"库存商品数据库版本不受支持：{version}")
             if self.connection.execute(
@@ -1713,16 +1812,32 @@ class ProductDatabase:
             raise RuleError("product_database_open", f"无法打开库存商品数据库：{path}") from exc
 
     def close(self) -> None:
+        """关闭当前商品数据库连接。
+
+        参数：self：当前实例。
+        """
         self.connection.close()
 
     def __enter__(self) -> "ProductDatabase":
+        """进入上下文管理时返回当前商品数据库实例。
+
+        参数：self：当前实例。
+        """
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
+        """离开上下文时关闭数据库连接，不吞掉原异常。
+
+        参数：self：当前实例；exc_type：上下文退出时的异常类型；exc_value：上下文退出时的异常对象；traceback：上下文退出时的异常调用栈。
+        """
         self.close()
 
     @staticmethod
     def _from_row(row: sqlite3.Row | tuple) -> Product:
+        """按查询列顺序将数据库行转换为商品对象。
+
+        参数：row：按固定商品查询列顺序返回的数据库行。
+        """
         return Product(
             category=str(row[0] or ""),
             code=str(row[1] or ""),
@@ -1741,6 +1856,10 @@ class ProductDatabase:
 
     @property
     def products(self) -> list[Product]:
+        """按商品代码读取完整商品目录，包括最新目录已移除但仍保留的记录。
+
+        参数：self：当前实例。
+        """
         rows = self.connection.execute(
             """
             select category, code, name, spec, status, brand, remark, unit, cost_price,
@@ -1751,9 +1870,17 @@ class ProductDatabase:
         return [self._from_row(row) for row in rows]
 
     def count(self) -> int:
+        """返回商品表记录总数。
+
+        参数：self：当前实例。
+        """
         return int(self.connection.execute("select count(*) from products").fetchone()[0])
 
     def require_code(self, code: str) -> Product:
+        """要求商品代码唯一、名称完整且启用，否则抛出可诊断错误。最新目录已移除的商品也不能使用。
+
+        参数：self：当前实例；code：库存商品代码。
+        """
         rows = self.connection.execute(
             """
             select category, code, name, spec, status, brand, remark, unit, cost_price,
@@ -1781,6 +1908,10 @@ class ProductDatabase:
         contains: str | None = None,
         spec_thickness: float | None = None,
     ) -> list[Product]:
+        """按可选分类、名称、关键词及规格厚度筛选商品，厚度使用已有别名容差规则。
+
+        参数：self：当前实例；category：可选商品分类条件；name：来源材料名称或查询名称；contains：可选模糊查询关键词；spec_thickness：可选规格厚度，使用现行别名及容差规则。
+        """
         clauses = []
         parameters: list[str] = []
         if category:
@@ -1825,6 +1956,10 @@ class ProductDatabase:
 
 
 def _create_product_database(path: Path) -> None:
+    """创建商品表及查询索引，补齐采购价字段并关闭连接。
+
+    参数：path：待读取或初始化的文件路径。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = connect_database(path)
     connection.set_trace_callback(lambda statement: log_database_statement(path, statement))
@@ -1861,6 +1996,10 @@ def _create_product_database(path: Path) -> None:
 
 
 def _replace_product_database(path: Path, products: list[Product]) -> None:
+    """校验目录后事务更新商品，保留已引用材料属性和历史商品，禁止改变已引用五金单位。
+
+    参数：path：待读取或初始化的文件路径；products：已从新目录解析的商品列表。
+    """
     missing = [product.code or product.name for product in products if not product.code or not product.name]
     duplicate_codes = [
         code for code, count in Counter(_normalize_name(product.code) for product in products).items()
@@ -1981,13 +2120,12 @@ def _replace_product_database(path: Path, products: list[Product]) -> None:
 
 
 class InventoryMappings:
-    """Database-backed material rules.
-
-    A temporary JSON compatibility mode remains for isolated legacy fixtures;
-    application call sites pass the central workflow SQLite database. Runtime
-    data is therefore read from and written to SQLite only.
-    """
+    """由数据库保存的材料规则。JSON 兼容模式仅保留给隔离的旧测试夹具；应用调用方传集中业务 SQLite，因此运行时只读写 SQLite。"""
     def __init__(self, path: Path, *, connection: sqlite3.Connection | None = None):
+        """初始化材料映射存储，支持应用数据库及隔离旧 JSON 夹具。
+
+        参数：self：当前实例；path：待读取或初始化的文件路径；connection：可选外部管理的 SQLite 连接。
+        """
         self.path = path
         self._connection = connection
         self._legacy_path = path if path.suffix.lower() == ".json" else None
@@ -2018,6 +2156,10 @@ class InventoryMappings:
             ensure_schema(self.database_path)
 
     def _rows(self, rule_type: str | None = None) -> list[sqlite3.Row]:
+        """按可选规则类型读取材料解析规则，外部传入的连接由调用方管理。
+
+        参数：self：当前实例；rule_type：mapping 映射或 ignore 忽略规则类型。
+        """
         connection = self._connection or connect_database(self.database_path)
         connection.row_factory = sqlite3.Row
         try:
@@ -2036,6 +2178,10 @@ class InventoryMappings:
                 connection.close()
 
     def entries(self) -> tuple[list[dict], list[dict]]:
+        """返回供界面展示的人工映射和忽略规则列表。
+
+        参数：self：当前实例。
+        """
         if self._legacy_path is not None:
             return (
                 [
@@ -2072,7 +2218,10 @@ class InventoryMappings:
     def _effective_display_name(
         self, product_code: str, source_name: str = "", stored_name: str = ""
     ) -> str:
-        """Return the user-facing name without changing any source fact."""
+        """优先选择显式名称或同 SKU 的已存别名，最后回退默认名称，不修改来源事实。
+
+        参数：self：当前实例；product_code：已确认的库存商品 SKU；source_name：原始来源名称；stored_name：已存的显式显示名称。
+        """
         explicit = stored_name.strip()
         if explicit:
             return explicit
@@ -2096,12 +2245,19 @@ class InventoryMappings:
         return HARDWARE_PRODUCT_DISPLAY_NAMES.get(code, "") or source_name.strip()
 
     def display_name_for_product(self, product_code: str, source_name: str = "") -> str:
+        """读取商品 SKU 对应的有效显示名称。
+
+        参数：self：当前实例；product_code：已确认的库存商品 SKU；source_name：原始来源名称。
+        """
         return self._effective_display_name(product_code, source_name)
 
     def display_name_for_hardware(
         self, product_code: str, source_name: str = "", source_code: str = ""
     ) -> str:
-        """Resolve a hardware display label by SKU, then stable source aliases."""
+        """先按 SKU，再按稳定来源别名解析五金显示名称。
+
+        参数：self：当前实例；product_code：已确认的库存商品 SKU；source_name：原始来源名称；source_code：仅用于来源识别的原始报表代码。
+        """
         code = product_code.strip().upper()
         name = self._effective_display_name(code, source_name)
         if name and name != source_name.strip():
@@ -2113,6 +2269,10 @@ class InventoryMappings:
         return source_display or name or source_code.strip() or source_name.strip()
 
     def ignored_reason(self, name: str) -> str | None:
+        """按规范化来源名称查找忽略原因，无规则返回空值。
+
+        参数：self：当前实例；name：来源材料名称或查询名称。
+        """
         normalized = _normalize_name(name)
         if self._legacy_path is not None:
             return self.ignored.get(normalized)
@@ -2128,6 +2288,10 @@ class InventoryMappings:
                 connection.close()
 
     def manual_code(self, name: str) -> str | None:
+        """按规范化来源名称查找人工确认的 SKU，无规则返回空值。
+
+        参数：self：当前实例；name：来源材料名称或查询名称。
+        """
         normalized = _normalize_name(name)
         if self._legacy_path is not None:
             return self.manual.get(normalized)
@@ -2143,6 +2307,10 @@ class InventoryMappings:
                 connection.close()
 
     def save_ignored(self, name: str, reason: str) -> None:
+        """校验名称并保存忽略规则，未填写理由时使用默认说明。
+
+        参数：self：当前实例；name：来源材料名称或查询名称；reason：忽略规则或不出库决定的原因。
+        """
         normalized = _normalize_name(name)
         if not normalized:
             raise RuleError("inventory_mapping", "忽略材料名称不能为空")
@@ -2154,6 +2322,10 @@ class InventoryMappings:
         self._upsert("ignore", name.strip(), normalized, None, value)
 
     def save_manual(self, name: str, product_code: str, display_name: str = "") -> None:
+        """校验名称与 SKU，保存人工映射并统一同商品的显示别名。
+
+        参数：self：当前实例；name：来源材料名称或查询名称；product_code：已确认的库存商品 SKU；display_name：用于界面显示的商品别名。
+        """
         normalized = _normalize_name(name)
         if not normalized:
             raise RuleError("inventory_mapping", "映射材料名称不能为空")
@@ -2179,6 +2351,10 @@ class InventoryMappings:
         self._set_product_display_name(code, effective_display_name)
 
     def remove_ignored(self, name: str) -> None:
+        """删除指定来源名称的忽略规则。
+
+        参数：self：当前实例；name：来源材料名称或查询名称。
+        """
         normalized = _normalize_name(name)
         if self._legacy_path is not None:
             self.ignored.pop(normalized, None)
@@ -2187,6 +2363,10 @@ class InventoryMappings:
         self._delete(normalized, "ignore")
 
     def remove_manual(self, name: str) -> None:
+        """删除指定来源名称的人工商品映射。
+
+        参数：self：当前实例；name：来源材料名称或查询名称。
+        """
         normalized = _normalize_name(name)
         if self._legacy_path is not None:
             self.manual.pop(normalized, None)
@@ -2203,6 +2383,10 @@ class InventoryMappings:
         reason: str,
         display_name: str = "",
     ) -> None:
+        """按规范化来源名新增或覆盖规则，数据库失败时回滚。
+
+        参数：self：当前实例；rule_type：mapping 映射或 ignore 忽略规则类型；source_name：原始来源名称；normalized：已规范化的来源名称键；product_code：已确认的库存商品 SKU；reason：忽略规则或不出库决定的原因；display_name：用于界面显示的商品别名。
+        """
         connection = connect_database(self.database_path)
         try:
             connection.execute(
@@ -2226,7 +2410,10 @@ class InventoryMappings:
             connection.close()
 
     def _set_product_display_name(self, product_code: str, display_name: str) -> None:
-        """Keep every source alias of one SKU on the same display label."""
+        """将同一 SKU 的所有来源别名更新为统一显示名称。
+
+        参数：self：当前实例；product_code：已确认的库存商品 SKU；display_name：用于界面显示的商品别名。
+        """
         if self._legacy_path is not None:
             for normalized, code in self.manual.items():
                 if code.strip().upper() == product_code.strip().upper():
@@ -2246,6 +2433,10 @@ class InventoryMappings:
             connection.close()
 
     def _delete(self, normalized: str, rule_type: str) -> None:
+        """按规范化来源名和规则类型删除数据库规则并提交。
+
+        参数：self：当前实例；normalized：已规范化的来源名称键；rule_type：mapping 映射或 ignore 忽略规则类型。
+        """
         connection = connect_database(self.database_path)
         try:
             connection.execute(
@@ -2257,6 +2448,10 @@ class InventoryMappings:
             connection.close()
 
     def _save(self) -> None:
+        """通过临时文件原子替换旧版隔离测试用 JSON 映射规则。
+
+        参数：self：当前实例。
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": 1,
@@ -2276,9 +2471,7 @@ HARDWARE_DISPLAY_NAMES = {
     "LRAIL": "L-Rail",
 }
 
-# Some AICNC reports identify low rails by their side-specific source name
-# instead of the canonical inventory display name.  Resolve the source name
-# from the report itself so it cannot be mistaken for an H-Rail mapping.
+# 部分 AICNC 报表以左右侧来源名称标识低导轨；应按原始来源名解析，避免误映射为 H-Rail。
 HARDWARE_NAME_DISPLAY_NAMES = {
     "LOWERLEFTRAIL": "L-Rail",
     "LOWERRIGHTRAIL": "L-Rail",
@@ -2291,7 +2484,10 @@ def ignored_hardware_reason(
     code: str = "",
     source_code: str = "",
 ) -> str | None:
-    """Match ignored hardware against raw report names, codes, and display aliases."""
+    """依次按原始五金名称、代码及显示别名查找忽略原因。
+
+    参数：mappings：人工映射及忽略规则集合；name：来源材料名称或查询名称；code：库存商品代码；source_code：仅用于来源识别的原始报表代码。
+    """
     candidates = [name, code, source_code]
     name_display_name = HARDWARE_NAME_DISPLAY_NAMES.get(_normalize_name(name))
     if name_display_name:
@@ -2323,6 +2519,10 @@ FIXED_CODES = {
 
 
 def _single(catalog: ProductCatalog, matches: list[Product], traveler_name: str, source: str) -> tuple[Product, str]:
+    """要求候选商品唯一并再次校验代码及启用状态，返回商品和匹配来源。
+
+    参数：catalog：用于校验唯一商品的目录；matches：候选商品列表；traveler_name：Traveler 中的原始名称；source：匹配规则来源说明。
+    """
     if len(matches) != 1:
         raise RuleError(
             "product_match",
@@ -2334,13 +2534,25 @@ def _single(catalog: ProductCatalog, matches: list[Product], traveler_name: str,
 
 
 def match_item(catalog: ProductCatalog, mappings: InventoryMappings, item: TravelerItem) -> list[OutboundItem]:
+    """优先使用已确认 SKU，否则按人工与固定映射规则解析材料或五金，拒绝歧义。
+
+    参数：catalog：用于校验唯一商品的目录；mappings：人工映射及忽略规则集合；item：当前来源材料或五金条目。
+    """
     def outbound(product: Product, quantity: float, source: str) -> OutboundItem:
+        """用已确认商品和数量创建当前来源条目的出库明细。
+
+        参数：product：已匹配并确认的商品；quantity：待出库数量；source：匹配规则来源说明。
+        """
         return OutboundItem(
             item.name, product.code, product.name, quantity, item.section, source,
             item.document_remark, product.unit,
         )
 
     def edge_outbound(product: Product, source: str) -> OutboundItem:
+        """将封边数量四舍五入为整数后创建出库明细。
+
+        参数：product：已匹配并确认的商品；source：商品匹配规则来源说明。
+        """
         rounded = float(Decimal(str(item.quantity)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
         return outbound(
             product,
@@ -2363,9 +2575,7 @@ def match_item(catalog: ProductCatalog, mappings: InventoryMappings, item: Trave
         if _normalize_name(product.category) == _normalize_name("Edge band"):
             return [edge_outbound(product, "人工指定")]
         return [outbound(product, item.quantity, "人工指定")]
-    # Database-backed hardware stores the canonical inventory SKU in
-    # ``product_code``. Accept that identity directly so outbound does not
-    # rematch a raw Server display name such as Left Rail.
+    # 数据库五金用 product_code 保存规范库存 SKU；直接接受该身份，避免出库时对 Left Rail 等 Server 原始显示名重新匹配。
     try:
         product = catalog.require_code(item.name)
     except RuleError:
@@ -2431,12 +2641,9 @@ def resolve_inventory_items(
     config: Config,
     items: Iterable[tuple[TravelerItem, str]],
 ) -> dict:
-    """Resolve order materials/hardware before they become active database facts.
+    """在材料或五金成为有效事实前解析 SKU。来源代码只临时参与匹配，不能把 AICNC 的 WJ-CBD 等代码直接当库存 SKU；仅接受明确忽略或唯一启用商品。
 
-    ``source_code`` is used transiently for matching because AICNC codes such
-    as ``WJ-CBD`` are source identifiers, not necessarily inventory SKUs.  An
-    item is accepted only when it is explicitly ignored or resolves to a
-    unique enabled catalog product through the normal mapping rules.
+    参数：config：包含状态库、订单来源及备份路径的运行配置；items：由来源条目和原始来源代码组成的二元组集合。
     """
     items = list(items)
     if not items:
@@ -2449,9 +2656,7 @@ def resolve_inventory_items(
     with ProductDatabase(bootstrap_product_database(config)) as catalog:
         for item, source_code in items:
             source_code = _text(source_code)
-            # Known source codes have a stable display name in the workflow.
-            # Use that name only for catalog matching; keep the original
-            # source code only in the transient resolution record, not SKU facts.
+            # 已知来源代码在流程中有稳定显示名；该名称仅用于目录匹配，原始代码仅保留在临时解析记录中，不写成 SKU 事实。
             match_item_value = item
             display_name = (
                 HARDWARE_NAME_DISPLAY_NAMES.get(_normalize_name(item.name))
@@ -2504,7 +2709,10 @@ def resolve_inventory_items(
 
 
 def resolved_product_code(resolution: dict, index: int) -> str:
-    """Require one confirmed catalog SKU; never fall back to a report code."""
+    """要求解析结果含一个已确认目录 SKU，绝不回退使用报表代码。
+
+    参数：resolution：材料解析返回的结构化结果；index：待提取条目在解析结果中的下标。
+    """
     accepted = resolution.get("accepted", []) if isinstance(resolution, dict) else []
     if 0 <= index < len(accepted):
         codes = accepted[index].get("product_codes", []) or []
@@ -2520,11 +2728,9 @@ def confirm_product_material_attributes(
     material_color: str = "",
     material_thickness: object = "",
 ) -> None:
-    """Bind catalog-owned workflow attributes on first confirmed SKU use.
+    """首次确认使用 SKU 时绑定商品拥有的材料属性，保留原始目录名称及规格。SKU 已被订单材料引用后，后续映射不能暗改其颜色或标称厚度。
 
-    Raw catalog names/specifications remain unchanged.  Once an SKU is used
-    by an order material, a later mapping cannot silently reinterpret that SKU
-    as another workflow color or nominal thickness.
+    参数：connection：现有 SQLite 连接；product_code：已确认的库存商品 SKU；material_kind：待绑定的材料种类；material_color：待绑定的材料颜色；material_thickness：待绑定的材料标称厚度。
     """
     code = str(product_code or "").strip().upper()
     kind = str(material_kind or "").strip().casefold()
@@ -2589,12 +2795,9 @@ def build_preview(
     mapping_path: Path,
     selected_document_remarks: Iterable[str] | None = None,
 ) -> InventoryPreview:
-    """Build a read-only outbound preview and collect mapping conflicts.
+    """只读解析 Traveler 和本地商品映射，返回出库预览及冲突，不提交出库。缺失、忽略和重复匹配均显式报告，交由调用方阻止确认而非猜测商品。
 
-    A preview resolves Traveler items against the local catalog and mapping
-    rules.  It does not submit an outbound document.  Missing, ignored, or
-    duplicate mappings are returned as visible problems so the caller can
-    block confirmation instead of guessing a product.
+    参数：path：待解析的 Traveler 文件；catalog_path：商品目录文件或数据库路径；mapping_path：映射规则数据库或隔离测试 JSON 路径；selected_document_remarks：明确选择的单据备注；为空时包含全部。
     """
     traveler = parse_traveler(path)
     mappings = InventoryMappings(mapping_path)
@@ -2609,10 +2812,7 @@ def build_preview(
         _normalize_name(remark)
         for remark in requested_remarks
     }
-    # The order-level material document is always part of a factory-order
-    # outbound selection. Hardware documents are narrowed to the selected
-    # factory-order names. Missing names are tolerated because CS orders can
-    # legitimately have no hardware block in the Traveler.
+    # 选择工厂单出库时始终纳入订单级材料单；五金仅保留所选工厂名称。允许缺少名称，因为 CS 订单的 Traveler 可以没有五金区域。
     if selected:
         selected.add(_normalize_name(traveler.order_id))
     outbound = []
@@ -2666,10 +2866,14 @@ def build_preview(
 
 
 def set_ignored_mapping(config: Config, name: str, ignored: bool, reason: str = "") -> dict:
+    """新增或移除未来导入使用的忽略规则，并返回规则摘要。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；name：来源材料名称或查询名称；ignored：是否启用忽略规则；reason：忽略规则或不出库决定的原因。
+    """
     mappings = InventoryMappings(config.workflow_database)
     if ignored:
         mappings.save_ignored(name, reason)
-        removed_database_rows = 0  # Ignore rules apply to future imports, never confirmed SKU facts.
+        removed_database_rows = 0  # 忽略规则仅影响未来导入，不修改已确认 SKU 事实。
     else:
         mappings.remove_ignored(name)
         removed_database_rows = 0
@@ -2682,7 +2886,10 @@ def set_ignored_mapping(config: Config, name: str, ignored: bool, reason: str = 
 
 
 def update_ignored_mapping(config: Config, old_name: str, name: str, reason: str = "") -> dict:
-    """Rename or edit an import ignore rule without changing confirmed facts."""
+    """重命名或修改导入忽略规则，不改已确认 SKU 事实。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；old_name：更新前的来源名称；name：来源材料名称或查询名称；reason：忽略规则或不出库决定的原因。
+    """
     mappings = InventoryMappings(config.workflow_database)
     old_normalized = _normalize_name(old_name)
     new_normalized = _normalize_name(name)
@@ -2691,7 +2898,7 @@ def update_ignored_mapping(config: Config, old_name: str, name: str, reason: str
     if old_normalized != new_normalized:
         mappings.remove_ignored(old_name)
     mappings.save_ignored(name, reason)
-    removed_database_rows = 0  # Ignore rules apply to future imports, never confirmed SKU facts.
+    removed_database_rows = 0  # 忽略规则仅影响未来导入，不修改已确认 SKU 事实。
     return {
         "ok": True,
         "old_name": old_name,
@@ -2702,6 +2909,10 @@ def update_ignored_mapping(config: Config, old_name: str, name: str, reason: str
 
 
 def list_inventory_mappings(config: Config) -> dict:
+    """读取全部人工映射、显示别名和忽略规则。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置。
+    """
     mappings = InventoryMappings(config.workflow_database)
     manual, ignored = mappings.entries()
     return {
@@ -2713,6 +2924,10 @@ def list_inventory_mappings(config: Config) -> dict:
 
 
 def search_inventory_products(config: Config, query: str) -> dict:
+    """按查询词搜索商品，并返回可供人工映射选择的记录。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；query：商品搜索关键词。
+    """
     token = _normalize_name(query)
     if not token:
         raise RuleError("inventory_argument", "请输入商品编号、名称或规格")
@@ -2731,6 +2946,10 @@ def search_inventory_products(config: Config, query: str) -> dict:
 def save_manual_mapping(
     config: Config, name: str, product_code: str, display_name: str = ""
 ) -> dict:
+    """校验目标商品并保存来源名称到 SKU 的人工映射。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；name：来源材料名称或查询名称；product_code：已确认的库存商品 SKU；display_name：用于界面显示的商品别名。
+    """
     with ProductDatabase(bootstrap_product_database(config)) as catalog:
         product = catalog.require_code(product_code)
     mappings = InventoryMappings(config.workflow_database)
@@ -2744,6 +2963,10 @@ def save_manual_mapping(
 
 
 def remove_manual_mapping(config: Config, name: str) -> dict:
+    """移除来源名称的人工映射并返回删除结果。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；name：来源材料名称或查询名称。
+    """
     mappings = InventoryMappings(config.workflow_database)
     mappings.remove_manual(name)
     return {"ok": True, "traveler_name": name, "removed": True}
@@ -2752,6 +2975,10 @@ def remove_manual_mapping(config: Config, name: str) -> dict:
 def update_manual_mapping(
     config: Config, old_name: str, name: str, product_code: str, display_name: str = ""
 ) -> dict:
+    """校验新商品并更新映射名称、SKU 和显示别名。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；old_name：更新前的来源名称；name：来源材料名称或查询名称；product_code：已确认的库存商品 SKU；display_name：用于界面显示的商品别名。
+    """
     mappings = InventoryMappings(config.workflow_database)
     old_normalized = _normalize_name(old_name)
     new_normalized = _normalize_name(name)
@@ -2772,19 +2999,22 @@ def update_manual_mapping(
 
 
 class InventoryOperationJournal:
-    """Durable intent/result state for a browser-plus-database operation.
-
-    The journal is operational metadata, not a production or outbound fact.
-    It is written before browser automation so a retry can distinguish a
-    confirmed external save from an operation that never reached JDY.
-    """
+    """保存浏览器与数据库联合操作的意图及结果。日志是操作元数据，不是生产或出库事实；在浏览器动作前写入，使重试能区分外部已保存与尚未到达金蝶的操作。"""
 
     def __init__(self, database: Path):
+        """确保库存操作日志结构可用并保存数据库路径。
+
+        参数：self：当前实例；database：集中业务数据库路径。
+        """
         ensure_schema(database)
         self.database = database
 
     @staticmethod
     def _canonical(value: object) -> str:
+        """将对象序列化为排序且紧凑的 JSON，供幂等身份比较。
+
+        参数：value：待规范化或校验的原始值。
+        """
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     def prepare(
@@ -2794,6 +3024,10 @@ class InventoryOperationJournal:
         factory_orders: Iterable[str],
         payload: dict,
     ) -> dict:
+        """按动作、订单、工厂单和业务载荷生成幂等操作记录，保留已有外部确认的恢复信息。
+
+        参数：self：当前实例；operation_kind：需要登记的库存操作类别；order_id：销售订单号；factory_orders：本次操作关联的工厂单集合；payload：待序列化或登记的结构化载荷。
+        """
         normalized_order = str(order_id or "").strip().upper()
         normalized_factories = sorted({
             str(value or "").strip().upper()
@@ -2802,12 +3036,11 @@ class InventoryOperationJournal:
         })
         payload_json = self._canonical(payload)
         identity_payload = json.loads(payload_json)
+        identity_payload.pop("recovery_context", None)
         identity_draft = identity_payload.get("production_draft")
         if isinstance(identity_draft, dict):
-            # A fresh in-memory batch number is generated for every safe retry.
-            # It must not hide an already-confirmed external save for the same
-            # order, factories, and material quantities.
-            identity_draft.pop("batch_number", None)  # previously saved recovery payloads
+            # 每次安全重试都会生成新的内存批次号；不能因此掩盖相同订单、工厂单及材料数量已有的外部保存确认。
+            identity_draft.pop("batch_number", None)  # 兼容先前保存的恢复载荷
             identity_draft.pop("request_id", None)
             identity_draft.pop("production_time", None)
         identity_payload_json = self._canonical(identity_payload)
@@ -2866,6 +3099,10 @@ class InventoryOperationJournal:
         error: str = "",
         increment_attempt: bool = False,
     ) -> None:
+        """更新库存操作状态、错误和可选单据结果，按需增加尝试次数。
+
+        参数：self：当前实例；operation_id：持久库存操作标识；status：新的操作状态；results：外部返回的单据结果列表；error：本次失败的诊断说明；increment_attempt：是否将尝试次数加一。
+        """
         now = datetime.now().astimezone().isoformat(timespec="seconds")
         connection = connect_database(self.database)
         try:
@@ -2887,6 +3124,10 @@ class InventoryOperationJournal:
 
     @staticmethod
     def decoded_payload(row: dict) -> dict:
+        """安全解析操作记录的请求载荷，格式不符返回空字典。
+
+        参数：row：库存操作日志数据库记录。
+        """
         try:
             value = json.loads(str(row.get("payload_json", "{}")))
         except json.JSONDecodeError:
@@ -2895,6 +3136,10 @@ class InventoryOperationJournal:
 
     @staticmethod
     def decoded_results(row: dict) -> list[dict]:
+        """安全解析操作记录的单据结果，仅保留字典元素。
+
+        参数：row：库存操作日志数据库记录。
+        """
         try:
             value = json.loads(str(row.get("document_results_json", "[]")))
         except json.JSONDecodeError:
@@ -2902,11 +3147,231 @@ class InventoryOperationJournal:
         return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
+RECOVERABLE_INVENTORY_STATES = ("submitting", "verification_required", "external_confirmed", "partial_external_confirmed")
+
+
+def _completed_shipment_documents(connection, operation: dict) -> list[str]:
+    """只读识别被后续出货完成的旧操作；单号、原计划和本地工厂关联必须完整一致。"""
+    payload = InventoryOperationJournal.decoded_payload(operation)
+    documents = payload.get("documents")
+    # 生产草稿和状态恢复失败还需要业务核对，不能仅凭出库单关闭。
+    if (operation.get("operation_kind") != "shipment" or payload.get("production_draft")
+            or str(operation.get("last_error", "")).startswith("本地单据已恢复")
+            or not isinstance(documents, list) or not documents):
+        return []
+
+    def quantities(items):
+        """保留唯一 SKU 和有效数量；坏数据或重复 SKU 不参与自动消除。"""
+        if not isinstance(items, list) or not items:
+            return None
+        result = {}
+        try:
+            for item in items:
+                code = str(item["productCode"]).strip().upper()
+                quantity = Decimal(str(item["quantity"]))
+                if not code or code in result or not quantity.is_finite() or quantity <= 0:
+                    return None
+                result[code] = quantity
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            return None
+        return result
+
+    try:
+        started = datetime.fromisoformat(operation["created_at"])
+        scope = json.loads(operation["factory_orders_json"])
+        if not isinstance(scope, list) or not scope or not all(isinstance(value, str) for value in scope):
+            return []
+    except (KeyError, TypeError, ValueError):
+        return []
+    later_cursor = connection.execute("""select * from inventory_operations
+        where order_id=? and operation_kind='shipment' and status='local_committed'""", (operation["order_id"],))
+    later = [dict(zip([column[0] for column in later_cursor.description], row)) for row in later_cursor]
+    original_results = InventoryOperationJournal.decoded_results(operation)
+    numbers, remarks, covered_factories = [], set(), set()
+    used_later = False
+    for document in documents:
+        if not isinstance(document, dict) or document.get("kind") != "hardware":
+            return []
+        remark = document.get("remark")
+        expected = quantities(document.get("items"))
+        if not isinstance(remark, str) or not remark or remark in remarks or expected is None:
+            return []
+        remarks.add(remark)
+        candidates = set()
+        original = [r for r in original_results if r.get("remark") == remark]
+        if original:
+            if len(original) != 1 or not (original[0].get("saved") or original[0].get("unchanged")):
+                return []
+            original_number = original[0].get("documentNumber", "")
+            if not isinstance(original_number, str):
+                return []
+            candidates.add(original_number)
+        else:
+            for completed in later:
+                try:
+                    if datetime.fromisoformat(completed["created_at"]) <= started:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                completed_payload = InventoryOperationJournal.decoded_payload(completed)
+                if completed_payload.get("production_draft"):
+                    continue
+                plans = completed_payload.get("documents", [])
+                if not isinstance(plans, list):
+                    continue
+                matches = [d for d in plans if isinstance(d, dict) and d.get("remark") == remark]
+                if (len(matches) != 1 or matches[0].get("kind") != "hardware"
+                        or quantities(matches[0].get("items")) != expected):
+                    continue
+                for result in InventoryOperationJournal.decoded_results(completed):
+                    if result.get("remark") == remark and (result.get("saved") or result.get("unchanged")):
+                        candidate_number = result.get("documentNumber", "")
+                        if not isinstance(candidate_number, str):
+                            return []
+                        candidates.add(candidate_number)
+            used_later = True
+        if len(candidates) != 1:
+            return []
+        number = candidates.pop()
+        known = document.get("knownDocumentNumber")
+        if not isinstance(number, str) or not re.fullmatch(r"QTCK\d+", number) or (known and known != number):
+            return []
+        local = connection.execute("""select items_json from outbound_documents
+            where document_number=? and order_id=? and document_type='hardware' and status='已出库'""",
+            (number, operation["order_id"])).fetchone()
+        if not local:
+            return []
+        try:
+            if quantities(json.loads(local[0])) != expected:
+                return []
+        except (TypeError, ValueError):
+            return []
+        factories = connection.execute("""select factory_order from factory_orders
+            where order_id=? and (factory_order=? or factory_name=?)""",
+            (operation["order_id"], remark, remark)).fetchall()
+        if len(factories) != 1 or factories[0][0] not in scope:
+            return []
+        covered_factories.add(factories[0][0])
+        links = connection.execute("""select order_id, factory_order from outbound_document_factories
+            where document_number=?""", (number,)).fetchall()
+        if [tuple(link) for link in links] != [(operation["order_id"], factories[0][0])]:
+            return []
+        numbers.append(number)
+    if any(not isinstance(result.get("remark"), str) or result["remark"] not in remarks for result in original_results):
+        return []
+    return numbers if used_later and len(set(numbers)) == len(documents) and covered_factories == set(scope) else []
+
+
+def pending_inventory_operations(database: Path, *, connection=None) -> list[dict]:
+    """将已提交但尚未核对完成的操作投影为待处理项，不持久化提示文案。"""
+    owned = connection is None
+    connection = connection or connect_database(database)
+    try:
+        cursor = connection.execute("""select * from inventory_operations
+            where status in ('submitting','verification_required','external_confirmed','partial_external_confirmed')
+            order by updated_at desc""")
+        rows = [dict(zip([column[0] for column in cursor.description], row)) for row in cursor]
+        result = []
+        for row in rows:
+            if _completed_shipment_documents(connection, row):
+                continue
+            key, order, error = row["operation_id"], row["order_id"], row["last_error"]
+            created, updated, results = row["created_at"], row["updated_at"], row["document_results_json"]
+            numbers = [str(row.get("documentNumber", "")) for row in InventoryOperationJournal.decoded_results(
+                {"document_results_json": results}) if row.get("documentNumber")]
+            message = f"{created[:10]} 发起的出库操作还需要核对。系统可能已出库，本地记录尚未确认完整。点击下方按钮重新检查；核对一致后补齐本地记录，不会再次扣库存。"
+            if numbers:
+                message += " 已返回单据：" + "、".join(numbers)
+            if error:
+                message += "。上次未能完成检查：" + str(error).replace("；库存未确认成功，本次未写入本地业务数据库", "")
+            result.append(dict(issue_key="inventory_recovery:" + key, kind="inventory_recovery",
+                               order_id=order, factory_order="", path="", message=message,
+                               status="open", first_seen=created, last_seen=updated, resolved_at=""))
+        return result
+    finally:
+        if owned:
+            connection.close()
+
+
+def recover_inventory_operation(config: Config, operation_id: str) -> dict:
+    """逐张只读核对单号、备注、SKU 和数量，全部一致后原子补齐本地事实；绝不提交外部出库。"""
+    journal = InventoryOperationJournal(config.workflow_database)
+    connection = connect_database(config.workflow_database)
+    connection.row_factory = sqlite3.Row
+    try:
+        row = connection.execute("select * from inventory_operations where operation_id=?", (operation_id,)).fetchone()
+        if row is None:
+            raise RuleError("inventory_operation_missing", "找不到该操作，请刷新待处理中心")
+        row = dict(row)
+        if row["status"] == "local_committed":
+            return {"ok": True, "syncRecorded": True, "alreadyRecovered": True}
+        if row["status"] not in RECOVERABLE_INVENTORY_STATES:
+            raise RuleError("inventory_operation_state", "该操作没有需要恢复的外部结果")
+        completed = _completed_shipment_documents(connection, row)
+        if completed:
+            return {"ok": True, "syncRecorded": True, "alreadyRecovered": True,
+                    "documentNumbers": completed,
+                    "message": "后续操作已补齐本地出库记录，旧提示已移除；本次未修改库存或出库记录"}
+    finally:
+        connection.close()
+    payload = journal.decoded_payload(row)
+    if row.get('operation_kind') == 'aicnc_rework':
+        from .aicnc_import import recover
+        return recover(config, payload['optimization_id'])
+    documents = payload.get("documents", [])
+    if not documents or not all(isinstance(doc, dict) and doc.get("remark") and doc.get("items") for doc in documents):
+        raise RuleError("inventory_operation_corrupt", "恢复记录缺少原始单据明细，无法安全恢复；请核对操作日志")
+    if len({doc["remark"] for doc in documents}) != len(documents):
+        raise RuleError("inventory_operation_corrupt", "恢复记录的单据备注重复，已停止")
+    original_results = {item.get("remark"): item for item in journal.decoded_results(row)}
+    results = []
+    try:
+        for document in documents:
+            known = str(original_results.get(document["remark"], {}).get("documentNumber") or document.get("knownDocumentNumber") or "")
+            verified = run_jdy(config, "verifyOutbound", order_name=document["remark"],
+                               verification_document={"orderName": document["remark"], "items": document["items"],
+                                                      "knownDocumentNumber": known})
+            number = str(verified.get("documentNumber", ""))
+            if (not verified.get("verified") or not re.fullmatch(r"QTCK\d+", number)
+                    or verified.get("remark") != document["remark"] or (known and known != number)):
+                raise RuleError("inventory_verification_required", "外部单据未完整匹配，未修改本地；请核对单号、备注和商品数量后重新检查")
+            results.append({**verified, "saved": True, "kind": document["kind"]})
+        if len({item["documentNumber"] for item in results}) != len(results):
+            raise RuleError("inventory_verification_required", "多个备注指向同一单据，已停止恢复")
+        context = payload.get("recovery_context", {})
+        # 旧记录仍有完整计划及生产草稿；按已保存的操作身份恢复，绝不重新解析变动后的 Server。
+        source_type = context.get("source_type", "database" if payload.get("production_draft") else "traveler")
+        traveler = TravelerData(Path(context.get("source_path") or "."), row["order_id"], row["order_id"],
+                                row["order_id"], [], [], {}, "", "")
+        preview = InventoryPreview(traveler, [], selected_factory_orders=tuple(json.loads(row["factory_orders_json"])),
+                                   source_type=source_type)
+        InventorySyncStore(config.workflow_database, config.backup_root).save_success(
+            preview, results, production_draft=payload.get("production_draft"), operation_id=operation_id,
+            prepared_documents=documents,
+        )
+    except Exception as exc:
+        journal.update(operation_id, "verification_required", error=str(exc))
+        raise
+    from .order_index import reconcile_outbound_statuses, record_temporary_outbound
+    try:
+        reconcile_outbound_statuses(config, order_ids=[row["order_id"]], factory_orders=preview.selected_factory_orders or None)
+        if context.get("source_path"):
+            record_temporary_outbound(config, preview.traveler.path, {"saved": True, "results": results})
+    except Exception as exc:
+        journal.update(operation_id, "verification_required", results=results,
+                       error="本地单据已恢复，订单状态核对未完成：" + str(exc))
+        raise
+    return {"ok": True, "syncRecorded": True, "results": results,
+            "message": "已核对外部单据并恢复本地记录，未再次扣库存"}
+
+
 class InventorySyncStore:
     def __init__(self, path: Path, backup_root: Path):
-        # Outbound facts moved to workflow.sqlite3. ``path`` is retained only
-        # as the old filename passed by callers; it is no longer opened or
-        # written, so archived legacy JSON cannot silently become authoritative.
+        # 出库事实已迁入 workflow.sqlite3；path 仅保留调用方传入的旧文件名，不再读取或写入该文件，防止归档旧 JSON 意外恢复为事实来源。
+        """初始化集中出库事实存储与备份位置，不读取历史 JSON。
+
+        参数：self：当前实例；path：用于推导同目录 workflow.sqlite3 的历史同步文件路径；不读写旧 JSON；backup_root：配置的备份根目录。
+        """
         self.path = path
         self.database = path.parent / "workflow.sqlite3"
         self.backup_root = backup_root / "Inventory Sync Records"
@@ -2914,12 +3379,20 @@ class InventorySyncStore:
 
     @staticmethod
     def key(order_id: str, remark: str) -> str:
+        """对规范化订单号及单据备注计算稳定身份键。
+
+        参数：order_id：销售订单号；remark：用于单据识别的备注。
+        """
         return hashlib.sha256(
             f"{_normalize_name(order_id)}\n{_normalize_name(remark)}".encode()
         ).hexdigest()
 
     @staticmethod
     def raw_document_fingerprint(items: list[TravelerItem]) -> str:
+        """按来源名称和数量排序生成原始单据指纹。
+
+        参数：items：待汇总、解析或计算指纹的材料/五金条目。
+        """
         return _fingerprint({
             "items": sorted(
                 (
@@ -2932,6 +3405,10 @@ class InventorySyncStore:
 
     @staticmethod
     def mapped_document_fingerprint(items: list[OutboundItem]) -> str:
+        """按大写 SKU 和数量排序生成实际出库明细指纹。
+
+        参数：items：待汇总、解析或计算指纹的材料/五金条目。
+        """
         return _fingerprint({
             "items": sorted(
                 (item.product_code.upper(), float(item.quantity))
@@ -2943,12 +3420,9 @@ class InventorySyncStore:
     def canonical_document_fingerprint(
         items: list[TravelerItem],
     ) -> str | None:
-        """Return mapped identity when every database item carries its SKU.
+        """在每个来源条目都有 SKU 时计算规范单据指纹。直接读 Traveler 的条目缺少 SKU，仍依赖历史原始指纹；数据库投影可据此发现名称数量不变但 SKU 改变的情况。
 
-        Files parsed directly from a Traveler do not yet have canonical SKUs,
-        so their status continues to rely on the historical raw fingerprint.
-        Database projections carry the explicit SKU and can therefore
-        detect a same-name/same-quantity product change as well.
+        参数：items：待汇总、解析或计算指纹的材料/五金条目。
         """
         values: list[tuple[str, float]] = []
         for item in items:
@@ -2966,6 +3440,10 @@ class InventorySyncStore:
         return _fingerprint({"items": sorted(values)})
 
     def _records(self) -> list[dict]:
+        """读取持久出库单及工厂单关联，展开为按单据备注可检索的历史记录。
+
+        参数：self：当前实例。
+        """
         connection = connect_database(self.database)
         try:
             rows = connection.execute(
@@ -2985,6 +3463,9 @@ class InventorySyncStore:
                     if str(item[0]).strip()
                 ]
                 remarks = links or [str(row[3] or row[2] or "").strip()]
+                if row[1] == 'rework_materials':
+                    from .aicnc_import import optimization_id
+                    remarks = [f"{row[2]} 返工 {optimization_id(Path(row[6]))}"]
                 try:
                     items = json.loads(row[8] or "[]")
                 except (TypeError, json.JSONDecodeError):
@@ -3008,6 +3489,10 @@ class InventorySyncStore:
             connection.close()
 
     def record_for_document(self, order_id: str, remark: str) -> dict | None:
+        """按订单号和备注查找首个持久出库记录。
+
+        参数：self：当前实例；order_id：销售订单号；remark：用于单据识别的备注。
+        """
         order_key = _normalize_name(order_id)
         remark_key = _normalize_name(remark)
         return next(
@@ -3020,6 +3505,10 @@ class InventorySyncStore:
         )
 
     def records_for_order(self, order_id: str) -> list[dict]:
+        """读取指定订单的全部持久出库记录。
+
+        参数：self：当前实例；order_id：销售订单号。
+        """
         normalized = _normalize_name(order_id)
         return [
             record for record in self._records()
@@ -3027,6 +3516,10 @@ class InventorySyncStore:
         ]
 
     def status_for(self, traveler: TravelerData) -> tuple[str, str]:
+        """比较当前来源单据与历史指纹，返回出库状态及已知单号。
+
+        参数：self：当前实例；traveler：已解析的 Traveler 来源数据。
+        """
         records = self.records_for_order(traveler.order_id)
         if not records:
             return "未出库", ""
@@ -3065,6 +3558,10 @@ class InventorySyncStore:
         return "已出库", "、".join(filter(None, document_numbers))
 
     def prepare_documents(self, preview: InventoryPreview) -> list[dict]:
+        """比较预览与历史单据生成新建或更新载荷；完整范围内单据消失时要求人工处理。
+
+        参数：self：当前实例；preview：已解析 SKU 及出库范围的预览。
+        """
         selected = preview._selected_document_set()
         document_kinds = {
             str(kind).strip().casefold()
@@ -3074,7 +3571,8 @@ class InventorySyncStore:
         previous = {
             str(record.get("remark", "")): record
             for record in self.records_for_order(preview.traveler.order_id)
-            if (not document_kinds or str(record.get("kind", "")).strip().casefold() in document_kinds)
+            if record.get("kind") != "rework_materials"
+            and (not document_kinds or str(record.get("kind", "")).strip().casefold() in document_kinds)
             and (not selected or _normalize_name(str(record.get("remark", ""))) in selected)
         }
         current = {
@@ -3109,10 +3607,7 @@ class InventorySyncStore:
                     {"productCode": item.product_code, "quantity": item.quantity}
                     for item in items
                 ],
-                # A changed Traveler source must update the original outbound
-                # document even when its mapped product codes happen to stay
-                # the same.  The raw fingerprint is the Server/report change
-                # signal; the mapped fingerprint protects the actual line data.
+                # Traveler 来源变化时，即使映射后商品代码相同也应更新原出库单；原始指纹反映 Server/报表变化，映射指纹保护实际明细。
                 "changed": (
                     not record
                     or record.get("mapped_fingerprint") != mapped_fingerprint
@@ -3136,9 +3631,14 @@ class InventorySyncStore:
         operation_id: str = "",
         commit_operation: bool = True,
         commit_production: bool = True,
+        prepared_documents: list[dict] | None = None,
     ) -> None:
+        """备份后保存外部已成功单据及工厂关联，按选项提交生产事实和操作恢复状态。
+
+        参数：self：当前实例；preview：已解析 SKU 及出库范围的预览；results：外部返回的单据结果列表；production_draft：待提交的生产事实草稿；为空时不登记生产；operation_id：持久库存操作标识；commit_operation：是否将库存操作状态标记为本地提交完成；commit_production：是否同时提交生产草稿。
+        """
         self._backup_current()
-        prepared = {item["remark"]: item for item in self.prepare_documents(preview)}
+        prepared = {item["remark"]: item for item in (prepared_documents if prepared_documents is not None else self.prepare_documents(preview))}
         connection = connect_database(self.database)
         try:
             for result in results:
@@ -3149,6 +3649,10 @@ class InventorySyncStore:
                 document_number = str(result.get("documentNumber", "")).strip()
                 if not plan or not document_number:
                     continue
+                if prepared_documents is not None:
+                    existing = connection.execute("select order_id from outbound_documents where document_number=?", (document_number,)).fetchone()
+                    if existing and existing[0] != preview.traveler.order_id:
+                        raise RuleError("inventory_document_conflict", "该单据在本地属于其他订单，已停止恢复，请核对单号")
                 has_factory_orders = connection.execute(
                     "select 1 from sqlite_master where type='table' and name='factory_orders'"
                 ).fetchone() is not None
@@ -3218,25 +3722,24 @@ class InventorySyncStore:
             connection.close()
 
     def _backup_current(self) -> None:
+        """备份当前业务库并保留最近 50 份；远端路径或元数据复制失败时回退本地备份。
+
+        参数：self：当前实例。
+        """
         if not self.database.is_file():
             return
         backup_root = self.backup_root
         try:
             backup_root.mkdir(parents=True, exist_ok=True)
         except OSError:
-            # The configured production backup is commonly on a Server mount.
-            # A missing mount must not discard a confirmed local inventory sync;
-            # keep a recoverable copy beside the local workflow database.
+            # 正式备份常位于 Server 挂载目录；挂载缺失不能丢弃已确认的库存同步，应在本地业务库旁保留可恢复副本。
             backup_root = self.path.parent / "database-backups" / "Inventory Sync Records"
             backup_root.mkdir(parents=True, exist_ok=True)
         destination = backup_root / f"workflow-before-outbound {datetime.now():%Y-%m-%d %H%M%S.%f}.sqlite3"
         try:
             shutil.copy2(self.database, destination)
         except OSError:
-            # Some SMB/macOS mounts reject the metadata pass in copy2() even
-            # though the file contents are writable.  A backup failure must
-            # never prevent recording a confirmed JDY document: retry on the
-            # local state volume, where both contents and metadata are safe.
+            # 部分 SMB/macOS 挂载允许写内容却拒绝 copy2() 的元数据复制；备份失败不能阻止已确认金蝶单据落库，需在本地状态卷重试。
             destination.unlink(missing_ok=True)
             backup_root = self.path.parent / "database-backups" / "Inventory Sync Records"
             backup_root.mkdir(parents=True, exist_ok=True)
@@ -3248,15 +3751,26 @@ class InventorySyncStore:
 
 
 def _catalog_path(config: Config) -> Path:
+    """返回当前商品工作簿备份路径。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置。
+    """
     return config.state_dir / "inventory" / "current-products.xlsx"
 
 
 def _database_path(config: Config) -> Path:
-    """Return the only supported product catalog database."""
+    """返回唯一支持的集中商品目录数据库路径。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置。
+    """
     return config.state_dir / "workflow.sqlite3"
 
 
 def _catalog_info(config: Config) -> dict:
+    """读取商品目录位置、数量、更新时间及是否超过 30 天的提示。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置。
+    """
     database = _database_path(config)
     if not database.is_file():
         return {}
@@ -3277,6 +3791,10 @@ def _catalog_info(config: Config) -> dict:
 
 
 def _sync_path(config: Config) -> Path:
+    """返回集中出库同步事实数据库路径。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置。
+    """
     return config.workflow_database
 
 
@@ -3286,12 +3804,9 @@ def _persist_completed_outbound_results(
     confirm_save: bool,
     responses: list[dict],
 ) -> list[str]:
-    """Persist documents already returned before a later outbound fails.
+    """后续单据失败前先持久化已成功单据。多单逐个执行，早先成功必须在重试前登记；此步骤不把整单标为出货，仍需全部事实对账。
 
-    A multi-document outbound is executed one document at a time. If a later
-    browser process times out, earlier successful documents are still facts and
-    must be recorded before the remaining document is retried. This does not
-    mark the whole order shipped; normal reconciliation waits for all facts.
+    参数：config：包含状态库、订单来源及备份路径的运行配置；preview：已解析 SKU 及出库范围的预览；confirm_save：是否明确允许外部保存出库单；responses：此前各单据的浏览器结果。
     """
     if not (confirm_save and preview is not None):
         return []
@@ -3317,7 +3832,10 @@ def _persist_single_outbound_result(
     result: dict,
     production_draft: dict | None = None,
 ) -> str:
-    """Persist one externally confirmed document before the next is attempted."""
+    """在尝试下一单前记录一张外部已确认单据，缺少完整单号时阻止继续。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；preview：已解析 SKU 及出库范围的预览；result：当前单据的浏览器结果；production_draft：待提交的生产事实草稿；为空时不登记生产。
+    """
     if preview is None or not (result.get("saved") or result.get("unchanged")):
         return ""
     document_number = str(result.get("documentNumber", "")).strip()
@@ -3329,8 +3847,7 @@ def _persist_single_outbound_result(
     InventorySyncStore(_sync_path(config), config.backup_root).save_success(
         preview,
         [result],
-        # The operation remains partial until every requested document is
-        # confirmed.  The durable per-document ledger is still written now.
+        # 全部请求单据确认前，操作仍处于部分完成状态；当前已确认单据立即写入持久台账。
         operation_id="",
         production_draft=production_draft,
         commit_production=False,
@@ -3339,6 +3856,10 @@ def _persist_single_outbound_result(
 
 
 def bootstrap_catalog(config: Config) -> Path:
+    """当前商品工作簿缺失时，校验并复制随包提供的最新目录。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置。
+    """
     destination = _catalog_path(config)
     if destination.is_file():
         return destination
@@ -3353,7 +3874,10 @@ def bootstrap_catalog(config: Config) -> Path:
 
 
 def bootstrap_product_database(config: Config) -> Path:
-    """Return the central runtime catalog database, importing the XLSX if needed."""
+    """返回集中运行时商品库，必要时从商品工作簿初始化目录。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置。
+    """
     if not config.storage_prepared:
         config.prepare_storage()
     destination = _database_path(config)
@@ -3383,6 +3907,10 @@ def bootstrap_product_database(config: Config) -> Path:
 
 
 def reconcile_folder_status(config: Config, folder: str) -> dict:
+    """查询库存历史，将文件夹下 Traveler 与单号匹配并列出缺失及歧义，不写对账结果。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；folder：待对账的订单文件夹编号。
+    """
     folder = folder.strip().upper()
     if not re.fullmatch(r"(?:PP\d{4}|CS\d{3})", folder):
         raise RuleError("inventory_argument", f"文件夹编号格式无效：{folder}")
@@ -3426,6 +3954,10 @@ def reconcile_folder_status(config: Config, folder: str) -> dict:
 
 
 def list_travelers(config: Config, include_history: bool = False) -> dict:
+    """解析订单目录下 Traveler 并结合持久记录生成状态，收集单文件错误。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；include_history：是否包含起始日期之前已出库的历史文件。
+    """
     database = bootstrap_product_database(config)
     initial = datetime.strptime(config.initial_date, "%Y-%m-%d")
     store = InventorySyncStore(_sync_path(config), config.backup_root)
@@ -3456,6 +3988,10 @@ def list_travelers(config: Config, include_history: bool = False) -> dict:
 
 
 def list_traveler_names(config: Config) -> dict:
+    """仅枚举 Traveler 文件元信息与已知出库记录，延迟工作簿内容解析。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置。
+    """
     store = InventorySyncStore(_sync_path(config), config.backup_root)
     records_by_path = {
         str(Path(record.get("traveler_path", "")).resolve()): record
@@ -3487,6 +4023,10 @@ def list_traveler_names(config: Config) -> dict:
 
 
 def import_catalog(config: Config, source: Path) -> dict:
+    """校验商品工作簿后更新集中目录，再原子替换工作簿备份并清理旧副本。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；source：待导入的商品工作簿路径。
+    """
     if not config.storage_prepared:
         config.prepare_storage()
     catalog = ProductCatalog(source)
@@ -3504,7 +4044,15 @@ def import_catalog(config: Config, source: Path) -> dict:
 
 
 def _catalog_change_summary(previous: list[Product], current: list[Product]) -> dict[str, int]:
+    """按规范商品代码比较两版目录，统计新增、字段变化及移除数量。
+
+    参数：previous：更新前商品列表；current：更新后商品列表。
+    """
     def signature(product: Product) -> tuple[str, ...]:
+        """提取商品业务字段元组并规范价格文本，供目录变更比较。
+
+        参数：product：已匹配并确认的商品。
+        """
         return (
             product.category,
             product.name,
@@ -3537,6 +4085,10 @@ def _catalog_change_summary(previous: list[Product], current: list[Product]) -> 
 
 
 def _existing_catalog_products(config: Config) -> list[Product]:
+    """优先读取商品工作簿，缺失时读取数据库目录，均无则返回空列表。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置。
+    """
     catalog_path = _catalog_path(config)
     if catalog_path.is_file():
         return ProductCatalog(catalog_path).products
@@ -3548,7 +4100,10 @@ def _existing_catalog_products(config: Config) -> list[Product]:
 
 
 def update_catalog_online(config: Config) -> dict:
-    """Export the current product catalog from JDY and install it atomically."""
+    """从金蝶导出最新商品目录，校验后更新本地目录并返回变化统计。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置。
+    """
     inventory_dir = _catalog_path(config).parent
     inventory_dir.mkdir(parents=True, exist_ok=True)
     download = inventory_dir / f".products-download-{os.getpid()}.xlsx"
@@ -3572,6 +4127,10 @@ def update_catalog_online(config: Config) -> dict:
 
 
 def _local_setting(config: Config, name: str) -> str:
+    """读取本地配置项文本，文件缺失或不可解析时返回空串。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；name：settings.json 中的配置键名。
+    """
     settings = config.state_dir / "settings.json"
     if not settings.is_file():
         return ""
@@ -3582,13 +4141,20 @@ def _local_setting(config: Config, name: str) -> str:
 
 
 def _inventory_cdp_endpoint() -> str:
+    """读取库存专用 Chrome 调试端点环境配置，空值使用默认地址。
+
+    参数：无。
+    """
     return os.environ.get(
         "TRAVELER_CHROME_CDP_ENDPOINT", INVENTORY_CDP_DEFAULT_ENDPOINT
     ).strip() or INVENTORY_CDP_DEFAULT_ENDPOINT
 
 
 def _inventory_cdp_pages(endpoint: str) -> list[dict]:
-    """Read the local CDP tab list without touching cookies or credentials."""
+    """读取本地浏览器调试标签页列表，不接触 Cookie 或凭据。
+
+    参数：endpoint：库存专用 Chrome 本地调试地址。
+    """
     try:
         with urlopen(endpoint.rstrip("/") + "/json/list", timeout=1.0) as response:
             payload = json.loads(response.read().decode("utf-8"))
@@ -3598,6 +4164,10 @@ def _inventory_cdp_pages(endpoint: str) -> list[dict]:
 
 
 def _find_existing_inventory_page(endpoint: str) -> dict | None:
+    """在调试标签页中优先选择库存业务页，其次服务工作台。
+
+    参数：endpoint：库存专用 Chrome 本地调试地址。
+    """
     pages = [
         page for page in _inventory_cdp_pages(endpoint)
         if page.get("type") == "page"
@@ -3610,6 +4180,10 @@ def _find_existing_inventory_page(endpoint: str) -> dict | None:
 
 
 def _is_inventory_domain_url(url: str) -> bool:
+    """判断网址是否使用 HTTP 协议且属于金蝶主域或子域。
+
+    参数：url：待分类的网址。
+    """
     try:
         parsed = urlsplit(url)
     except ValueError:
@@ -3622,6 +4196,10 @@ def _is_inventory_domain_url(url: str) -> bool:
 
 
 def _is_inventory_login_or_global_url(url: str) -> bool:
+    """识别登录、退出或全球站网址，解析失败按入口处理。
+
+    参数：url：待分类的网址。
+    """
     try:
         parsed = urlsplit(url)
     except ValueError:
@@ -3635,11 +4213,18 @@ def _is_inventory_login_or_global_url(url: str) -> bool:
 
 
 def _is_inventory_authenticated_url(url: str) -> bool:
-    """Return whether a CDP page is a logged-in inventory application page."""
+    """按网址判断候选页属于库存业务范围且非登录入口，不实际验证会话。
+
+    参数：url：待分类的网址。
+    """
     return _is_inventory_domain_url(url) and not _is_inventory_login_or_global_url(url)
 
 
 def _is_inventory_service_workbench_url(url: str) -> bool:
+    """识别金蝶服务工作台入口域名和路径。
+
+    参数：url：待分类的网址。
+    """
     try:
         parsed = urlsplit(url)
     except ValueError:
@@ -3651,10 +4236,18 @@ def _is_inventory_service_workbench_url(url: str) -> bool:
 
 
 def _inventory_chrome_profile(config: Config) -> Path:
+    """返回库存专用浏览器用户资料目录。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置。
+    """
     return config.state_dir / "inventory" / "browser-profile-zh"
 
 
 def _inventory_chrome_executable() -> Path | None:
+    """按环境指定路径、系统安装及可执行搜索路径查找 Chrome。
+
+    参数：无。
+    """
     configured = os.environ.get("TRAVELER_BROWSER_EXECUTABLE", "").strip()
     candidates = [Path(configured)] if configured else []
     candidates.extend([
@@ -3670,7 +4263,10 @@ def _inventory_chrome_executable() -> Path | None:
 
 
 def open_inventory_chrome(config: Config) -> dict:
-    """Launch the dedicated, user-loginable Chrome session used by the App."""
+    """复用或启动 App 专用可交互 Chrome，让用户完成库存登录。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置。
+    """
     endpoint = _inventory_cdp_endpoint()
     pages = _inventory_cdp_pages(endpoint)
     existing_candidates = [
@@ -3737,7 +4333,10 @@ def open_inventory_chrome(config: Config) -> dict:
 
 
 def close_inventory_chrome(config: Config) -> dict:
-    """Close only the dedicated Chrome exposed on the inventory CDP endpoint."""
+    """仅关闭库存调试端点对应的专用 Chrome。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置。
+    """
     root = Path(__file__).resolve().parent.parent
     node, node_modules = _resolve_jdy_runtime(root)
     helper = root / "tools" / "jdy_inventory.mjs"
@@ -3768,6 +4367,10 @@ def close_inventory_chrome(config: Config) -> dict:
 
 
 def _keychain_password(account: str) -> str:
+    """通过本地辅助程序读取指定账号的钥匙串密码，缺失或超时报错。
+
+    参数：account：库存登录账号。
+    """
     if not account:
         raise RuleError("jdy_credentials", "请先在配置中心填写库存系统用户名")
     helper = Path(__file__).resolve().parent.parent / "bin" / "keychain-read"
@@ -3787,7 +4390,15 @@ def _keychain_password(account: str) -> str:
 
 
 def _jdy_error_detail(stderr: str) -> str:
+    """从浏览器标准错误中提取有用失败原因，过滤进度事件和调用栈噪声。
+
+    参数：stderr：浏览器子进程的标准错误文本。
+    """
     def concise(detail: str) -> str:
+        """将已知浏览器失败转换为简短操作提示，并去除冗长页面后缀。
+
+        参数：detail：待简化的浏览器错误文本。
+        """
         if "Failed to create a ProcessSingleton" in detail or "profile is already in use" in detail:
             return "上一次库存查询浏览器尚未完全退出，请稍候后再次点击查询"
         detail = detail.split("；当前页面：", 1)[0].strip()
@@ -3836,6 +4447,10 @@ def _jdy_error_detail(stderr: str) -> str:
 
 
 def _resolve_jdy_runtime(root: Path) -> tuple[Path, Path]:
+    """定位可执行 Node.js 和完整 Playwright 依赖，缺失时给出诊断。
+
+    参数：root：应用资源或项目根目录。
+    """
     configured_node = os.environ.get("TRAVELER_NODE", "").strip()
     if configured_node:
         node_candidates = [Path(configured_node)]
@@ -3863,6 +4478,13 @@ def _resolve_jdy_runtime(root: Path) -> tuple[Path, Path]:
     return node, node_modules
 
 
+def _jdy_failure_boundary(action: str) -> str:
+    """区分只读核对失败与出库未确认，避免将读取错误写成库存失败。"""
+    if action == "verifyOutbound":
+        return "本次自动核对未完成，未修改库存或本地出库记录；请在库存系统核对单据后重试"
+    return "库存未确认成功，本次未写入本地业务数据库"
+
+
 def run_jdy(config: Config, action: str, traveler_path: Path | None = None, confirm_save: bool = False,
             download_path: Path | None = None, order_name: str = "",
             stock_items: list[dict] | None = None,
@@ -3872,7 +4494,12 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
             room_material: bool = False,
             production_request_id: str = "",
             production_materials: Iterable[dict] | None = None,
-            shipment_only: bool = False) -> dict:
+            shipment_only: bool = False,
+            verification_document: dict | None = None) -> dict:
+    """组织库存浏览器动作、逐单确认与本地恢复记录，实时转发进度并防止重复外部出库。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；action：库存浏览器动作名称；traveler_path：可选 Traveler 来源文件；confirm_save：是否明确允许外部保存出库单；download_path：商品目录导出的目标文件；order_name：历史出库查询的订单名称或备注；stock_items：按 SKU 汇总的库存查询需求；selected_document_remarks：明确选择的单据备注；为空时包含全部；selected_factory_orders：明确选择的工厂单编号集合；为空时按订单范围处理；order_id：销售订单号；room_material：是否仅处理明确选择的单个房间材料；production_request_id：本次生产请求的幂等标识；production_materials：本次明确指定的生产材料；为空时使用订单材料；shipment_only：是否只组织发货五金而排除订单材料。
+    """
     if action == "outbound" and order_id.strip():
         from .production import assert_order_active
         connection = connect_database(config.workflow_database)
@@ -3912,7 +4539,7 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                 "库存系统：发现已登录的库存专用 Chrome 页面，将直接复用，不重新登录"
                 f"（{existing_url}）"
             )
-    elif not (action == "outbound" and confirm_save):
+    elif not (action in {"outbound", "optimizationOutbound"} and confirm_save):
         credentials_started = time.perf_counter()
         password = _keychain_password(username)
         progress(f"库存系统：未发现已登录页面，账号与钥匙串密码读取完成（用时 {time.perf_counter() - credentials_started:.2f} 秒）")
@@ -4047,6 +4674,9 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                 "materials": current_production_materials,
             }
         if confirm_save:
+            pending = pending_inventory_operations(config.workflow_database)
+            if any(item["order_id"] == preview.traveler.order_id for item in pending):
+                raise RuleError("inventory_verification_required", "该订单仍有未核对的库存操作，请先在待处理中心核对并恢复，不要重复出库")
             operation_kind = (
                 "production" if production_draft is not None
                 else "shipment" if shipment_only
@@ -4060,11 +4690,15 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                 {
                     "documents": documents,
                     "production_draft": production_draft,
+                    "recovery_context": {
+                        "source_path": str(preview.traveler.path),
+                        "source_type": preview.source_type,
+                    },
                 },
             )
             operation_id = str(operation_row.get("operation_id", ""))
             operation_status = str(operation_row.get("status", ""))
-            if operation_status == "verification_required":
+            if operation_status in {"verification_required", "submitting", "partial_external_confirmed", "external_confirmed"}:
                 raise RuleError(
                     "inventory_verification_required",
                     "上次库存操作的保存结果尚未确认；为避免重复出库，本次未再次提交。请先在库存历史中按订单备注核对后再处理",
@@ -4125,19 +4759,12 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
         "action": action,
         "username": username,
         "profileDir": str(config.state_dir / "inventory" / "browser-profile-zh"),
-        # Browser automation stays off-screen by default so it cannot steal
-        # focus from the user's current app. This override is intentionally
-        # process-local and is only for login recovery and diagnostics.
+        # 浏览器自动化默认在后台运行，避免抢走当前应用焦点；可见模式覆盖仅对当前进程生效，用于登录恢复和诊断。
         "headless": os.environ.get("TRAVELER_BROWSER_VISIBLE", "").strip().lower()
         not in {"1", "true", "yes", "on"},
-        # Only Chrome instances started with this local CDP endpoint are
-        # attachable. A normal user-launched Chrome remains untouched.
+        # 只连接通过此本地调试端点启动的 Chrome，不触碰用户普通启动的浏览器。
         "cdpEndpoint": cdp_endpoint,
-        # A one-shot helper must exit after returning its JSON result.  When a
-        # controlled browser was already running, the Node helper can still
-        # attach to it and disconnect without closing the user's browser.  A
-        # newly launched browser is closed after this task so Swift never
-        # waits forever for the subprocess to finish.
+        # 单次辅助进程返回 JSON 后必须退出；已有受控浏览器可连接后断开而不关闭，新启动浏览器则在任务结束后关闭，避免 Swift 无限等待子进程。
         "keepBrowserOpen": False,
         "diagnosticsDir": str(config.state_dir / "inventory" / "diagnostics"),
     }
@@ -4156,6 +4783,19 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
             "queryDateFrom": (datetime.now().date() - timedelta(days=550)).isoformat(),
             "queryDateTo": (datetime.now().date() + timedelta(days=45)).isoformat(),
         })
+    elif action == "optimizationOutbound":
+        if not confirm_save or not verification_document:
+            raise RuleError('write_confirmation_required', '返工材料出库需要确认及完整单据')
+        if existing_inventory_page is None:
+            raise RuleError('inventory_session_required', '请先打开库存系统并登录')
+        request.update(verification_document)
+        request.update(action='outbound', confirmSave=True, orderName=verification_document['remark'])
+    elif action == "verifyOutbound":
+        if not verification_document:
+            raise RuleError("inventory_argument", "核对缺少原始单据明细")
+        request.update(verification_document)
+        request["action"] = "verifyOutbound"
+        request["confirmSave"] = False
     elif action == "exportProducts":
         if not download_path:
             raise RuleError("inventory_argument", "更新商品资料缺少下载目标")
@@ -4205,6 +4845,10 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
         )
 
         def forward_browser_progress() -> None:
+            """持续读取子进程标准错误，记录结构化进度并立即转发给界面。
+
+            参数：无；使用当前浏览器子进程与日志缓冲。
+            """
             assert process.stderr is not None
             for line in process.stderr:
                 stderr_lines.append(line)
@@ -4214,9 +4858,7 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                     event = None
                 if isinstance(event, dict) and event.get("event") == "progress":
                     log_progress_payload(event)
-                # Forward immediately: SwiftUI reads this pipe while the
-                # browser is still working, instead of replaying every page
-                # transition after the Node helper exits.
+                # 立即转发：SwiftUI 在浏览器仍工作时持续读取管道，避免等 Node 辅助进程结束后才回放全部页面进度。
                 sys.stderr.write(line)
                 sys.stderr.flush()
 
@@ -4226,8 +4868,7 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
             assert process.stdin is not None
             process.stdin.write(json.dumps(browser_request, ensure_ascii=False))
             process.stdin.close()
-            # The Node helper writes only its final result to stdout.  stderr
-            # is drained on its own thread above so page progress remains live.
+            # Node 辅助程序只向标准输出写最终结果；上方独立线程持续读取标准错误以实时显示页面进度。
             process.wait(timeout=INVENTORY_DOCUMENT_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             process.kill()
@@ -4242,7 +4883,7 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                 partial_numbers = _persist_completed_outbound_results(
                     config, preview, confirm_save, responses
                 )
-            except Exception as sync_error:  # preserve the original timeout diagnosis
+            except Exception as sync_error:  # 保留最初的超时诊断
                 detail = f"{detail}；已完成单据本地同步失败：{sync_error}"
             else:
                 if partial_numbers:
@@ -4251,7 +4892,7 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                         "后续单据结果需要先查询库存历史再重试"
                     )
                 else:
-                    detail = f"{detail}；库存未确认成功，本次未写入本地业务数据库"
+                    detail = f"{detail}；{_jdy_failure_boundary(action)}"
             if operation_journal is not None and operation_id:
                 operation_journal.update(
                     operation_id,
@@ -4260,7 +4901,7 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                     error=detail,
                 )
             remark = str(browser_request.get("remark", "")).strip()
-            document_label = f"出库单 {remark} " if remark else "当前出库单 "
+            document_label = "单据核对 " if action == "verifyOutbound" else (f"出库单 {remark} " if remark else "当前出库单 ")
             raise RuleError(
                 "jdy_timeout",
                 f"{document_label}浏览器操作超过 {INVENTORY_DOCUMENT_TIMEOUT_SECONDS} 秒未完成：{detail}",
@@ -4282,7 +4923,7 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                     "后续单据结果需要先查询库存历史再重试"
                 )
             else:
-                detail = f"{detail}；库存未确认成功，本次未写入本地业务数据库"
+                detail = f"{detail}；{_jdy_failure_boundary(action)}"
             if operation_journal is not None and operation_id:
                 ambiguous = any(
                     marker in detail
@@ -4290,7 +4931,7 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                 )
                 operation_journal.update(
                     operation_id,
-                    "verification_required" if ambiguous else "failed",
+                    "verification_required" if ambiguous or responses else "failed",
                     results=responses,
                     error=detail,
                 )
@@ -4310,9 +4951,19 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                 )
             raise RuleError("jdy_browser", "库存系统返回结果无法解析") from exc
         if action == "outbound" and confirm_save and operation_journal is not None and operation_id:
-            confirmed_number = _persist_single_outbound_result(
-                config, preview, parsed_result, production_draft=production_draft
+            operation_journal.update(
+                operation_id,
+                "external_confirmed" if len(responses) == len(requests) else "partial_external_confirmed",
+                results=responses,
             )
+            try:
+                confirmed_number = _persist_single_outbound_result(
+                    config, preview, parsed_result, production_draft=production_draft
+                )
+            except Exception as exc:
+                operation_journal.update(operation_id, "verification_required", results=responses,
+                                         error="外部返回成功，本地保存未完成，请在待处理中心核对并恢复")
+                raise RuleError("local_sync_failed", "外部返回成功，本地保存未完成；请在待处理中心核对并恢复，不要重复出库") from exc
             if confirmed_number:
                 if len(responses) < len(requests):
                     operation_journal.update(
@@ -4402,10 +5053,7 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
                     config, preview.traveler.order_id
                 )
             except (OSError, sqlite3.Error):
-                # The inventory system has already returned a saved document.
-                # Preserve that fact for the UI; the normal Inventory Sync
-                # record remains authoritative if the secondary index is
-                # temporarily unavailable.
+                # 库存系统已返回保存成功的单据，需保留该事实供界面使用；即使辅助索引暂不可用，正常出库同步记录仍是权威来源。
                 response["orderIndexReconciled"] = False
                 response["temporaryLedgerRecorded"] = False
                 response["serverBaselineRecorded"] = False
@@ -4419,6 +5067,10 @@ def run_jdy(config: Config, action: str, traveler_path: Path | None = None, conf
 
 
 def _check_requirements_stock(config: Config, requirements: list[dict]) -> list[dict]:
+    """实时查询 SKU 库存，核对商品身份并计算短缺数量。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；requirements：含 SKU、商品名称及需求数量的记录。
+    """
     response = run_jdy(config, "stockBalance", stock_items=requirements)
     raw_results = response.get("results")
     if not isinstance(raw_results, list):
@@ -4454,10 +5106,9 @@ def _check_requirements_stock(config: Config, requirements: list[dict]) -> list[
 
 
 def check_stock(config: Config, traveler_path: Path, include_hardware: bool = False) -> dict:
-    """Compare mapped requirements with stock without writing an outbound.
+    """比较 Traveler 映射需求与实时库存，不写出库且不要求 Agent。真正库存写入须在后续单独授权的操作中执行。
 
-    This is intentionally a read-only path and does not require the Agent.
-    The real inventory write is a later, separately approved operation.
+    参数：config：包含状态库、订单来源及备份路径的运行配置；traveler_path：可选 Traveler 来源文件；include_hardware：是否同时统计五金；默认仅板材和封边。
     """
     preview = build_preview(traveler_path, bootstrap_product_database(config), config.workflow_database)
     requirements = stock_requirements(preview, include_hardware)
@@ -4472,6 +5123,10 @@ def check_stock(config: Config, traveler_path: Path, include_hardware: bool = Fa
 
 
 def check_order_stock(config: Config, order_folder: Path) -> dict:
+    """根据订单来源目录材料需求查询实时库存并汇总短缺。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；order_folder：订单来源文件夹。
+    """
     order_id, requirements = order_stock_requirements(config, order_folder)
     rows = _check_requirements_stock(config, requirements)
     return {
@@ -4484,7 +5139,10 @@ def check_order_stock(config: Config, order_folder: Path) -> dict:
 
 
 def check_database_stock(config: Config, order_id: str) -> dict:
-    """Check order-level stock from persisted facts without a Traveler file."""
+    """根据持久订单材料事实检查实时库存，无需 Traveler 文件。
+
+    参数：config：包含状态库、订单来源及备份路径的运行配置；order_id：销售订单号。
+    """
     normalized_order_id, requirements = database_stock_requirements(config, order_id)
     rows = _check_requirements_stock(config, requirements)
     return {
@@ -4497,10 +5155,14 @@ def check_database_stock(config: Config, order_id: str) -> dict:
 
 
 def inventory_main(argv: list[str] | None = None) -> int:
+    """解析库存命令行选项，分派查询、预览、规则维护和明确确认的出库操作。
+
+    参数：argv：命令行参数；为空时读取进程参数。
+    """
     parser = argparse.ArgumentParser(prog="pp-flowhub inventory")
     parser.add_argument("action", choices=(
         "list", "list-names", "preview", "order-preview", "get-outbound-scope", "import-products", "preflight", "outbound",
-        "find-outbound", "reconcile-folder", "ignore-item", "unignore-item",
+        "recover-operation", "find-outbound", "reconcile-folder", "ignore-item", "unignore-item",
         "search-products", "set-mapping", "update-mapping", "remove-mapping", "list-mappings", "update-ignore", "set-outbound-scope", "update-products", "stock-check", "open-chrome", "close-chrome",
     ))
     parser.add_argument("--traveler", type=Path)
@@ -4510,6 +5172,7 @@ def inventory_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--order-root", type=Path)
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--confirm-save", action="store_true")
+    parser.add_argument("--operation-id", default="")
     parser.add_argument("--order-name", default="")
     parser.add_argument("--name", default="")
     parser.add_argument("--ignored", choices=("true", "false"))
@@ -4589,6 +5252,8 @@ def inventory_main(argv: list[str] | None = None) -> int:
             if not args.traveler:
                 raise RuleError("inventory_argument", "stock-check 必须提供 --traveler")
             result = check_stock(config, args.traveler, args.include_hardware)
+        elif args.action == "recover-operation":
+            result = recover_inventory_operation(config, args.operation_id)
         elif args.action == "find-outbound":
             if not args.order_name:
                 raise RuleError("inventory_argument", "查询出库单必须提供 --order-name")
@@ -4666,9 +5331,17 @@ def inventory_main(argv: list[str] | None = None) -> int:
         logger.event(
             "backend.command.failed",
             "库存系统操作失败",
-            details={"action": args.action, "code": exc.code, "error": str(exc), "duration_seconds": round(time.perf_counter() - command_started, 6)},
+            details={"action": args.action, "code": exc.code, "error": safe_rule_error_text(str(exc)), "order_id": args.order_id, "duration_seconds": round(time.perf_counter() - command_started, 6)},
         )
         print(json.dumps({"fatal": {"code": exc.code, "message": str(exc), **exc.context}}, ensure_ascii=False, indent=2))
+        return 2
+    except Exception as exc:
+        logger.event(
+            "backend.command.failed", "库存系统操作发生未预期错误",
+            details={**safe_exception_details(exc, action=args.action, order_id=args.order_id),
+                     "duration_seconds": round(time.perf_counter() - command_started, 6)},
+        )
+        print(json.dumps({"fatal": {"code": "inventory_processing_error", "message": "库存操作发生未预期错误，请查看操作日志。"}}, ensure_ascii=False))
         return 2
 
 

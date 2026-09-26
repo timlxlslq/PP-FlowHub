@@ -1,3 +1,4 @@
+// 根据已提取的房间材料与价格生成成本工作簿及预览。参数：无；使用文件内固定的 JSON 来源和输出目录。
 import fs from "node:fs/promises";
 import { SpreadsheetFile, Workbook } from "@oai/artifact-tool";
 

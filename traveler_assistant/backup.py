@@ -1,4 +1,4 @@
-"""Local database backup and retention policy."""
+"""本地数据库备份与备份文件保留策略。"""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from .database import ensure_schema
 
 
 def _fingerprint(path: Path) -> str:
+    """分块读取文件并返回 SHA-256 指纹；path 为待校验文件路径。"""
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
@@ -22,6 +23,10 @@ def _fingerprint(path: Path) -> str:
 
 
 def backup_status(config: Config, today: date | None = None) -> dict:
+    """查询当天备份及存储位置状态，查询前确保数据库结构可用。
+
+    参数：config 为数据库和备份目录配置；today 为查询日期，省略时使用当天。
+    """
     today = today or date.today()
     ensure_schema(config.workflow_database)
     connection = sqlite3.connect(config.workflow_database)
@@ -43,6 +48,10 @@ def backup_status(config: Config, today: date | None = None) -> dict:
 
 
 def perform_backup(config: Config) -> dict:
+    """生成当天的 SQLite 备份，登记成功记录并清理过期备份。
+
+    参数：config 提供源数据库和备份目录；备份先写临时文件，再替换目标文件。
+    """
     status = backup_status(config)
     started = datetime.now().astimezone().isoformat(timespec="seconds")
     root = config.database_backup_root
@@ -82,6 +91,10 @@ def perform_backup(config: Config) -> dict:
 
 
 def _apply_retention(root: Path, today: date) -> None:
+    """保留近三天备份及三十天内每周最新备份，删除其他历史备份。
+
+    参数：root 为备份目录；today 为计算文件保留期限的基准日期。
+    """
     candidates: list[tuple[Path, date]] = []
     for path in root.glob("workflow-*.sqlite3"):
         try:
@@ -95,8 +108,7 @@ def _apply_retention(root: Path, today: date) -> None:
     for path, backup_date in candidates:
         age = (today - backup_date).days
         if age < 0:
-            # Do not delete a future-dated file; it may be a clock-adjustment
-            # artifact and is safer to retain until the next run.
+            # 未来日期可能源于时钟调整，保留该文件，留待后续运行再判断。
             keep.add(path)
         elif age <= 2:
             keep.add(path)

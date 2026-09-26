@@ -1,9 +1,7 @@
-"""Assistant command entry point and local/Agent routing policy.
+"""助手命令入口及本地解析、Agent 路由策略。
 
-This module chooses between deterministic parsing, an exact learned-command
-cache, and the Agent fallback.  Regardless of how intent is understood, the
-result enters the same typed gateway, where approval and business validation
-are recalculated locally.
+依次尝试确定性解析、已学习命令的精确匹配和 Agent 后备路由。
+所有结果都进入同一类型化网关，在本地重新检查批准状态和业务条件。
 """
 
 from __future__ import annotations
@@ -17,12 +15,12 @@ from pathlib import Path
 from .command_router import LocalCommand, ORDER_ID_RE, normalize_command_text, parse_local_command
 from .core import Config, RuleError
 from .runtime_store import RuntimeStore, TokenUsage, runtime_database_path
-from .operation_log import configure_operation_log
+from .operation_log import configure_operation_log, safe_exception_details, safe_rule_error_text
 from .tool_gateway import WRITE_ACTIONS, execute_local_command
 
 
 def _factory_name_belongs_to_order(order_id: str, factory_name: str) -> bool:
-    """Return whether a complete factory name belongs to the selected order."""
+    """检查完整工厂单名称的订单归属；order_id 为订单号，factory_name 为完整名称。"""
     order = order_id.strip().upper()
     factory = factory_name.strip().upper()
     if not order:
@@ -33,13 +31,14 @@ def _factory_name_belongs_to_order(order_id: str, factory_name: str) -> bool:
     remainder = match.group(1).strip()
     if not remainder:
         return False
-    # PP0035-2-MASTER belongs to split order PP0035-2, not base PP0035.
+    # PP0035-2-MASTER 属于分单 PP0035-2，不属于主单 PP0035。
     if re.fullmatch(r"PP\d{4}", order) and re.match(r"^\d+(?:-|\s|$)", remainder):
         return False
     return True
 
 
 def _learned_local_command(store: RuntimeStore, text: str) -> LocalCommand | None:
+    """读取已学习动作并重新确定审批要求；store 为运行记录库，text 为用户命令。"""
     learned = store.learned_command(normalize_command_text(text))
     if learned is None:
         return None
@@ -48,6 +47,7 @@ def _learned_local_command(store: RuntimeStore, text: str) -> LocalCommand | Non
 
 
 def _agent_command(store: RuntimeStore, text: str) -> tuple[LocalCommand | None, dict]:
+    """调用 Agent、校验参数并保存可用命令及用量；store 为运行记录库，text 为用户命令。"""
     from .agent_runner import MODEL, route_with_agent
 
     routed = route_with_agent(text)
@@ -108,7 +108,7 @@ def _agent_command(store: RuntimeStore, text: str) -> tuple[LocalCommand | None,
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run ``pp-flowhub assistant`` and emit one machine-readable result."""
+    """执行助手命令并输出 JSON 结果；argv 为命令行参数，省略时读取进程参数，返回退出码。"""
     parser = argparse.ArgumentParser(prog="pp-flowhub assistant")
     parser.add_argument("text", nargs="?")
     parser.add_argument("--usage", action="store_true")
@@ -122,8 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     config = Config()
     if configured_state := os.environ.get("PP_FLOWHUB_STATE_DIR", "").strip():
         config.state_dir = Path(configured_state).expanduser()
-    # The assistant is a production workflow and must not inherit stale local
-    # fixture settings from older app versions.
+    # 助手用于正式业务，不继承旧版本遗留的本地测试来源设置。
     config.load_settings(source_profile="server")
     for name in ("source_root", "order_root", "template", "backup_root", "state_dir"):
         value = getattr(args, name)
@@ -152,8 +151,8 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 command, metadata = _agent_command(store, args.text)
             except Exception as exc:
-                logger.event("backend.command.failed", "助手命令路由失败", details={"stage": "agent_route", "error": str(exc)})
-                print(json.dumps({"status": "agent_failed", "error": {"message": str(exc)}}, ensure_ascii=False))
+                logger.event("backend.command.failed", "助手命令路由失败", details={"stage": "agent_route", **safe_exception_details(exc, action="assistant")})
+                print(json.dumps({"status": "agent_failed", "error": {"message": "助手命令路由发生未预期错误，请查看操作日志。"}}, ensure_ascii=False))
                 return 3
             if command is None:
                 logger.event("backend.command.completed", "助手命令不受支持", details={"result": "unsupported"})
@@ -172,9 +171,13 @@ def main(argv: list[str] | None = None) -> int:
         logger.event(
             "backend.command.failed",
             "助手命令执行失败",
-            details={"action": command.action, "code": exc.code, "error": str(exc)},
+            details={"action": "assistant", "code": exc.code, "error": safe_rule_error_text(str(exc), sensitive_values=(args.text,))},
         )
         print(json.dumps({"status": "failed", "error": {"code": exc.code, "message": str(exc), **exc.context}}, ensure_ascii=False, indent=2))
+        return 2
+    except Exception as exc:
+        logger.event("backend.command.failed", "助手命令执行发生未预期错误", details=safe_exception_details(exc, action="assistant"))
+        print(json.dumps({"status": "failed", "error": {"code": "assistant_processing_error", "message": "助手处理发生未预期错误，请查看操作日志。"}}, ensure_ascii=False))
         return 2
 
 

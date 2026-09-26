@@ -4,6 +4,8 @@ import SwiftUI
 private final class OperationLogHarnessModel: ObservableObject {
     @Published var steps: [InventoryStep]
 
+    /// 初始化操作日志测试模型。
+    /// - Parameter steps：初始操作步骤列表。
     init(steps: [InventoryStep]) {
         self.steps = steps
     }
@@ -12,6 +14,7 @@ private final class OperationLogHarnessModel: ObservableObject {
 private struct OperationLogHarnessView: View {
     @ObservedObject var model: OperationLogHarnessModel
 
+    /// 构建用于验证追加后滚动的操作日志视图；无参数。
     var body: some View {
         SelectableOperationLogView(steps: model.steps, emptyText: "empty")
             .frame(width: 720, height: AppLayout.operationLogHeight)
@@ -25,12 +28,17 @@ private final class HeaderBoundaryProbeBox {
 private struct HeaderBoundaryProbe: NSViewRepresentable {
     let box: HeaderBoundaryProbeBox
 
+    /// 创建用于测量页头边界的 AppKit 探针视图。
+    /// - Parameter context：SwiftUI 提供的视图桥接上下文。
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
         box.view = view
         return view
     }
 
+    /// 保存更新后的探针视图引用，供布局测量使用。
+    /// - Parameter nsView：当前 AppKit 探针视图。
+    /// - Parameter context：SwiftUI 提供的更新上下文。
     func updateNSView(_ nsView: NSView, context: Context) {
         box.view = nsView
     }
@@ -40,6 +48,7 @@ private struct PageLayoutHarness: View {
     let box: HeaderBoundaryProbeBox
     let flexibleContent: Bool
 
+    /// 构建可切换内容高度的完整页面，供页头边界测量；无参数。
     var body: some View {
         TabView {
             VStack(spacing: 0) {
@@ -63,6 +72,7 @@ private struct PageLayoutHarness: View {
 private struct DashboardActivityIsolationHarness: View {
     @ObservedObject var model: AppModel
 
+    /// 构建消息区挂载视图，供模型更新隔离校验；无参数。
     var body: some View {
         OrderDashboardActivityView(input: OrderDashboardActivityInput(model: model))
             .equatable()
@@ -72,6 +82,8 @@ private struct DashboardActivityIsolationHarness: View {
 
 @main
 private struct MacOSUIRegressionTests {
+    /// 运行全部离线界面回归，并在失败时终止程序。
+    /// 参数：无。
     static func main() {
         let diagnostic = diagnosticMessage(["message": "database is locked", "source": "本地数据库", "order_id": "PP0064", "factory_order": "F100", "path": "/server/Fittingslist.xlsx"], operation: "出库核对")
         for value in ["本地数据库", "PP0064", "F100", "/server/Fittingslist.xlsx"] { precondition(diagnostic.contains(value)) }
@@ -94,6 +106,7 @@ private struct MacOSUIRegressionTests {
         testPendingInventorySourceFolderPath()
         testPendingMaterialMappingIssueRoute()
         testPendingInventoryMappingResumeContract()
+        testPendingRecoveryActions()
         testServerFolderIgnoreOutcome()
         testSelectedServerPreviewFailure()
         testHardwareSourceSelectionFlow()
@@ -106,6 +119,8 @@ private struct MacOSUIRegressionTests {
         testPendingMappingMergesFolderIssues()
         testPendingCenterWorkflowUIContract()
         testOrderOutboundFactorySelection()
+        testProductionPreviewSheetLifecycle()
+        testZeroMaterialProductionValidation()
         testProductionFeedbackAndDashboardProgress()
         testServerWriteMaterialPreviewOrdering()
         testServerWriteHardwareChangeLayout()
@@ -126,6 +141,7 @@ private struct MacOSUIRegressionTests {
         testFullPageHeaderBoundaryAlignment()
         testOperationLogScrollsAfterAppending()
         testOperationLogReader()
+        testOperationLogDiagnostics()
         testOperationLogMaintenance()
         testRunningProgressReusesOperationRow()
         testDashboardInventoryProgressText()
@@ -135,18 +151,24 @@ private struct MacOSUIRegressionTests {
         print("macOS UI regression tests passed")
     }
 
+    /// 验证仅指定的快捷键触发按住说话。
+    /// 参数：无。
     private static func testPushToTalkShortcut() {
         require(isPushToTalkShortcut(keyCode: 49, modifiers: .option), "⌥Space 应触发按住说话")
         require(!isPushToTalkShortcut(keyCode: 49, modifiers: .command), "⌘Space 不应被语音输入占用")
         require(!isPushToTalkShortcut(keyCode: 36, modifiers: .option), "⌥Return 不应触发语音输入")
     }
 
+    /// 验证语音中的空格、混合数字和分单后缀被标准化。
+    /// 参数：无。
     private static func testSpeechCommandCanonicalization() {
         require(canonicalSpeechCommand("查找 PP 0零6八") == "查找PP0068", "语音订单号未规范化为 PP0068")
         require(canonicalSpeechCommand("查找 P P 零 零 六 八") == "查找PP0068", "分开识别的 PP 未规范化")
         require(canonicalSpeechCommand("查找 PP 0零35杠二") == "查找PP0035-2", "语音分单号未规范化")
     }
 
+    /// 验证助手响应保留订单、材料、工厂单及五金数据。
+    /// 参数：无。
     private static func testAssistantOrderResultParsing() {
         let object: [String: Any] = [
             "order_id": "PP0068",
@@ -168,6 +190,8 @@ private struct MacOSUIRegressionTests {
         require(result.factories.count == 1 && result.fittings.count == 1, "助手预览工厂单或五金数据缺失")
     }
 
+    /// 验证悬停帮助内容完整，任务取消入口按状态显示。
+    /// 参数：无。
     private static func testAssistantCompactHelpAndCancelRules() {
         require(assistantCommandHints.count >= 5, "悬停命令示例内容不完整")
         require(assistantCommandHints.contains(where: { $0.contains("Find order") }), "命令示例缺少英文命令")
@@ -176,6 +200,8 @@ private struct MacOSUIRegressionTests {
         require(!assistantTaskShowsHeaderCancel("等待确认"), "等待确认时不应同时显示两个取消按钮")
     }
 
+    /// 验证布局尺寸、状态提示及材料名称和厚度警示符合约定。
+    /// 参数：无。
     private static func testMaterialDisplayNames() {
         require(AppLayout.headerHeight == 64, "顶部导航与页面标题栏应采用 64pt 紧凑高度")
         require(AppLayout.topNavHeight == AppLayout.headerHeight, "顶部导航与页面页头应合并为单层")
@@ -213,6 +239,10 @@ private struct MacOSUIRegressionTests {
         require(AppLayout.todoTableHeaderFontSize >= 17, "待办表格标题字体仍然过小")
         require(AppLayout.todoTableBodyFontSize >= 16, "待办表格内容字体仍然过小")
         require(AppLayout.materialNameFontSize >= 18, "板材与封边名称字体仍然过小")
+        /// 构造指定种类、厚度和颜色的材料预览样本。
+        /// - Parameter kind：材料类型。
+        /// - Parameter thickness：材料厚度，单位为毫米。
+        /// - Parameter color：材料颜色名称。
         func material(_ kind: String, _ thickness: Double, _ color: String = "") -> OrderMaterialPreview {
             OrderMaterialPreview(kind: kind, thickness: thickness, color: color, quantity: 1)
         }
@@ -248,6 +278,8 @@ private struct MacOSUIRegressionTests {
         require(panelColorsNeedingThicknessWarning(mixed) == Set(["woodline 4"]), "同色门板与背板未触发规格警示")
     }
 
+    /// 验证详情材料按夹板厚度、饰面板颜色及封边颜色排序。
+    /// 参数：无。
     private static func testOrderDetailMaterialRows() {
         let rows = [
             OrderMaterialPreview(kind: "panel", thickness: 8, color: " woodline 4 ", quantity: 1),
@@ -276,6 +308,8 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 验证订单看板的导航、筛选、阶段、日期和待处理状态约定。
+    /// 参数：无。
     private static func testOrderDashboardRules() {
         require(
             dashboardOrderRows(from: ["order": ["order_id": "PP0072"]]) == nil,
@@ -336,7 +370,7 @@ private struct MacOSUIRegressionTests {
            let rowEnd = dashboardSource.range(of: "private func prepareSelectedOrder", range: rowStart.upperBound..<dashboardSource.endIndex) {
             let rowSource = String(dashboardSource[rowStart.lowerBound..<rowEnd.lowerBound])
             if let gestureStart = rowSource.range(of: "OrderDashboardClickContainer("),
-               let gestureEnd = rowSource.range(of: "// Keep action buttons outside the row-level gesture recognizers.", range: gestureStart.upperBound..<rowSource.endIndex) {
+               let gestureEnd = rowSource.range(of: "// 将操作按钮放在行级手势识别区域之外。", range: gestureStart.upperBound..<rowSource.endIndex) {
                 let gestureSource = String(rowSource[gestureStart.lowerBound..<gestureEnd.lowerBound])
                 require(
                     !gestureSource.contains("Button(\"详情\")")
@@ -1102,6 +1136,8 @@ private struct MacOSUIRegressionTests {
         _ = OrderDashboardView(model: AppModel())
     }
 
+    /// 验证订单活动信息只属于当前 App 会话，不重放旧运行状态。
+    /// 参数：无。
     private static func testDashboardActivityIsScopedToAppSession() {
         let sessionStartedAt = dashboardBusinessDate("2026-09-04T08:45:00")!
         let activity = dashboardActivitySteps(
@@ -1129,6 +1165,8 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 验证成本操作依据材料可用性启用，并给出相应提示。
+    /// 参数：无。
     private static func testOrderCostMaterialAvailability() {
         let model = AppModel()
         model.selectedOrderId = "PP0100"
@@ -1153,6 +1191,8 @@ private struct MacOSUIRegressionTests {
         require(!model.canCalculateOrderCost, "未选择订单时不能计算成本")
     }
 
+    /// 验证会话消息及 AIMES 实时进度保留独立状态和耗时。
+    /// 参数：无。
     private static func testDashboardSessionMessagesAndAimesProgress() {
         let model = AppModel()
         require(model.dashboardSessionMessages.isEmpty, "新的 App 会话消息记录必须从空开始")
@@ -1174,6 +1214,10 @@ private struct MacOSUIRegressionTests {
             "path": "/tmp/aimes.xlsx",
             "message": "AIMES 发生变化",
         ]
+        /// 构造含变化列表和耗时的 AIMES 同步响应。
+        /// - Parameter changed：是否发现变化。
+        /// - Parameter changes：结构化变化记录列表。
+        /// - Parameter duration：本次模拟操作总耗时，单位为秒。
         func aimesPayload(changed: Bool, changes: [[String: Any]], duration: Double) -> [String: Any] {
             [
                 "orders": [[String: Any]](),
@@ -1197,7 +1241,10 @@ private struct MacOSUIRegressionTests {
             ]
         }
         let changedPayload = aimesPayload(changed: true, changes: [change], duration: 1.0)
-        model.pendingOrderRunner = { _, _, completion in completion(changedPayload) }
+        model.pendingOrderRunner = { arguments, _, completion in
+            require(arguments == ["sync-aimes", "--refresh-aimes"], "手动获取必须仍能强制刷新 AIMES")
+            completion(changedPayload)
+        }
         model.syncDashboardAimes(force: true)
         model.pendingOrderRunner = { _, _, completion in
             completion(aimesPayload(changed: true, changes: [change], duration: 1.25))
@@ -1306,12 +1353,13 @@ private struct MacOSUIRegressionTests {
         )
 
         let skippedModel = AppModel()
-        skippedModel.pendingOrderRunner = { _, _, completion in
+        skippedModel.pendingOrderRunner = { arguments, _, completion in
+            require(arguments == ["sync-aimes", "--aimes-if-needed"], "自动获取应按需检查")
             completion([
                 "orders": [[String: Any]](),
                 "aimes": [
                     "attempted": false,
-                    "succeeded": false,
+                    "succeeded": true,
                     "skipped_today": true,
                     "changed": false,
                     "count": 1,
@@ -1321,6 +1369,7 @@ private struct MacOSUIRegressionTests {
             ])
         }
         skippedModel.syncDashboardAimes(force: false)
+        require(skippedModel.pendingCheckStatus.contains("使用本地数据") && !skippedModel.pendingCheckStatus.contains("最新结果"), "当日跳过不能声称刚刚完成在线检查")
         require(
             skippedModel.dashboardSessionMessages.filter { $0.source == "aimes" }.count == 1
                 && skippedModel.dashboardSessionMessages.filter { $0.source == "sync" }.isEmpty,
@@ -1343,13 +1392,15 @@ private struct MacOSUIRegressionTests {
         require(midnight.map(\.id) == ["one", "two"], "会话消息不能按 HH:mm:ss 在跨午夜时重排")
     }
 
+    /// 验证启动进度与历史记录正确衔接，延期处理不丢失状态。
+    /// 参数：无。
     private static func testDashboardStartupProgressAndHistory() {
         let deferred = AppModel()
         deferred.dashboardSyncStatus = "请在待处理中心预览并逐单确认写入"
         deferred.dashboardServerStatus = "⚠️ Server 发现 2 项待逐单确认变化"
         deferred.showPendingCenterPrompt = true
         require(!OrderDashboardActivityInput(model: deferred).operationRunning, "等待人工确认不是后台执行")
-        deferred.showPendingCenterPrompt = false // Same action as 稍后处理.
+        deferred.showPendingCenterPrompt = false // 与“稍后处理”执行相同操作。
         require(!OrderDashboardActivityInput(model: deferred).operationRunning, "稍后处理后订单中心不得显示执行动画")
         require(!deferred.orderRunning && !dashboardStatusIsInProgress(deferred.dashboardSyncStatus), "助手不得把待处理中心提醒误判为动态操作")
         require(deferred.dashboardSyncStatus == "请在待处理中心预览并逐单确认写入", "关闭弹窗应保留待处理提醒")
@@ -1361,6 +1412,8 @@ private struct MacOSUIRegressionTests {
         var observedStatuses: [String] = []
         let emptyOrders: [[String: Any]] = []
 
+        /// 构造启动进度测试使用的 AIMES 成功响应。
+        /// 参数：无。
         func aimesResult() -> [String: Any] {
             [
                 "orders": emptyOrders,
@@ -1390,6 +1443,7 @@ private struct MacOSUIRegressionTests {
             case "backup-now":
                 completion(["path": "/tmp/pp-flowhub-test-backup.sqlite3"])
             case "sync-aimes":
+                require(arguments == ["sync-aimes", "--aimes-if-needed"], "启动必须尊重当天成功记录，不能强制联网刷新")
                 model.consumeOrderLogChunk(
                     "{\"event\":\"progress\",\"message\":\"启动 AIMES 浏览器\",\"stage\":\"browser_launch\",\"stage_label\":\"启动 AIMES 浏览器\",\"duration_seconds\":0.37}\n"
                 )
@@ -1505,6 +1559,8 @@ private struct MacOSUIRegressionTests {
         require(duplicateModel.dashboardSessionMessages.filter { $0.id.hasPrefix("stage:") }.count == 1, "同一轮重复 stage 事件不应重复写入历史")
     }
 
+    /// 验证 AIMES 结果、警告及阶段进度解析为正确状态。
+    /// 参数：无。
     private static func testDashboardAimesStatusResolution() {
         let failedWithCachedWarnings = dashboardAimesStatusUpdate(
             attempted: true,
@@ -1585,6 +1641,8 @@ private struct MacOSUIRegressionTests {
         require(!missingResult.status.contains("成功"), "缺失或无效的 AIMES 结果不能显示成功")
     }
 
+    /// 验证待处理 Server 项目的选择、刷新和上下文保持一致。
+    /// 参数：无。
     private static func testPendingServerSelectionAndRefreshContract() {
         let dashboardSource = try! String(
             contentsOfFile: "macos/OrderDashboardView.swift",
@@ -1614,6 +1672,8 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 验证待处理库存项采用正确来源文件夹路径。
+    /// 参数：无。
     private static func testPendingInventorySourceFolderPath() {
         let reportFile = "/Volumes/server/Optimized Orders/pp0072/PP0072-MasterBed_Landing_Bed1_Bed2_Office/Report/FittingslistPC124429962608190002.xlsx"
         require(
@@ -1632,6 +1692,8 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 验证缺失材料映射问题进入相应人工处理入口。
+    /// 参数：无。
     private static func testPendingMaterialMappingIssueRoute() {
         let materialMappingIssue = CurrentIssue(
             id: "material_validation:PP0057:/server/PP0057 materials.xlsx",
@@ -1664,6 +1726,8 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 验证保存库存映射后恢复原待处理流程。
+    /// 参数：无。
     private static func testPendingInventoryMappingResumeContract() {
         let source = try! String(
             contentsOfFile: "macos/TravelerAssistant.swift",
@@ -1702,6 +1766,8 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 验证统一待处理中心提供现行工作流要求的操作和信息。
+    /// 参数：无。
     private static func testPendingCenterWorkflowUIContract() {
         let source = try! String(contentsOfFile: "macos/OrderDashboardView.swift", encoding: .utf8)
         let app = try! String(contentsOfFile: "macos/TravelerAssistant.swift", encoding: .utf8)
@@ -1709,13 +1775,53 @@ private struct MacOSUIRegressionTests {
         let end = source.range(of: "struct ServerWriteConfirmationSheet: View")!.lowerBound
         let sheet = String(source[start..<end])
         require(sheet.contains(".frame(width: 980, height: 620)") && app.contains(".frame(minWidth: 980, minHeight: 620)"), "待处理中心根容器与详情必须采用紧凑尺寸")
-        require(sheet.contains("[\"全部\", \"待处理\", \"处理失败\", \"待人工确认\", \"需人工处理\"]"), "筛选必须使用四种业务分类")
+        require(sheet.contains("[\"全部\", \"待处理\", \"待核对\", \"处理失败\", \"待人工确认\", \"需人工处理\"]"), "筛选必须包含历史操作待核对及原有四种业务分类")
         require(sheet.contains("visibleItems.first { $0.id == selectedID }") && sheet.contains("selectedID = item.id"), "详情必须跟随可见队列选择")
         require(sheet.contains("model.selectedServerFolderPaths.removeAll()") && sheet.contains("model.selectedAimesReviewIDs.removeAll()"), "切换项目必须清除旧操作选择")
         require(sheet.contains("Button(\"稍后处理\") { model.showPendingCenterPrompt = false }") && sheet.contains("选择并预览"), "稍后处理只关闭，预览必须有明确入口")
         require(sheet.contains(".alert(confirmationTitle, isPresented: $showActionConfirmation)") && sheet.contains("pendingAction?()"), "待处理业务动作必须经过二次确认")
         let preview = String(source[end...])
         require(preview.contains(".alert(\"确认后写入\", isPresented: $showWriteConfirmation)") && preview.contains("guard canConfirmWrite else { return }"), "写入预览必须保留显式二次确认和校验门禁")
+    }
+
+    /// 验证忽略文件夹成功后更新待处理结果。
+    /// 参数：无。
+    private static func testPendingRecoveryActions() {
+        let model = AppModel()
+        let issue = CurrentIssue(id: "inventory_recovery:test", kind: "inventory_recovery", orderId: "PP0099",
+                                 factoryOrder: "", path: "", message: "待核对", firstSeen: "", lastSeen: "")
+        model.currentIssues = [issue]
+        require(model.pendingCenterItems.first?.status == "待核对", "历史库存核对不能误标为本次处理失败")
+        var commands: [[String]] = []
+        var failure: ((String) -> Void)?
+        var success: (([String: Any]) -> Void)?
+        model.pendingInventoryRunner = { args, fail, complete in
+            commands.append(args); failure = fail; success = complete
+        }
+        model.pendingOrderRunner = { args, _, complete in
+            require(args == ["list-index"], "恢复后只刷新本地事实")
+            complete(["orders": [], "current_issues": []])
+        }
+        model.recoverPendingInventory(issue)
+        model.recoverPendingInventory(issue)
+        require(commands == [["recover-operation", "--operation-id", "test"]], "恢复必须使用独立核对入口，且运行中不能重复提交")
+        failure?("单据数量不一致")
+        require(model.currentIssues.count == 1 && model.pendingCheckStatus.contains("数量不一致"), "核对失败必须保留问题和具体原因")
+        model.recoverPendingInventory(issue)
+        success?(["ok": true, "message": "后续操作已补齐本地出库记录，旧提示已移除"])
+        require(model.currentIssues.isEmpty && model.pendingCheckStatus.contains("后续操作"), "恢复成功后应刷新问题清单并保留实际核对结果")
+        let ordinary = CurrentIssue(id: "missing", kind: "server_missing_report", orderId: "PP0099",
+                                    factoryOrder: "", path: "/server/PP0099", message: "缺少报表", firstSeen: "", lastSeen: "")
+        model.currentIssues = [ordinary]
+        model.pendingOrderRunner = { _, fail, _ in model.orderError = "目录离线"; fail() }
+        model.recheckPendingIssue(ordinary)
+        require(model.currentIssues.count == 1 && model.pendingCheckStatus.contains("目录离线"), "检查失败不能移除提示")
+        model.pendingOrderRunner = { args, _, complete in
+            require(args == ["recheck-issue", "--issue-key", "missing"], "重新检查不能使用标记已解决")
+            complete(["current_issues": []])
+        }
+        model.recheckPendingIssue(ordinary)
+        require(model.currentIssues.isEmpty, "检查通过才清除普通问题")
     }
 
     private static func testServerFolderIgnoreOutcome() {
@@ -1748,6 +1854,8 @@ private struct MacOSUIRegressionTests {
         require(model.dashboardServerStatus.contains("不再观察"), "永久忽略不能显示观察期限")
     }
 
+    /// 验证所选 Server 预览失败后保留可诊断的错误状态。
+    /// 参数：无。
     private static func testSelectedServerPreviewFailure() {
         let model = AppModel()
         let folder = URL(fileURLWithPath: "/tmp/PP0062-KITCHEN_20260908145832")
@@ -1763,6 +1871,8 @@ private struct MacOSUIRegressionTests {
         require(!dashboardStatusIsInProgress("⚠️ 正在读取的文件已被移除"), "错误描述含正在也不能判为运行中")
     }
 
+    /// 验证 Server 预览完成时正确记录完成耗时。
+    /// 参数：无。
     private static func testServerPreviewCompletionTiming() {
         let model = AppModel()
         model.dashboardServerStatus = "✅ 上一次扫描完成"
@@ -1784,6 +1894,8 @@ private struct MacOSUIRegressionTests {
         require(message?.operationDurations.contains { $0.label == "检查五金来源" && $0.duration == 2.5 } == true, "预览阶段耗时不能丢失")
     }
 
+    /// 验证五金来源选择按预览和确认流程推进。
+    /// 参数：无。
     private static func testHardwareSourceSelectionFlow() {
         let model = AppModel()
         let folder = "/tmp/PP9999"
@@ -1813,6 +1925,8 @@ private struct MacOSUIRegressionTests {
 
     }
 
+    /// 验证人工五金编辑器保留新增、删除和保存所需入口。
+    /// 参数：无。
     private static func testManualHardwareEditorContract() {
         let object: [String: Any] = [
             "version": "v1", "factories": [["factory_order": "F1", "factory_name": "PP9999-KITCHEN", "editable": true]],
@@ -1842,6 +1956,8 @@ private struct MacOSUIRegressionTests {
         require(!loaded, "列表失败必须返回 UI 错误态")
     }
 
+    /// 验证无变化预览可确认基线，并正确反馈完成结果。
+    /// 参数：无。
     private static func testServerNoChangeAcknowledgement() {
         let model = AppModel()
         let folder = "/Volumes/server/Optimized Orders/PP0064"
@@ -1881,6 +1997,8 @@ private struct MacOSUIRegressionTests {
         }
     }
 
+    /// 验证保存 Server 五金映射后刷新相应预览。
+    /// 参数：无。
     private static func testServerHardwareMappingRefresh() {
         let model = AppModel()
         let folder = "/Volumes/server/Optimized Orders/PP0008"
@@ -1929,6 +2047,8 @@ private struct MacOSUIRegressionTests {
         require(commands.allSatisfy { $0.first == "preview-server-changes" }, "映射刷新只能运行只读预览")
     }
 
+    /// 验证文件夹预览中的映射问题修复后可恢复处理。
+    /// 参数：无。
     private static func testFolderPreviewMappingRecovery() {
         let model = AppModel()
         let folder = URL(fileURLWithPath: "/Volumes/server/Optimized Orders/PP0008")
@@ -1948,6 +2068,8 @@ private struct MacOSUIRegressionTests {
         require(model.inventoryMappingTargetNames == ["另一材料"], "重试发现的新映射问题应提供处理入口")
     }
 
+    /// 验证映射保存与忽略回调串行继续，并保留尚未保存的项目。
+    /// 参数：无。
     private static func testPendingMappingCallbacks() {
         let folder = "/Volumes/server/Optimized Orders/PP0099"
         let path = folder + "/Report/material.xlsx"
@@ -2028,7 +2150,7 @@ private struct MacOSUIRegressionTests {
         require(model.showInventoryMappingWorkspace && model.inventoryMappingTargetNames == ["C"], "旧 Sheet 关闭通知不得取消新请求")
         model.closeInventoryMappingWorkspace()
 
-        // Ignoring one mapping uses the same serial continuation and preserves unsaved items.
+        // 忽略一项映射采用相同的串行继续流程，并保留未保存项目。
         let ignorePath = "/Volumes/server/Ignore/Report/material.xlsx"
         model.requestInventoryMapping(folderPath: ignorePath, message: "未映射材料：A、B。请处理")
         model.saveInventoryIgnoredMapping(name: "A", reason: "test")
@@ -2063,6 +2185,8 @@ private struct MacOSUIRegressionTests {
         model.closeInventoryMappingWorkspace()
     }
 
+    /// 验证同文件夹映射问题合并到一个待处理项目。
+    /// 参数：无。
     private static func testPendingMappingMergesFolderIssues() {
         let folder = "/Volumes/server/Optimized Orders/PP0100"
         let pathA = folder + "/Report/a.xlsx"
@@ -2092,6 +2216,8 @@ private struct MacOSUIRegressionTests {
         model.closeInventoryMappingWorkspace()
     }
 
+    /// 验证订单出库仅采用选中的工厂单范围。
+    /// 参数：无。
     private static func testOrderOutboundFactorySelection() {
         let dashboardSource = try! String(
             contentsOfFile: "macos/OrderDashboardView.swift",
@@ -2152,6 +2278,93 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 验证生产反馈更新看板阶段，并保留正确操作状态。
+    /// 参数：无。
+    private static func testProductionPreviewSheetLifecycle() {
+        // 仅开启本测试进程的无障碍树，SwiftUI 默认按需生成；不修改系统辅助功能设置。
+        let axAttribute = NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface")
+        let previousAX = NSApplication.shared.accessibilityAttributeValue(axAttribute)
+        NSApplication.shared.accessibilitySetValue(true, forAttribute: axAttribute)
+        defer { NSApplication.shared.accessibilitySetValue(previousAX, forAttribute: axAttribute) }
+        let source = try! String(contentsOfFile: "macos/OrderDashboardView.swift", encoding: .utf8)
+        let openAction = source.components(separatedBy: "onOpenProduction: {")[1].components(separatedBy: "onOpenOutbound:")[0]
+        require(!openAction.contains("loadProductionPreview"), "订单中心不能在弹窗之前重复读取生产预览")
+
+        let model = AppModel()
+        var requests = 0
+        var succeed: (([String: Any]) -> Void)?
+        var failRequest: (() -> Void)?
+        model.pendingOrderRunner = { arguments, failure, success in
+            require(arguments.first == "production-preview", "生命周期验收不能执行真实生产")
+            requests += 1
+            succeed = success
+            failRequest = failure
+        }
+        let hosting = NSHostingView(rootView: ProductionSheet(model: model, orderID: "PP0008", factoryOrders: ["F1", "F2"], onClose: {}).frame(width: 620, height: 560))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 560), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        window.orderFrontRegardless()
+        hosting.layoutSubtreeIfNeeded()
+        pumpRunLoop(for: 0.2)
+        // SwiftUI 的内部节点采用 Objective-C 动态无障碍方法，不保证声明协议遵循。
+        func element(_ root: AnyObject, _ identifier: String) -> AnyObject? {
+            if root.accessibilityIdentifier?() == identifier { return root }
+            for child in root.accessibilityChildren?() ?? [] {
+                if let found = element(child as AnyObject, identifier) { return found }
+            }
+            return nil
+        }
+        func confirmation() -> AnyObject {
+            guard let button = element(hosting, "production.confirmWithoutMaterials") else {
+                fail("未找到真实生产弹窗的全零确认按钮")
+            }
+            return button
+        }
+        require(requests == 1 && model.orderRunning, "弹窗只能发起一次预览")
+        require(confirmation().isAccessibilityEnabled?() == false, "预览完成前不得启用确认")
+        model.orderError = "模拟预览失败"
+        failRequest?()
+        pumpRunLoop(for: 0.1)
+        require(confirmation().isAccessibilityEnabled?() == false, "预览失败不得启用确认")
+        guard let reload = element(hosting, "production.reloadPreview") else { fail("预览失败后缺少重新读取入口") }
+        require(reload.isAccessibilityEnabled?() == true, "空闲后应能重试预览")
+        require(reload.accessibilityPerformPress?() == true, "未能触发重新读取按钮")
+        pumpRunLoop(for: 0.1)
+        require(requests == 2, "重试应只新增一次预览")
+        succeed?(["materials": [["key": "M1", "material_type": "panel", "remaining_quantity": 0]]])
+        pumpRunLoop(for: 0.2)
+        require(confirmation().isAccessibilityEnabled?() == true, "材料全零且预览成功后真实按钮必须启用")
+        require(requests == 2, "模型刷新不得重复预览")
+        window.close()
+
+        model.orderRunning = true
+        var busyResult: Bool?
+        model.loadProductionPreview(orderID: "PP0008", factoryOrders: ["F1"]) { busyResult = $0 }
+        require(busyResult == false && requests == 2, "忙碌时必须明确失败回调，不能静默丢弃或重复请求")
+        require(model.productionPreviewStatus.contains("重新读取"), "忙碌时需要提供重试说明")
+    }
+
+    /// 验证本次消耗草稿不会把错误输入当作零。
+    private static func testZeroMaterialProductionValidation() {
+        func material(_ value: String) -> ProductionMaterialDraft {
+            ProductionMaterialDraft(id: "M1", key: "M1", label: "板材", materialType: "panel", color: "Walnut", thickness: "19.1", edge: "", unit: "SHT", remainingQuantity: 5, quantity: value)
+        }
+        require(productionDraftHasValidQuantities([]), "无材料仍可明确确认生产")
+        require(productionDraftHasValidQuantities([material("0")]), "零消耗应允许确认")
+        require(productionDraftHasValidQuantities([material("1.5")]), "正消耗应保留原领料入口")
+        for invalid in ["", " ", "abc", "-1", "nan", "inf"] {
+            require(!productionDraftHasValidQuantities([material(invalid)]), "无效数量不能被当成零消耗：" + invalid)
+        }
+        let model = AppModel()
+        var rejected = false
+        model.confirmProductionWithoutMaterials(orderID: "PP0008", factoryOrders: ["F1"], materials: [material("2")]) { result in
+            rejected = result.state == .failure
+        }
+        require(rejected, "正消耗不得调用仅确认生产入口")
+    }
+
+    /// 核对生产反馈和看板显示合同。
     private static func testProductionFeedbackAndDashboardProgress() {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let dashboard = try! String(
@@ -2251,6 +2464,8 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 验证库存 Traveler 列表按修改时间从新到旧显示。
+    /// 参数：无。
     private static func testInventoryTravelerNewestFirst() {
         let rows = [
             traveler("old-a", folder: "PP0001", modifiedAt: "2026-07-01T10:00:00"),
@@ -2264,6 +2479,8 @@ private struct MacOSUIRegressionTests {
         require(grouped[1].1.map(\.fileName) == ["new-a", "old-a"], "PP0001 内文件未按时间降序")
     }
 
+    /// 验证共用页头高度统一，移除重复底部页头。
+    /// 参数：无。
     private static func testSharedPageHeaderHeight() {
         let headers = [
             AnyView(AppPageHeader(systemImage: "folder", title: "生产文件", subtitle: "测试") {
@@ -2288,8 +2505,10 @@ private struct MacOSUIRegressionTests {
         }
     }
 
+    /// 验证助手各阶段连接线独立更新，并遵守看板布局约定。
+    /// 参数：无。
     private static func testAssistantOrderTimelineContract() {
-        // A partially optimized order can already have produced factory orders.
+        // 部分优化的订单可能已有生产完成的工厂单。
         let beforeProduction = [27, 3, 0, 0].map {
             assistantProgressSegmentState(completedCount: $0, totalCount: 27)
         }
@@ -2312,56 +2531,40 @@ private struct MacOSUIRegressionTests {
                 && assistantSource.contains(".symbolEffect(.rotate")
                 && assistantSource.contains("ProgressView()")
                 && assistantSource.contains("static let metricValue: CGFloat = 40")
-                && assistantSource.contains("static let orderID: CGFloat = 20")
-                && assistantSource.contains("static let stageValue: CGFloat = 13")
+                && assistantSource.contains("static let orderID: CGFloat = 26")
                 && assistantSource.contains("GeometryReader")
                 && assistantSource.contains("completedCount: Int")
                 && assistantSource.contains("totalCount: Int")
                 && assistantSource.contains("let segmentState = assistantProgressSegmentState(")
                 && assistantSource.contains("let state = assistantProgressSegmentState(")
                 && assistantSource.contains("let segmentState")
-                && assistantSource.contains("leadingStubLength")
-                && assistantSource.contains("segmentMidpoint")
+                && assistantSource.contains("dash: [7, 9]")
+                && assistantSource.contains("StrokeStyle(lineWidth: 2.5, lineCap: .round)")
+                && assistantSource.contains("RoundedRectangle(cornerRadius: 16, style: .continuous)")
                 && !assistantSource.contains("firstIncompleteIndex")
                 && assistantSource.contains("let iconColor = completed || current ? AssistantDashboardTypography.stageEmerald : Color.secondary.opacity(0.62)")
-                && assistantSource.contains("GlassEffectContainer(spacing: 20)")
-                && assistantSource.contains(".regular.tint(AssistantDashboardTypography.stageEmerald.opacity(0.28))")
-                && assistantSource.contains(".regular.tint(AppPalette.separator.opacity(0.18))")
-                && assistantSource.contains("assistantProgressValue(item.outboundProgress), \"truck.box.fill\"")
+                && assistantSource.contains("assistantProgressValue(item.outboundProgress), \"truck.box\"")
                 && assistantSource.contains("item.factoryCount > 0 ? \"\\(item.factoryCount)/\\(item.factoryCount)\" : \"—\", \"arrow.triangle.branch\"")
-                && assistantSource.contains("assistantProgressValue(item.optimizationProgress), \"square.stack\"")
+                && assistantSource.contains("assistantProgressValue(item.optimizationProgress), \"square.3.layers.3d\"")
                 && assistantSource.contains("assistantProgressValue(item.productionProgress), \"scissors\"")
                 && assistantSource.contains("Image(systemName: fallbackSymbol)")
                 && assistantSource.contains("AssistantDashboardTypography.stageEmerald.opacity(0.92)")
                 && assistantSource.contains(".contentTransition(.symbolEffect(.replace))")
                 && assistantSource.contains("assistantProgressValue")
                 && assistantSource.contains("Text(stage.title)")
-                && assistantSource.contains("Text(stage.value)")
-                && assistantSource.contains("centerY - 20")
-                && assistantSource.contains("centerY + 20")
-                && assistantSource.contains(".font(.system(size: 34, weight: .semibold))")
-                && assistantSource.contains(".frame(width: 64, height: 64)")
-                && assistantSource.contains("let centerY: CGFloat = 50")
-                && assistantSource.contains(".frame(width: columnWidth, height: 100, alignment: .center)")
-                && assistantSource.contains("assistantProgressRail(item)\n                    .padding(.leading, 80)")
-                && assistantSource.contains(".frame(height: 100)")
-                && assistantSource.contains("let leadingStubLength: CGFloat = 64")
-                && assistantSource.contains("let stageStep: CGFloat = 10")
-                && assistantSource.contains("let baseCenterX =")
-                && assistantSource.contains("let stageShift = CGFloat(index + 1) * stageStep")
-                && assistantSource.contains("let centerX = baseCenterX + stageShift")
-                && assistantSource.contains(".offset(x: stageShift)")
-                && assistantSource.contains("AppPalette.separator.opacity(0.82)")
+                && !assistantSource.contains("Text(stage.value)")
+                && assistantSource.contains(".font(.system(size: 28, weight: .medium))")
+                && assistantSource.contains(".frame(width: 56, height: 56)")
+                && assistantSource.contains("let centerY: CGFloat = 52")
+                && assistantSource.contains(".frame(width: columnWidth, height: 80, alignment: .top)")
+                && assistantSource.contains(".frame(height: 80)")
                 && assistantSource.contains("AppPalette.separator.opacity(0.90)")
                 && assistantSource.contains("TimelineView(.animation(minimumInterval: 1.0 / 20.0")
                 && assistantSource.contains("dashPhase: dashPhase")
                 && assistantSource.contains("accessibilityReduceMotion")
-                && assistantSource.contains("lineWidth: 9")
                 && assistantSource.contains("assistantStageIcon")
                 && assistantSource.contains("stageEmerald")
                 && assistantSource.contains("LinearGradient(")
-                && assistantSource.contains("RadialGradient(")
-                && assistantSource.contains("Color.white.opacity(0.55)")
                 && !assistantSource.contains(".offset(x: 22, y: 22)")
                 && !assistantSource.contains("阻塞")
                 && !assistantSource.contains("blocked")
@@ -2369,7 +2572,7 @@ private struct MacOSUIRegressionTests {
                 && !assistantSource.contains("assistantOrderStatusBadge")
                 && !assistantSource.contains("双击订单行进入订单中心")
                 && !assistantSource.contains("订单中心查看"),
-            "助手看板必须使用图标和连接线显示状态，并保持统一的完成色、数字列与局部滚动"
+            "助手看板必须使用图标和连接线显示状态，并保持统一的完成色、阶段标题与局部滚动"
         )
         require(
             assistantSource.contains("beginCommandHintsAnchorHover")
@@ -2382,11 +2585,9 @@ private struct MacOSUIRegressionTests {
         if let railStart = assistantSource.range(of: "private func assistantProgressRail"),
            let railEnd = assistantSource.range(of: "private func assistantStageIcon", range: railStart.upperBound..<assistantSource.endIndex) {
             let railSource = String(assistantSource[railStart.lowerBound..<railEnd.lowerBound])
-            let titlePosition = railSource.range(of: "Text(stage.title)")?.lowerBound
-            let valuePosition = railSource.range(of: "Text(stage.value)")?.lowerBound
             require(
-                titlePosition != nil && valuePosition != nil && titlePosition! < valuePosition!,
-                "助手看板阶段名称和数值必须绑定在线段上下"
+                railSource.contains("Text(stage.title)") && !railSource.contains("Text(stage.value)"),
+                "助手看板保留节点标题，不再显示节点下方数量"
             )
             require(
                 !railSource.contains("completedSegment")
@@ -2420,14 +2621,13 @@ private struct MacOSUIRegressionTests {
             assistantSource.contains("assistantMetric(\"总订单数\", value: effectiveOrders.count, symbol:")
                 && !assistantSource.contains("Text(\"当前订单\")")
                 && !assistantSource.contains("未完成订单 · 以图标和颜色显示各状态数据")
-                && assistantSource.contains("Image(systemName: \"doc.text\")")
-                && assistantSource.contains(".frame(width: 172, height: 42, alignment: .center)")
-                && assistantSource.contains(".padding(.leading, 10)")
-                && assistantSource.contains(".padding(.horizontal, 34)")
-                && assistantSource.contains("orderIdentityText = Color(red: 0.08, green: 0.36, blue: 0.20)")
-                && assistantSource.contains(".background(AppPalette.success.opacity(0.10), in: Capsule())")
-                && assistantSource.contains(".glassEffect(.regular.tint(AppPalette.success.opacity(0.12)), in: Capsule())"),
-            "助手看板未按要求居中并右移淡绿色订单身份牌"
+                && !assistantSource.contains("Text(\"订单\")")
+                && assistantSource.contains("Text(item.orderId)")
+                && assistantSource.contains(".frame(width: 176, alignment: .center)")
+                && assistantSource.contains(".help(item.orderId)")
+                && assistantSource.contains("orderIdentityText = Color(red: 0.08, green: 0.28, blue: 0.22)")
+                && !assistantSource.contains("in: Capsule()"),
+            "助手看板订单编号应在独立区域居中，不显示订单标签并保留长编号提示"
         )
         let dashboardSource = try! String(
             contentsOfFile: "macos/OrderDashboardView.swift",
@@ -2459,6 +2659,8 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 验证助手阶段图标采用选定原生线性符号。
+    /// 参数：无。
     private static func testAssistantStageIconAssets() {
         let assistantSource = try! String(
             contentsOfFile: "macos/AssistantView.swift",
@@ -2474,6 +2676,8 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 验证设置、订单安排和待办采用统一玻璃月历。
+    /// 参数：无。
     private static func testGlassDatePickerContract() {
         let appSource = try! String(
             contentsOfFile: "macos/TravelerAssistant.swift",
@@ -2518,6 +2722,8 @@ private struct MacOSUIRegressionTests {
         _ = AppGlassDatePickerCalendar(selection: .constant(Date()))
     }
 
+    /// 验证待办表头顶部为圆角，与列表连接处保持直角。
+    /// 参数：无。
     private static func testTodoTableHeaderRoundedCorners() {
         let source = try! String(
             contentsOfFile: "macos/TravelerAssistant.swift",
@@ -2541,6 +2747,8 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 验证默认窗口内设置分组、日期、账户和保存范围布局。
+    /// 参数：无。
     private static func testSettingsDefaultWindowLayoutContract() {
         let source = try! String(
             contentsOfFile: "macos/TravelerAssistant.swift",
@@ -2631,6 +2839,8 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 验证正式窗口保持指定尺寸且不可由用户调整。
+    /// 参数：无。
     private static func testFixedWindowSizeContract() {
         let source = try! String(
             contentsOfFile: "macos/TravelerAssistant.swift",
@@ -2652,6 +2862,8 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 验证库存按钮布局和出库项目分类排序。
+    /// 参数：无。
     private static func testInventoryActionLayoutRules() {
         require(AppLayout.inventoryActionMinWidth >= 128, "库存按钮最小宽度过窄")
         require(AppLayout.actionSpacing == 10, "库存按钮间距未统一")
@@ -2668,6 +2880,9 @@ private struct MacOSUIRegressionTests {
             inventoryActionColumnCount(availableWidth: AppLayout.inventoryActionMinWidth) == 1,
             "库存操作区在窄窗口下未换行为单列"
         )
+        /// 构造已映射的库存预览行，供分类排序校验。
+        /// - Parameter name：来源项目名称。
+        /// - Parameter section：项目所属的材料或五金区域。
         func preview(_ name: String, _ section: String) -> InventoryPreviewRow {
             InventoryPreviewRow(
                 travelerName: name,
@@ -2697,6 +2912,8 @@ private struct MacOSUIRegressionTests {
         _ = InventoryView(model: AppModel(), onClose: {}, orderContextID: "PP0001")
     }
 
+    /// 验证运行中进度复用原操作行，保持标识及执行状态。
+    /// 参数：无。
     private static func testRunningProgressReusesOperationRow() {
         let id = UUID()
         let steps = [
@@ -2711,6 +2928,8 @@ private struct MacOSUIRegressionTests {
         require(updated[0].detail == "正在后台连接库存系统", "后台进度文案未更新")
     }
 
+    /// 验证库存进度去除技术前缀，并显示为当前操作。
+    /// 参数：无。
     private static func testDashboardInventoryProgressText() {
         require(
             dashboardInventoryProgressText("[+47.75s] 库存系统：正在填写 1/2：M1001") == "正在填写 1/2：M1001",
@@ -2733,6 +2952,8 @@ private struct MacOSUIRegressionTests {
         require(current?.isRunning == true && current?.message.detail == "正在填写 1/2：M1001", "库存当前步骤没有进入订单中心标题行")
     }
 
+    /// 验证库存阶段切换保留历史行及实际耗时。
+    /// 参数：无。
     private static func testInventoryProgressKeepsStageHistory() {
         let steps = [
             InventoryStep(time: "12:00:00", title: "库存操作", detail: "任务已开始", state: "running")
@@ -2744,6 +2965,8 @@ private struct MacOSUIRegressionTests {
         require(updated[1].detail.contains("实际耗时"), "库存阶段应显示实际耗时")
     }
 
+    /// 验证出库与列表刷新各自保留独立耗时。
+    /// 参数：无。
     private static func testDashboardSeparatesInventoryAndRefreshTiming() {
         let messages = dashboardMessages(
             syncStatus: "✅ 订单列表已刷新",
@@ -2770,11 +2993,15 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 验证操作耗时固定显示两位小数。
+    /// 参数：无。
     private static func testOrderOperationDurationFormatting() {
         require(operationDurationText(1.236) == "1.24 秒", "操作用时没有按最多两位小数显示")
         require(operationDurationText(2) == "2.00 秒", "整秒操作用时格式错误")
     }
 
+    /// 验证 Server 材料预览按夹板厚度、饰面板和封边排序。
+    /// 参数：无。
     private static func testServerWriteMaterialPreviewOrdering() {
         let changes = [
             ServerWriteMaterialChange(id: "edge", changeType: "新增", materialType: "edge", color: "Rosales 3", thickness: "", edge: "", unit: "m", oldQuantity: 0, newQuantity: 185, delta: 185),
@@ -2792,6 +3019,8 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 验证已有五金显示差异，首次写入保留明细但隐藏对比。
+    /// 参数：无。
     private static func testServerWriteHardwareChangeLayout() {
         let changes: [[String: Any]] = [
             ["factory_order": "F-NEW", "product_code": "M1001", "name": "Hinge", "old_quantity": 0, "new_quantity": 54],
@@ -2822,6 +3051,8 @@ private struct MacOSUIRegressionTests {
         require(serverHardwareUnitText("") == "—", "五金单位为空时应显示占位符")
     }
 
+    /// 验证正式数据源使用正确的 Server、Traveler 和备份路径。
+    /// 参数：无。
     private static func testProductionOrderPaths() {
         let model = AppModel()
         model.sourceRoot = "/Volumes/server/Optimized Orders"
@@ -2833,6 +3064,8 @@ private struct MacOSUIRegressionTests {
         require(model.activeBackupRoot == "/production/Backups", "备份目录错误")
     }
 
+    /// 验证库存查询失败保留订单预检结果，允许人工重试。
+    /// 参数：无。
     private static func testStockFailureKeepsManualRetryEnabled() {
         let model = AppModel()
         model.selectedOrderPath = "/orders/PP0067"
@@ -2848,6 +3081,8 @@ private struct MacOSUIRegressionTests {
         require(!model.orderRunning && model.orderPreviewReady, "库存查询失败后应允许再次手工点击查询")
     }
 
+    /// 验证已有 Traveler 在预览失败后仍可更新，新建仍需校验。
+    /// 参数：无。
     private static func testExistingTravelerCanBeUpdatedAfterPreviewFailure() {
         require(
             orderUpdateActionReady(
@@ -2863,6 +3098,8 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 验证生成 Traveler 采用数据库事实，打开操作按文件存在性启用。
+    /// 参数：无。
     private static func testDashboardTravelerActionsUseDatabaseFacts() {
         let model = AppModel()
         model.selectedOrderId = "CS005"
@@ -2876,6 +3113,8 @@ private struct MacOSUIRegressionTests {
         require(orderTravelerOpenActionReady(existingTravelerPath: temporary.path), "存在 Traveler 文件时打开按钮应启用")
     }
 
+    /// 验证关联预览的材料缺失错误被界面识别并保留订单身份。
+    /// 参数：无。
     private static func testRelatedPreviewMissingMaterialIssue() {
         let response: [String: Any] = [
             "order_id": "PP0067",
@@ -2892,6 +3131,8 @@ private struct MacOSUIRegressionTests {
         require(issues[0].code == "missing_materials", "缺少 material 的错误码解析错误")
     }
 
+    /// 验证隔离订单缺少材料文件时显示自动生成提示。
+    /// 参数：无。
     private static func testPP0067MissingMaterialShowsPrompt() {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("workflow-ui-missing-material-\(UUID().uuidString)", isDirectory: true)
@@ -2913,6 +3154,8 @@ private struct MacOSUIRegressionTests {
         require(model.showMaterialGenerationPrompt, "PP0067 缺少 material 没有显示自动生成提示")
     }
 
+    /// 验证不同内容高度不会改变完整页面的页头边界位置。
+    /// 参数：无。
     private static func testFullPageHeaderBoundaryAlignment() {
         let fixedBoundary = headerBoundaryY(flexibleContent: false)
         let flexibleBoundary = headerBoundaryY(flexibleContent: true)
@@ -2922,6 +3165,8 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 挂载完整页面测试视图并读取页头边界的纵向位置。
+    /// - Parameter flexibleContent：是否使用可扩展内容区域。
     private static func headerBoundaryY(flexibleContent: Bool) -> CGFloat {
         let box = HeaderBoundaryProbeBox()
         let hosting = NSHostingView(rootView: PageLayoutHarness(box: box, flexibleContent: flexibleContent))
@@ -2941,8 +3186,10 @@ private struct MacOSUIRegressionTests {
         return boundary
     }
 
+    /// 验证详情展开不触发无关消息区更新，点击接收层不影响布局。
+    /// 参数：无。
     private static func testDashboardExpansionIsolation() {
-        // Nonexistent, Unicode and escaped-looking paths must remain lexical strings.
+        // 不存在、含中文或类似转义内容的路径都应保持纯字符串处理。
         let root = "/Volumes/unavailable-server/PP0064 中文"
         require(displayPathName(root + "/Report/A #100%.xlsx") == "A #100%.xlsx", "显示路径不得 URL 解码或检查文件")
         require(displayPathName(root + "/") == "PP0064 中文", "目录尾斜杠不应丢失名称")
@@ -2993,13 +3240,15 @@ private struct MacOSUIRegressionTests {
         require(!OrderDashboardActivityInput(model: model).operationRunning, "失败后不能继续显示运行状态")
         window.close()
 
-        // Real AppKit receiver: no inner hosting tree or size constraints.
+        // 真实 AppKit 点击接收层不应包含内部承载树或尺寸约束。
         let receiverHost = NSHostingView(rootView:
             OrderDashboardClickContainer(onSingleClick: {}, onDoubleClick: {}) {
                 Color.clear.frame(width: 240, height: 60)
             })
         receiverHost.frame = NSRect(x: 0, y: 0, width: 240, height: 60)
         receiverHost.layoutSubtreeIfNeeded()
+        /// 递归收集视图自身及所有后代，检查点击接收层结构。
+        /// - Parameter view：开始遍历的 AppKit 根视图。
         func descendants(_ view: NSView) -> [NSView] {
             view.subviews.flatMap { [$0] + descendants($0) }
         }
@@ -3017,6 +3266,8 @@ private struct MacOSUIRegressionTests {
         require(coordinator.gestureRecognizer(single, shouldRequireFailureOf: double), "单击必须等待双击失败，避免误展开")
     }
 
+    /// 验证追加日志及更新运行中日志后自动滚动到底部。
+    /// 参数：无。
     private static func testOperationLogScrollsAfterAppending() {
         let initial = (0..<8).map { step($0) }
         let model = OperationLogHarnessModel(steps: initial)
@@ -3068,6 +3319,8 @@ private struct MacOSUIRegressionTests {
         window.close()
     }
 
+    /// 验证日志解析、可读时间和操作内容，忽略无效 JSON 行。
+    /// 参数：无。
     private static func testOperationLogReader() {
         let line = "{\"event\":\"user.action\",\"message\":\"点击保存设置\",\"timestamp\":\"2026-08-13T15:30:45.123-07:00\"}"
         guard let entry = OperationLogReader.parse(line: line) else {
@@ -3078,6 +3331,51 @@ private struct MacOSUIRegressionTests {
         require(OperationLogReader.parse(line: "不是 JSON") == nil, "无效操作日志行不应导致读取失败")
     }
 
+    /// 验证诊断筛选、同次操作复制、旧日志兼容及损坏记录提示。
+    private static func testOperationLogDiagnostics() {
+        /// 构造用于筛选和复制验证的操作日志；message 为显示文本，event 为事件类型，session 和 operation 为关联标识。
+        func entry(_ message: String, event: String = "backend.command.completed", session: String = "session-a", operation: String = "op-a") -> OperationLogEntry {
+            let payload: [String: Any] = [
+                "timestamp": "2026-09-23T12:00:00Z", "event": event, "message": message,
+                "session_id": session, "operation_id": operation,
+                "details": ["order_id": "PP0064", "duration_seconds": 1.25,
+                            "password": "never-copy-password", "url": "https://example.com/path?token=never-copy-token"]
+            ]
+            let data = try! JSONSerialization.data(withJSONObject: payload)
+            return OperationLogReader.parse(line: String(data: data, encoding: .utf8)!)!
+        }
+        let start = entry("目标开始", event: "operation.started")
+        let failed = entry("目标失败", event: "backend.command.failed")
+        let otherSession = entry("其他会话不能复制", session: "session-b")
+        let otherOperation = entry("其他操作不能复制", operation: "op-b")
+        let noID = entry("无编号单条", operation: "")
+        let otherNoID = entry("另一条无编号", operation: "")
+        let entries = [start, failed, otherSession, otherOperation, noID, otherNoID]
+        require(OperationLogReader.filtered(entries, failuresOnly: true, search: "pp0064").count == 1, "失败筛选应同时支持详情中的订单号和大小写不敏感搜索")
+        require(OperationLogReader.filtered(entries, failuresOnly: false, search: "目标开始").count == 1, "操作文字搜索失败")
+        let copied = OperationLogReader.diagnosticText(for: failed, in: entries)
+        require(copied.contains("目标开始") && copied.contains("目标失败"), "复制应包含同次操作的上下文")
+        require(!copied.contains("其他会话") && !copied.contains("其他操作") && !copied.contains("无编号"), "复制混入了其他操作")
+        require(!copied.contains("never-copy-password") && !copied.contains("never-copy-token"), "诊断复制泄露敏感字段或 URL 参数")
+        let sensitive = entry("password=unsafe-text https://example.com/?token=unsafe-query {\"token\":\"unsafe-json\"}", event: "operation.failed", operation: "sensitive")
+        let redacted = OperationLogReader.diagnosticText(for: sensitive, in: [sensitive])
+        require(!redacted.contains("unsafe-text") && !redacted.contains("unsafe-query") && !redacted.contains("unsafe-json"), "自由文本诊断没有再次脱敏")
+        let single = OperationLogReader.diagnosticText(for: noID, in: entries)
+        require(single.contains("无编号单条") && !single.contains("另一条无编号"), "无操作编号日志只能复制所选一条")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("log-diagnostics-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: url) }
+        require(OperationLogReader.read(from: url).entries.isEmpty, "未创建日志应为空")
+        let old = "{\"timestamp\":\"2026-09-23T12:00:00Z\",\"message\":\"旧格式\"}"
+        try! (old + "\nnot-json\n").write(to: url, atomically: true, encoding: .utf8)
+        let read = OperationLogReader.read(from: url)
+        require(read.entries.count == 1 && read.invalidLineCount == 1 && read.error == nil, "坏行不能隐藏正常记录且应报告计数")
+        try! FileManager.default.removeItem(at: url)
+        try! FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        require(OperationLogReader.read(from: url).error != nil, "日志读取失败不能伪装成暂无日志")
+    }
+
+    /// 验证日志保留期限和时区边界，并正确读取文件大小。
+    /// 参数：无。
     private static func testOperationLogMaintenance() {
         let fileManager = FileManager.default
         let url = fileManager.temporaryDirectory
@@ -3107,6 +3405,10 @@ private struct MacOSUIRegressionTests {
         require(OperationLogReader.fileSizeText(from: url) != "0 bytes", "日志文件大小显示未读取文件")
     }
 
+    /// 构造用于列表排序的 Traveler 样本。
+    /// - Parameter name：Traveler 文件名。
+    /// - Parameter folder：订单文件夹名称。
+    /// - Parameter modifiedAt：文件修改时间字符串。
     private static func traveler(_ name: String, folder: String, modifiedAt: String) -> InventoryTraveler {
         InventoryTraveler(
             id: folder + name,
@@ -3119,10 +3421,14 @@ private struct MacOSUIRegressionTests {
         )
     }
 
+    /// 构造固定成功状态的操作日志步骤。
+    /// - Parameter index：用于生成时间和文案的步骤序号。
     private static func step(_ index: Int) -> InventoryStep {
         InventoryStep(time: "08:00:\(index)", title: "step \(index)", detail: "detail \(index)", state: "success")
     }
 
+    /// 递归查找视图树中的第一个滚动视图。
+    /// - Parameter view：开始查找的 AppKit 根视图。
     private static func firstScrollView(in view: NSView) -> NSScrollView? {
         if let scrollView = view as? NSScrollView { return scrollView }
         for child in view.subviews {
@@ -3131,14 +3437,21 @@ private struct MacOSUIRegressionTests {
         return nil
     }
 
+    /// 推进当前运行循环，让布局和异步界面更新执行。
+    /// - Parameter seconds：运行循环等待时长，单位为秒。
     private static func pumpRunLoop(for seconds: TimeInterval) {
         RunLoop.current.run(until: Date().addingTimeInterval(seconds))
     }
 
+    /// 检查回归条件，失败时打印说明并终止。
+    /// - Parameter condition：延迟求值的断言条件。
+    /// - Parameter message：条件不成立时的诊断说明。
     private static func require(_ condition: @autoclosure () -> Bool, _ message: String) {
         if !condition() { fail(message) }
     }
 
+    /// 将失败信息写入标准错误并以失败状态退出。
+    /// - Parameter message：要报告的测试失败原因。
     private static func fail(_ message: String) -> Never {
         fputs("FAIL: \(message)\n", stderr)
         exit(1)

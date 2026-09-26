@@ -1,4 +1,4 @@
-"""Order-scoped manual hardware editor; drafts commit in one SQLite transaction."""
+"""订单级人工五金编辑，草稿在同一个 SQLite 事务中提交。"""
 from __future__ import annotations
 
 import hashlib
@@ -13,6 +13,7 @@ from .inventory import ProductDatabase, InventoryMappings, ignored_hardware_reas
 
 
 def _snapshot(connection, order: str) -> dict:
+    """读取人工五金及工厂单并计算编辑版本；connection 为连接，order 为订单号。"""
     factories = [dict(row) for row in connection.execute(
         """select factory_order, factory_name, aimes_status, (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status
            from factory_orders where order_id=? order by factory_order""", (order,))]
@@ -30,6 +31,7 @@ def _snapshot(connection, order: str) -> dict:
 
 
 def list_manual_hardware(config: Config, order_id: str) -> dict:
+    """在读取事务中取得人工五金编辑快照；config 为数据库配置，order_id 为订单号。"""
     order = order_id.strip().upper()
     if not order:
         raise RuleError('invalid_arguments', '请选择订单')
@@ -43,6 +45,11 @@ def list_manual_hardware(config: Config, order_id: str) -> dict:
 
 
 def save_manual_hardware(config: Config, order_id: str, payload: dict, *, confirm_write=False) -> dict:
+    """校验版本、归属和数量后一次性保存人工五金增删，失败时回滚。
+
+    参数：config 为已准备存储的配置；order_id 为订单号；payload 含版本、新增及删除项；
+    confirm_write 表示用户已明确保存，默认为 False。
+    """
     if not confirm_write:
         raise RuleError('write_confirmation_required', '请点击保存更改后再写入人工五金')
     if not config.storage_prepared:
@@ -67,6 +74,7 @@ def save_manual_hardware(config: Config, order_id: str, payload: dict, *, confir
             records = {item['id']: item for item in snapshot['items']}
 
             def require_factory(factory):
+                """确认工厂单号 factory 属于当前订单且仍可编辑，否则报错。"""
                 if factory not in factories:
                     raise RuleError('manual_hardware_factory_missing', '工厂单必须属于当前订单')
                 if not factories[factory]['editable']:
@@ -98,7 +106,7 @@ def save_manual_hardware(config: Config, order_id: str, payload: dict, *, confir
                 'delete from hardware_items where id=?',
                 [(item_id,) for item_id in set(deletions)])
             for factory, product, quantity in prepared:
-                # Aggregate same-SKU draft additions, preserving existing source evidence.
+                # 合并草稿中相同 SKU 的新增数量，保留已有来源证据。
                 rows = connection.execute(
                     """select id, quantity from hardware_items where order_id=? and factory_order=?
                        and product_code=? and source_type='manual' order by id""",

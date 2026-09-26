@@ -11,11 +11,15 @@ from traveler_assistant.runtime_store import RuntimeStore, TokenUsage, runtime_d
 
 
 class RuntimeStoreTests(unittest.TestCase):
+    # 验证运行状态数据库使用独立私有文件。
+    # self：当前测试用例或测试替身实例。
     def test_runtime_database_uses_a_private_file(self):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
             self.assertEqual(runtime_database_path(state), state / "assistant-runtime.sqlite3")
 
+    # 验证遇到未知数据库版本时保留原文件，不自动删除。
+    # self：当前测试用例或测试替身实例。
     def test_unknown_database_version_is_not_deleted(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "workflow.sqlite3"
@@ -27,6 +31,8 @@ class RuntimeStoreTests(unittest.TestCase):
                 RuntimeStore(path)
             self.assertTrue(path.exists())
 
+    # 验证助手用量记录不会写入业务数据库。
+    # self：当前测试用例或测试替身实例。
     def test_assistant_usage_does_not_touch_workflow_database(self):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
@@ -61,6 +67,8 @@ class RuntimeStoreTests(unittest.TestCase):
             connection.close()
             self.assertTrue(runtime_database_path(state).exists())
 
+    # 验证 Agent 用量可按周、月及累计范围汇总。
+    # self：当前测试用例或测试替身实例。
     def test_agent_usage_has_week_month_and_total_summaries(self):
         with tempfile.TemporaryDirectory() as temp:
             store = RuntimeStore(Path(temp) / "workflow.sqlite3")
@@ -70,6 +78,8 @@ class RuntimeStoreTests(unittest.TestCase):
                 {"week": 150, "month": 150, "total": 150},
             )
 
+    # 验证 Agent 路由学习按标准化后的完整短语精确匹配。
+    # self：当前测试用例或测试替身实例。
     def test_agent_route_is_learned_as_an_exact_normalized_phrase(self):
         with tempfile.TemporaryDirectory() as temp:
             store = RuntimeStore(Path(temp) / "workflow.sqlite3")
@@ -80,6 +90,8 @@ class RuntimeStoreTests(unittest.TestCase):
             )
             self.assertIsNone(store.learned_command("帮我瞅瞅pp0064"))
 
+    # 验证学习得到的命令保留结构化参数及其类型。
+    # self：当前测试用例或测试替身实例。
     def test_learned_command_preserves_typed_arguments(self):
         with tempfile.TemporaryDirectory() as temp:
             store = RuntimeStore(Path(temp) / "workflow.sqlite3")

@@ -1,3 +1,4 @@
+# 复制指定 Server 材料表到输出目录，修复副本并检查颜色、公式及解析结果。参数：无；来源和目标由文件内固定路径指定。
 import json
 import shutil
 import tempfile

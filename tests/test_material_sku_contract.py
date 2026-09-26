@@ -1,8 +1,7 @@
-"""Behavioral contract for SKU-backed material and product references.
+"""验证材料 SKU 与商品引用的行为约束。
 
-Every test uses a disposable workflow database.  The tests intentionally
-exercise application entry points or SQLite's real foreign-key enforcement;
-they do not mock persistence or run against the user's workflow database.
+每个测试均使用可丢弃的独立业务数据库，通过实际应用入口或 SQLite 外键约束
+验证行为；不模拟持久化，也不使用用户的真实业务数据库。
 """
 
 from __future__ import annotations
@@ -37,6 +36,8 @@ from traveler_assistant.production import production_preview
 
 
 class MaterialSkuContractTests(unittest.TestCase):
+    # 建立隔离的 Server、Traveler 和数据库路径，准备代切订单。
+    # self：当前测试用例或测试替身实例。
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
@@ -59,6 +60,10 @@ class MaterialSkuContractTests(unittest.TestCase):
         finally:
             store.close()
 
+    # 把给定商品行写入带标准表头的测试目录工作簿。
+    # self：当前测试用例或测试替身实例。
+    # name：输出商品目录文件名。
+    # rows：待写入的商品记录列表。
     def _write_catalog(self, name: str, rows: list[tuple[str, ...]]) -> Path:
         path = self.root / name
         workbook = Workbook()
@@ -72,6 +77,8 @@ class MaterialSkuContractTests(unittest.TestCase):
         workbook.save(path)
         return path
 
+    # 导入本组材料 SKU 契约测试的标准商品目录。
+    # self：当前测试用例或测试替身实例。
     def _import_standard_catalog(self) -> None:
         import_catalog(
             self.config,
@@ -87,6 +94,12 @@ class MaterialSkuContractTests(unittest.TestCase):
             ),
         )
 
+    # 生成包含指定颜色和数量的代切材料来源工作簿。
+    # self：当前测试用例或测试替身实例。
+    # order_id：目标订单编号。
+    # color：材料颜色名称。
+    # panel_quantity：饰面板数量。
+    # edge_quantity：封边长度，单位为米。
     def _write_material_source(
         self,
         order_id: str = "CS901",
@@ -123,6 +136,9 @@ class MaterialSkuContractTests(unittest.TestCase):
         workbook.save(path)
         return folder
 
+    # 读取订单已确认材料的 SKU、数量及来源快照。
+    # self：当前测试用例或测试替身实例。
+    # order_id：目标订单编号。
     def _confirmed_material_snapshot(self, order_id: str = "CS901") -> list[tuple]:
         with connect_database(self.config.workflow_database) as connection:
             return connection.execute(
@@ -132,6 +148,8 @@ class MaterialSkuContractTests(unittest.TestCase):
                 (order_id,),
             ).fetchall()
 
+    # 准备标准目录和映射，生成并持久保存材料预览。
+    # self：当前测试用例或测试替身实例。
     def _confirm_standard_materials(self) -> OrderPreview:
         self._import_standard_catalog()
         save_manual_mapping(self.config, "19.1mm--Contract Oak", "M-PANEL-A")
@@ -146,6 +164,8 @@ class MaterialSkuContractTests(unittest.TestCase):
         persist_preview(self.config, preview)
         return preview
 
+    # 验证解析、确认、重开及重复操作保持已保存 SKU 和数量不变。
+    # self：当前测试用例或测试替身实例。
     def test_parse_confirm_reopen_and_repeat_keep_saved_skus_and_quantities(self) -> None:
         preview = self._confirm_standard_materials()
 
@@ -177,6 +197,8 @@ class MaterialSkuContractTests(unittest.TestCase):
                          [(row[0], row[1], row[2:6]) for row in second])
         self.assertEqual(len(second), 2)
 
+    # 验证映射变化不会重新绑定已确认材料。
+    # self：当前测试用例或测试替身实例。
     def test_mapping_changes_do_not_rebind_confirmed_materials(self) -> None:
         self._confirm_standard_materials()
 
@@ -209,6 +231,8 @@ class MaterialSkuContractTests(unittest.TestCase):
         }
         self.assertEqual(quantities, {"M-PANEL-A": 2, "M-EDGE-A": 6})
 
+    # 验证历史生产和 Server 分配使用绑定商品的属性。
+    # self：当前测试用例或测试替身实例。
     def test_historical_production_and_server_allocations_keep_product_attributes_bound(self) -> None:
         self._import_standard_catalog()
         with connect_database(self.config.workflow_database) as connection:
@@ -277,6 +301,8 @@ class MaterialSkuContractTests(unittest.TestCase):
                 "M-PANEL-B": ("panel", "Contract Oak Alternate", "19.1"),
             })
 
+    # 验证目录长名称及英制规格可投影为来源业务属性。
+    # self：当前测试用例或测试替身实例。
     def test_long_catalog_names_and_imperial_specs_project_source_business_attributes(self) -> None:
         import_catalog(
             self.config,
@@ -315,6 +341,8 @@ class MaterialSkuContractTests(unittest.TestCase):
         self.assertEqual(materials["M1043"]["material_type"], "edge")
         self.assertEqual(materials["M1043"]["color"], "Penelope FA44")
 
+    # 验证内存确认 Server 预览时保存已核验的长名称商品属性。
+    # self：当前测试用例或测试替身实例。
     def test_server_memory_confirmation_copies_verified_long_name_product_attributes(self) -> None:
         catalog = self._write_catalog(
             "server-long-name-products.xlsx",
@@ -422,6 +450,8 @@ class MaterialSkuContractTests(unittest.TestCase):
         self.assertEqual(detail[0]["color"], "Penelope FA44")
         self.assertEqual(detail[0]["thickness"], "19.1")
 
+    # 验证未匹配或已停用材料阻止写入，旧事实保持不变。
+    # self：当前测试用例或测试替身实例。
     def test_unmatched_and_disabled_materials_leave_old_facts_unchanged(self) -> None:
         good_preview = self._confirm_standard_materials()
         before = self._confirmed_material_snapshot()
@@ -459,6 +489,8 @@ class MaterialSkuContractTests(unittest.TestCase):
             persist_preview(self.config, disabled)
         self.assertEqual(self._confirmed_material_snapshot(), before)
 
+    # 验证目录刷新保留仍被业务事实引用的缺失商品。
+    # self：当前测试用例或测试替身实例。
     def test_catalog_refresh_preserves_referenced_missing_products(self) -> None:
         confirmed_preview = self._confirm_standard_materials()
         confirmed_facts = self._confirmed_material_snapshot()
@@ -493,6 +525,8 @@ class MaterialSkuContractTests(unittest.TestCase):
             database_stock_requirements(self.config, "CS901")
         self.assertEqual(self._confirmed_material_snapshot(), confirmed_facts)
 
+    # 验证所有保存 SKU 事实的表都声明并执行商品外键约束。
+    # self：当前测试用例或测试替身实例。
     def test_every_sku_fact_table_declares_and_enforces_product_foreign_key(self) -> None:
         self._import_standard_catalog()
         tables = {
@@ -608,6 +642,8 @@ class MaterialSkuContractTests(unittest.TestCase):
         finally:
             store.close()
 
+    # 验证旧版迁移保留材料消耗，并支持幂等重复执行。
+    # self：当前测试用例或测试替身实例。
     def test_legacy_migration_preserves_consumption_and_is_idempotent(self) -> None:
         database = self.root / "legacy.sqlite3"
         self._create_legacy_database(database)
@@ -639,6 +675,8 @@ class MaterialSkuContractTests(unittest.TestCase):
         self.assertEqual(result["materials"][0]["total_quantity"], 10)
         self.assertEqual(result["materials"][0]["remaining_quantity"], 6)
 
+    # 验证旧版迁移失败时回滚，修复后可重试。
+    # self：当前测试用例或测试替身实例。
     def test_legacy_migration_failure_rolls_back_and_can_retry(self) -> None:
         database = self.root / "legacy-failure.sqlite3"
         self._create_legacy_database(database, include_unresolved=True)
@@ -671,6 +709,8 @@ class MaterialSkuContractTests(unittest.TestCase):
             {"M-LEGACY", "M-UNKNOWN"},
         )
 
+    # 验证旧生产材料表即使为空也能升级到当前结构。
+    # self：当前测试用例或测试替身实例。
     def test_legacy_migration_upgrades_an_empty_production_material_table(self) -> None:
         database = self.root / "legacy-empty-production.sqlite3"
         self._create_legacy_database(database, include_production=False)
@@ -692,6 +732,10 @@ class MaterialSkuContractTests(unittest.TestCase):
                 0,
             )
 
+    # 创建独立旧版材料数据库，按选项包含生产消耗和未匹配材料。
+    # path：测试文件的读写路径。
+    # include_unresolved：是否加入无法匹配 SKU 的旧材料。
+    # include_production：是否加入旧生产材料消耗记录。
     @staticmethod
     def _create_legacy_database(
         path: Path,
@@ -758,6 +802,8 @@ class MaterialSkuContractTests(unittest.TestCase):
         connection.commit()
         connection.close()
 
+    # 读取旧版材料全部记录，供迁移前后对比。
+    # path：测试文件的读写路径。
     @staticmethod
     def _legacy_material_snapshot(path: Path) -> list[tuple]:
         with sqlite3.connect(path) as connection:
@@ -765,6 +811,8 @@ class MaterialSkuContractTests(unittest.TestCase):
                 "select * from material_items order by id"
             ).fetchall()
 
+    # 读取参与迁移的旧表及备份表结构。
+    # path：测试文件的读写路径。
     @staticmethod
     def _legacy_target_schema(path: Path) -> list[tuple]:
         with sqlite3.connect(path) as connection:
@@ -777,6 +825,8 @@ class MaterialSkuContractTests(unittest.TestCase):
                    order by type, name"""
             ).fetchall()
 
+    # 读取迁移后材料、生产消耗及外键校验结果。
+    # path：测试文件的读写路径。
     @staticmethod
     def _migration_snapshot(path: Path) -> dict[str, list[tuple]]:
         with connect_database(path) as connection:

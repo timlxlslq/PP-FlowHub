@@ -1,10 +1,8 @@
-"""Order index, synchronization evidence, and pending-issue state.
+"""订单索引、同步证据及待处理问题状态。
 
-This module connects external identity/report observations to the central
-SQLite index.  It does not make Server file metadata into production facts:
-source paths, fingerprints, AIMES identities, outbound evidence, and user
-decisions remain distinguishable records.  The module is large because the
-index is also the recovery point for dashboard status and pending work.
+本模块将外部身份和报表观察连接到中央 SQLite 索引，不把 Server 文件元数据
+直接当成生产事实。来源路径、指纹、AIMES 身份、出库证据及用户决定分别记录；
+索引也用于恢复看板状态和待处理工作。
 """
 
 from __future__ import annotations
@@ -22,6 +20,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -39,13 +38,14 @@ from .core import (
     save_factory_name_cache,
 )
 from .operation_log import log_database_statement
-from .fittings import is_fittings_report, select_latest_fittings, fittings_candidate
+from .fittings import is_fittings_report, select_latest_fittings, fittings_candidate, same_selected_fittings_source
 from .report_read_context import report_paths, preview_read_session, current_report_context
 from .hardware_source_decisions import load_source_decisions, decision_revision, commit_source_decisions, with_source_decisions
 from .database import (
     collapse_actual_installation_days,
     connect_database,
     enable_foreign_keys,
+    prepare_pending_session,
     ensure_outbound_document_factory_links,
     ensure_schema,
     server_material_identity_key,
@@ -70,14 +70,13 @@ FACTORY_RE = re.compile(r"^F\d+$", re.IGNORECASE)
 FACTORY_DATE_RE = re.compile(r"^F(\d{6})\d+$", re.IGNORECASE)
 INDEX_SCHEMA_VERSION = 11
 
-# The resident order service installs one serialized SQLite connection for the
-# central workflow database.  One-shot CLI/tests do not install it and keep
-# the previous connection ownership behavior.
+# 常驻订单服务为中央库登记一个串行使用的 SQLite 连接；一次性 CLI 和测试不登记，仍按原有方式管理连接所有权。
 _SHARED_WORKFLOW_PATH: Path | None = None
 _SHARED_WORKFLOW_CONNECTION: sqlite3.Connection | None = None
 
 
 def install_shared_workflow_connection(path: Path, connection: sqlite3.Connection) -> None:
+    """登记供当前进程复用的数据库连接并启用外键；path 为数据库路径，connection 为连接。"""
     global _SHARED_WORKFLOW_PATH, _SHARED_WORKFLOW_CONNECTION
     enable_foreign_keys(connection)
     _SHARED_WORKFLOW_PATH = path.resolve()
@@ -85,12 +84,14 @@ def install_shared_workflow_connection(path: Path, connection: sqlite3.Connectio
 
 
 def clear_shared_workflow_connection() -> None:
+    """清除进程内共享连接及路径登记，不在此关闭连接；无参数。"""
     global _SHARED_WORKFLOW_PATH, _SHARED_WORKFLOW_CONNECTION
     _SHARED_WORKFLOW_PATH = None
     _SHARED_WORKFLOW_CONNECTION = None
 
 
 def _shared_workflow_connection(path: Path) -> sqlite3.Connection | None:
+    """返回与 path 匹配的共享连接，未登记或路径不同则返回 None。"""
     if _SHARED_WORKFLOW_PATH == path.resolve():
         return _SHARED_WORKFLOW_CONNECTION
     return None
@@ -104,26 +105,25 @@ TRAVELER_FILENAME_RE = re.compile(r"^Work Order Traveler\(.+\)\.xlsx$", re.IGNOR
 
 
 def _now() -> str:
+    """返回精确到秒的本地当前时间字符串；无参数。"""
     return datetime.now().isoformat(timespec="seconds")
 
 
 def _order_id_from_factory_name(name: str) -> str:
+    """从工厂单名称 name 提取订单号前缀，无法识别时返回空字符串。"""
     match = ORDER_ID_FROM_FACTORY_RE.match(str(name or "").strip())
     return match.group(1).upper() if match else ""
 
 
 def _order_type(order_id: str) -> str:
+    """根据 order_id 前缀判断自有订单或 CUT TO SIZE 订单。"""
     return "cutToSize" if order_id.upper().startswith("CS") else "owned"
 
 
 def _server_root_candidates(config: Config) -> list[Path]:
-    """Return both production Server roots in stable order.
+    """按稳定顺序返回两个生产来源根目录；config 提供来源配置。
 
-    ``source_root`` remains the configured owned-order root for compatibility
-    with existing settings.  The sibling root is always derived from it so
-    dashboard refreshes and explicit Server processing share the same routing
-    rule as the production-files page.
-    """
+    另一类订单目录从已配置目录的同级推导，使看板刷新、Server 处理和生产文件页面使用相同路由。"""
     configured = config.source_root.expanduser()
     if configured.name.casefold() == "cut to size":
         candidates = [configured, configured.parent / "Optimized Orders"]
@@ -141,14 +141,17 @@ def _server_root_candidates(config: Config) -> list[Path]:
 
 
 def _available_server_roots(config: Config) -> list[Path]:
+    """筛选实际存在的生产来源目录；config 为来源配置。"""
     return [root for root in _server_root_candidates(config) if root.is_dir()]
 
 
 def _server_root_order_type(root: Path) -> str:
+    """根据目录 root 的名称判断其对应的订单类型。"""
     return "cutToSize" if root.name.casefold() == "cut to size" else "owned"
 
 
 def _server_folder_matches_root(folder: Path, root: Path, order_ids: set[str]) -> bool:
+    """判断目录是否属于当前扫描范围；folder 为候选目录，root 为来源根目录，order_ids 为允许的订单号。"""
     if not _is_standard_order_folder(folder.name):
         return True
     return (
@@ -158,44 +161,41 @@ def _server_folder_matches_root(folder: Path, root: Path, order_ids: set[str]) -
 
 
 def _is_standard_order_folder(name: str) -> bool:
-    """Recognize the two supported standard Server folder-name formats."""
+    """判断目录名称 name 是否符合支持的 PP 或 CS 标准订单格式。"""
     return bool(ORDER_FOLDER_RE.fullmatch(str(name or "")))
 
 
 def _is_traveler_file(path: Path) -> bool:
-    """Return whether a path has the production Work Order Traveler filename."""
+    """判断路径 path 的文件名是否符合生产用 Traveler 命名规则。"""
     return bool(TRAVELER_FILENAME_RE.fullmatch(path.name))
 
 
 def _folder_created_at(folder: Path) -> float:
-    """Return creation time where the filesystem exposes it, with a safe fallback."""
+    """返回目录 folder 的创建时间，文件系统不提供时使用可用的替代时间。"""
     stat = folder.stat()
     return float(getattr(stat, "st_birthtime", stat.st_ctime))
 
 
 def _path_created_at(path: Path, stat=None) -> float:
-    """Return filesystem creation time with a portable ctime fallback."""
+    """返回路径 path 的创建时间；stat 为可选的已有元数据，不支持创建时间时使用 ctime。"""
     stat = stat or path.stat()
     return float(getattr(stat, "st_birthtime", stat.st_ctime))
 
 
 def _display_timestamp(value: float) -> str:
+    """把秒级时间戳 value 转为精确到秒的本地时间文本。"""
     return datetime.fromtimestamp(value).isoformat(timespec="seconds")
 
 
 def _mtime_marker(stat) -> int:
-    """Return a SQLite-safe millisecond modification-time marker.
+    """从文件元数据 stat 生成可安全存入 SQLite 的毫秒修改时间标记。
 
-    Storing nanoseconds in SQLite's REAL-affinity column loses the lowest bits
-    when converted to IEEE-754 float. That made an unchanged file look
-    modified on the next sync. Millisecond precision still compares mtime and
-    size, while remaining exactly representable at current dates.
-    """
+    纳秒值在 REAL 浮点列中会丢失低位，导致未变文件被误判；毫秒值在当前日期范围内可精确表示。"""
     return int(stat.st_mtime_ns // 1_000_000)
 
 
 def _file_content_fingerprint(path: Path) -> str:
-    """Return a stable SHA-256 fingerprint for a readable Server report."""
+    """分块读取 Server 报表 path 并计算 SHA-256 内容指纹。"""
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -204,7 +204,7 @@ def _file_content_fingerprint(path: Path) -> str:
 
 
 def _material_source_fingerprint(store: "OrderIndexStore", path: Path) -> str:
-    """Return the current material workbook identity for audit and dedupe."""
+    """取得材料工作簿指纹，优先已有索引，否则读取文件；store 为索引库，path 为报表路径。"""
     row = store.connection.execute(
         "select content_fingerprint from source_files where path=?",
         (str(path),),
@@ -219,7 +219,7 @@ def _material_source_fingerprint(store: "OrderIndexStore", path: Path) -> str:
 
 
 def _material_fact_fingerprint(source_fingerprint: str, product_code: str) -> str:
-    """Bind parsed material evidence to the SKU selected at confirmation time."""
+    """将材料证据绑定到确认时选定的 SKU；source_fingerprint 为来源指纹，product_code 为 SKU。"""
     payload = "\x1f".join((
         str(source_fingerprint or "").strip(),
         str(product_code or "").strip().upper(),
@@ -236,12 +236,13 @@ def _replace_server_material_facts(
     mappings: InventoryMappings,
     observed_at: str,
 ) -> None:
-    """Replace one order's Server material facts as a single source set."""
+    """替换订单的基础材料来源集合，保留独立补切来源。
+
+    参数：store 为索引库；order_id 为订单号；path 为报表路径；parsed_materials 为板材；
+    parsed_edges 为颜色到封边数量的映射；mappings 为商品匹配规则；observed_at 为观察时间。"""
     normalized_order_id = order_id.upper()
-    # A base material workbook is a complete replacement for the base set,
-    # but nested ``*-recut`` board reports are additive sources.  Deleting all
-    # rows here used to erase a recut's newly inserted 18mm plywood whenever
-    # the root workbook happened to be visited later in the same scan.
+    # 基础材料工作簿完整替换基础集合，但嵌套补切报表是增量来源。
+    # 不能清空全部来源，否则同次扫描稍后读取根工作簿时会抹掉刚写入的补切夹板。
     existing_paths = store.connection.execute(
         "select distinct source_path from material_items "
         "where order_id=? and source_type='aihouse'",
@@ -269,7 +270,10 @@ def _insert_server_material_source_facts(
     mappings: InventoryMappings,
     observed_at: str,
 ) -> None:
-    """Insert one source-scoped Server material fact set."""
+    """把单个来源的材料唯一匹配到商品 SKU 后写入事实，并保留来源指纹。
+
+    参数：store 为索引库；order_id 为订单号；path 为来源路径；parsed_materials 为板材；
+    parsed_edges 为封边数量映射；mappings 为商品匹配及忽略规则；observed_at 为观察时间。"""
     from .order_workflow import _material_inventory_name
 
     normalized_order_id = order_id.upper()
@@ -325,7 +329,10 @@ def _replace_server_incremental_material_facts(
     mappings: InventoryMappings,
     observed_at: str,
 ) -> None:
-    """Replace one incremental Server report without replacing the base order set."""
+    """只替换指定增量报表的材料事实，不替换订单基础来源。
+
+    参数：store 为索引库；order_id 为订单号；path 为增量来源；parsed_materials 为板材；
+    parsed_edges 为封边数量映射；mappings 为商品规则；observed_at 为观察时间。"""
     normalized_order_id = order_id.upper()
     store.connection.execute(
         "delete from material_items where order_id=? and source_type='aihouse' and source_path=?",
@@ -338,6 +345,7 @@ def _replace_server_incremental_material_facts(
 
 
 def _server_scan_baseline(config: Config) -> float:
+    """解析 config 中的 Server 扫描基准时间，返回用于比较的时间戳。"""
     try:
         return datetime.fromisoformat(config.server_scan_baseline_at).timestamp()
     except ValueError:
@@ -345,6 +353,7 @@ def _server_scan_baseline(config: Config) -> float:
 
 
 def _valid_aimes_order_id(value: str) -> str:
+    """标准化并校验销售订单号 value，格式无效时返回空字符串。"""
     order_id = str(value or "").upper().strip()
     if not AIMES_ORDER_RE.fullmatch(order_id):
         return ""
@@ -352,6 +361,7 @@ def _valid_aimes_order_id(value: str) -> str:
 
 
 def _normalize_split_time(value: str) -> str:
+    """标准化拆单时间文本 value，统一日期分隔符和空白。"""
     text = str(value or "").strip().replace("/", "-")
     if not text:
         return ""
@@ -369,7 +379,7 @@ def _normalize_split_time(value: str) -> str:
 
 
 def _factory_order_date(factory_order: str) -> date | None:
-    """Extract the YYMMDD date embedded in a dated AIMES factory number."""
+    """从带日期的 AIMES 工厂单号 factory_order 中提取 YYMMDD 日期。"""
     match = FACTORY_DATE_RE.fullmatch(str(factory_order or "").strip().upper())
     if match is None:
         return None
@@ -384,12 +394,10 @@ def _factory_order_before_initial_date(
     split_time: str,
     initial_date: str,
 ) -> bool:
-    """Return whether a factory order predates the configured first scan date.
+    """判断工厂单是否早于首次扫描日期。
 
-    Dated factory numbers are the authoritative source for the historical rows
-    in question.  For other factory-number formats, use split_time when it is
-    available; malformed or missing dates are kept for normal review.
-    """
+    参数：factory_order 为工厂单号；split_time 为拆单时间；initial_date 为首次扫描日期。
+    优先使用工厂单号内嵌日期，其次使用拆单时间；缺失或无效日期保留为正常待检查项。"""
     try:
         cutoff = date.fromisoformat(str(initial_date or "").strip())
     except ValueError:
@@ -410,12 +418,9 @@ def _aimes_order_fingerprint(
     store: "OrderIndexStore",
     order_id: str,
 ) -> str:
-    """Return a stable fingerprint of one order's persisted AIMES identity.
+    """计算订单持久 AIMES 身份的稳定指纹；store 为索引库，order_id 为订单号。
 
-    The fingerprint deliberately excludes the local source label.  A
-    Server-derived factory row becoming AIMES-confirmed is not an AIMES
-    business change when the factory identity itself is unchanged.
-    """
+    指纹不含本地来源标签，避免同一身份从 Server 来源变成 AIMES 确认时被误判为业务变化。"""
     normalized_order = str(order_id or "").upper().strip()
     rows = store.connection.execute(
         """
@@ -443,7 +448,9 @@ def _order_is_before_initial_date(
     order_id: str,
     folder: Path,
 ) -> bool:
-    """Use factory-order dates first and folder creation as the fallback."""
+    """判断订单是否早于首次扫描，优先工厂单日期，否则使用目录创建时间。
+
+    参数：config 提供基准日期；store 为索引库；order_id 为订单号；folder 为来源目录。"""
     normalized_order = str(order_id or "").upper().strip()
     rows = store.connection.execute(
         """
@@ -466,6 +473,7 @@ def _order_is_before_initial_date(
 
 
 def _order_has_active_aimes_mapping(store: "OrderIndexStore", order_id: str) -> bool:
+    """检查订单是否有有效的 AIMES 身份映射；store 为索引库，order_id 为订单号。"""
     normalized_order = str(order_id or "").upper().strip()
     return store.connection.execute(
         """
@@ -484,7 +492,9 @@ def _order_shipped_watch_until(
     order_id: str,
     now: str,
 ) -> str:
-    """Use the latest known shipment time, falling back to policy creation."""
+    """计算出货后观察截止时间，优先最新出货时间。
+
+    参数：store 为索引库；order_id 为订单号；now 为没有可用出货时间时的基准时间。"""
     normalized_order = str(order_id or "").upper().strip()
     values = [
         str(row[0]).strip()
@@ -517,11 +527,12 @@ def _order_shipped_watch_until(
 
 
 def _datetime_timestamp(value: str) -> float:
-    """Parse naive or timezone-aware ISO text into one comparable instant."""
+    """把 ISO 时间文本 value 转为可比较的时间戳，兼容带时区或本地时间。"""
     return datetime.fromisoformat(str(value or "").strip()).timestamp()
 
 
 def _visible_aimes_row(row: dict) -> dict | None:
+    """校验并标准化 AIMES 记录 row，身份或归属无效时返回 None。"""
     factory_order = str(row.get("factory_order", "")).upper().strip()
     factory_name = str(row.get("factory_name", "")).strip()
     sales_order_name = str(row.get("sales_order_name", "")).upper().strip()
@@ -539,6 +550,7 @@ def _visible_aimes_row(row: dict) -> dict | None:
 
 
 def _aimes_ignore_key(row: dict) -> str:
+    """生成 AIMES 记录 row 的忽略键，优先工厂单号，无单号时使用名称内容指纹。"""
     factory_order = str(row.get("factory_order", "")).upper().strip()
     if factory_order:
         return f"factory:{factory_order}"
@@ -554,6 +566,7 @@ def _aimes_ignore_key(row: dict) -> str:
 
 
 def _aimes_row_issue(row: dict) -> dict | None:
+    """检查 AIMES 记录 row 的单号、测试标记和订单归属，返回问题说明或 None。"""
     factory_order = str(row.get("factory_order", "")).upper().strip()
     factory_name = str(row.get("factory_name", "")).strip()
     sales_order_name = str(row.get("sales_order_name", "")).upper().strip()
@@ -592,6 +605,9 @@ def _partition_aimes_rows(
     ignored_keys: set[str],
     assignments: dict[str, str] | None = None,
 ) -> tuple[list[dict], list[dict]]:
+    """将 AIMES 记录划分为可用数据及待处理问题。
+
+    参数：rows 为来源记录；ignored_keys 为已忽略身份；assignments 为可选人工订单归属映射。"""
     visible: list[dict] = []
     issues: list[dict] = []
     seen_issues: set[str] = set()
@@ -628,12 +644,10 @@ def _merge_aimes_recent_and_verified_rows(
     *,
     cached_rows: list[dict] | None = None,
 ) -> list[dict]:
-    """Combine the recent page with exact rows found outside that page.
+    """合并近期页面和窗口外精确核验记录。
 
-    AIMES returns recent-page rows and exact-verification rows separately.  A
-    verified row is still authoritative identity data and must be persisted;
-    it is not only evidence that the factory order was not deleted.
-    """
+    参数：recent_rows 为近期记录；verification_result 为核验结果；cached_rows 为可选已有记录。
+    核验找到的记录也是权威身份数据，须用于持久保存，不仅表示未被删除。"""
     cached_by_factory = {
         str(row.get("factory_order", "")).upper().strip(): row
         for row in (cached_rows or [])
@@ -641,6 +655,7 @@ def _merge_aimes_recent_and_verified_rows(
     }
 
     def retain_cached_split_time(row: dict) -> dict:
+        """为记录 row 补回已有拆单时间，仅在本次返回空值时使用缓存，不覆盖新时间。"""
         current = dict(row)
         if str(current.get("split_time", "")).strip():
             return current
@@ -666,7 +681,7 @@ def _merge_aimes_recent_and_verified_rows(
 
 
 def _business_validation_message(exc: Exception) -> str:
-    """Convert parser/runtime failures into an actionable order explanation."""
+    """将解析或运行异常 exc 转换为便于用户处理的订单校验说明。"""
     message = str(exc).strip()
     lowered = message.casefold()
     if "找不到文件名包含 material" in message or "missing material" in lowered:
@@ -683,6 +698,7 @@ def _business_validation_message(exc: Exception) -> str:
 
 
 def _business_aimes_message(exc: Exception) -> str:
+    """将 AIMES 异常 exc 转换为对应查询阶段和错误类型的中文处理提示。"""
     raw_message = str(exc).strip()
     message = raw_message.casefold()
     code = str(getattr(exc, "code", "") or "").strip().casefold()
@@ -700,6 +716,7 @@ def _business_aimes_message(exc: Exception) -> str:
 
 
 def _business_server_message(exc: Exception) -> str:
+    """将 Server 异常 exc 转换为目录或权限相关的中文处理提示。"""
     message = str(exc).strip().casefold()
     if "所选文件夹" in message or "订单文件夹" in message:
         return str(exc).strip()
@@ -709,12 +726,13 @@ def _business_server_message(exc: Exception) -> str:
 
 
 def _business_report_message(kind: str, path: Path) -> str:
+    """生成报表读取失败提示；kind 为报表类别，path 为报表路径。"""
     report_name = "板材清单" if kind == "board" else "Fittingslist"
     return f"{report_name} {path.name} 无法读取。请确认文件完整、未被占用且格式正确，修正后重新扫描 Server。"
 
 
 def _source_path_in_dashboard_scope(root: Path, value: str) -> bool:
-    """Return whether an indexed server path belongs to a dashboard folder we scan."""
+    """判断已索引来源是否属于看板扫描范围；root 为扫描根目录，value 为来源路径。"""
     try:
         relative = Path(value).relative_to(root)
     except ValueError:
@@ -727,10 +745,29 @@ def _source_path_in_dashboard_scope(root: Path, value: str) -> bool:
     return True
 
 
+def pending_check_session(function):
+    """一次命令内共享临时检查结果；App 服务沿用已有连接，命令退出后普通问题消失。"""
+    @wraps(function)
+    def run(config, *args, **kwargs):
+        if _shared_workflow_connection(config.workflow_database) is not None or getattr(config, "workflow_connection", None) is not None:
+            return function(config, *args, **kwargs)
+        store = OrderIndexStore(config.workflow_database)
+        install_shared_workflow_connection(config.workflow_database, store.connection)
+        try:
+            return function(config, *args, **kwargs)
+        finally:
+            clear_shared_workflow_connection()
+            store.close()
+    return run
+
+
 class OrderIndexStore:
-    """Persistent order/factory/source index used by the order dashboard."""
+    """订单看板使用的持久订单、工厂单及来源索引。"""
 
     def __init__(self, path: Path, *, connection: sqlite3.Connection | None = None):
+        """建立订单索引存储，复用连接或准备数据库结构，并创建临时校验表。
+
+        参数：path 为数据库路径；connection 为可选外部连接，不提供时优先使用已登记共享连接。"""
         shared_connection = connection is None and _shared_workflow_connection(path) is not None
         if connection is None:
             connection = _shared_workflow_connection(path)
@@ -744,6 +781,7 @@ class OrderIndexStore:
             self.connection = connect_database(path)
         else:
             self.connection = enable_foreign_keys(connection)
+        prepare_pending_session(self.connection)
         self.connection.execute("""create temp table if not exists preview_validation(
             order_id text primary key,status text not null,message text not null)""")
         self.connection.set_trace_callback(lambda statement: log_database_statement(self.path, statement))
@@ -948,14 +986,10 @@ class OrderIndexStore:
             create index if not exists idx_active_issues_status on active_issues(status, last_seen desc);
             """
         )
-        # The old one-month folder-ignore feature was removed. Drop its
-        # obsolete table from databases created by earlier App versions.
+        # 旧的按月忽略目录功能已移除，删除旧版 App 留下的无效表。
         self.connection.execute("drop table if exists ignored_server_folders")
         collapse_actual_installation_days(self.connection)
-        # Versions before the incremental index stored nanoseconds in the
-        # REAL-affinity column. Normalize those old values once so installing
-        # the optimization does not force every existing report through a
-        # needless full reparse on the first refresh.
+        # 旧版索引把纳秒存入 REAL 列；在此一次性标准化，避免首次刷新让所有未变报表重新解析。
         self.connection.execute(
             """
             update source_files
@@ -1044,9 +1078,7 @@ class OrderIndexStore:
         ).fetchone() and self.connection.execute(
             "select 1 from sqlite_master where type='table' and name='outbound_document_factories'"
         ).fetchone():
-            # Existing outbound rows already carry the inventory-system issue
-            # time. Backfill once so the dashboard's monthly completion count
-            # is based on the last factory shipment, not a later index refresh.
+            # 已有出库行保存了库存系统开单时间；一次性补齐，使月度完成数量依据最后工厂单出货时间，而不是后续索引刷新时间。
             self.connection.execute(
                 """
                 update factory_orders
@@ -1064,15 +1096,9 @@ class OrderIndexStore:
                 """
             )
         self.connection.execute("update orders set stage = '已设计' where stage = '待拆单'")
-        # Current issues are created by the config-aware sync path below.  Do
-        # not reconstruct them from every unresolved factory row while merely
-        # opening the database: that would revive historical rows which are
-        # outside the user's configured initial scan date.
+        # 当前问题由读取配置的同步流程创建；仅打开数据库时不从所有未确认工厂单重建问题，避免恢复初始扫描日期之前的历史项。
         if version < 7:
-            # Repair the historical false warning created before the server
-            # report parser passed the unique order-folder hint into fittings
-            # candidates.  A real PP/CS folder is an unambiguous owner, so it
-            # is safe to confirm it without waiting for another full scan.
+            # 修复旧解析器未传入唯一订单目录提示导致的误报；真实 PP/CS 目录可明确归属，无需等下一次完整扫描。
             stale_rows = self.connection.execute(
                 """
                 select factory_order, source_folder
@@ -1124,10 +1150,12 @@ class OrderIndexStore:
         self.connection.commit()
 
     def close(self) -> None:
+        """仅关闭本对象拥有的数据库连接；无显式参数，不关闭借用连接。"""
         if self._owns_connection:
             self.connection.close()
 
     def temporary_order(self, source_folder: str) -> dict | None:
+        """按来源目录 source_folder 查询临时订单及处理状态，未找到时返回 None。"""
         row = self.connection.execute(
             """
             select temporary_id, folder_name, source_folder, folder_created_at,
@@ -1183,6 +1211,15 @@ class OrderIndexStore:
         handling_mode: str = "",
         reference_order_ids: list[str] | None = None,
     ) -> None:
+        """新增或更新临时订单，保留未提供的已有处理信息。
+
+        参数：temporary_id 为标识；folder_name、source_folder 为目录名和路径；folder_created_at 为创建时间；
+        content_fingerprint 为内容指纹；traveler_path、traveler_fingerprint 为生成文件及指纹；
+        traveler_include_hardware 为是否含五金；traveler_status、traveler_generated_at 为生成状态及时间；
+        processing_status 为处理状态；outbound_status、outbound_document 为出库状态及单据；
+        processed_at、outbound_at 为处理及出库时间；last_error 为错误；server_scan_policy 为扫描策略；
+        server_scan_watch_until、server_scan_policy_updated_at 为观察截止及策略更新时间；
+        handling_mode 为处理方式；reference_order_ids 为关联订单号列表。"""
         previous = self.temporary_order(source_folder) or {}
         self.connection.execute(
             """
@@ -1245,6 +1282,7 @@ class OrderIndexStore:
         )
 
     def ignored_aimes_keys(self) -> set[str]:
+        """读取全部已忽略 AIMES 身份键；无显式参数。"""
         return {
             row[0]
             for row in self.connection.execute(
@@ -1253,6 +1291,7 @@ class OrderIndexStore:
         }
 
     def ignored_aimes_factories(self) -> list[dict]:
+        """读取已忽略工厂单及忽略原因，供管理界面展示；无显式参数。"""
         rows = self.connection.execute(
             """
             select ignore_key, factory_order, factory_name, sales_order_name, reason, ignored_at
@@ -1274,6 +1313,7 @@ class OrderIndexStore:
         ]
 
     def aimes_assignments(self) -> dict[str, str]:
+        """返回人工指定的 AIMES 身份到订单号的映射；无显式参数。"""
         return {
             row[0]: row[1]
             for row in self.connection.execute(
@@ -1282,6 +1322,7 @@ class OrderIndexStore:
         }
 
     def assigned_aimes_factories(self) -> list[dict]:
+        """读取人工指定订单归属的工厂单记录；无显式参数。"""
         rows = self.connection.execute(
             """
             select ignore_key, factory_order, factory_name, original_sales_order_name,
@@ -1305,11 +1346,11 @@ class OrderIndexStore:
         ]
 
     def replace_aimes_review_rows(self, issues: list[dict]) -> None:
-        """Persist the current non-standard AIMES rows for later user action."""
-        self.connection.execute("delete from aimes_review_rows")
+        """替换当前非标准 AIMES 待处理记录；issues 为待用户处理的问题列表。"""
+        self.connection.execute("delete from pending_aimes_reviews")
         self.connection.executemany(
             """
-            insert into aimes_review_rows(
+            insert into pending_aimes_reviews(
                 ignore_key, factory_order, factory_name, sales_order_name,
                 reason, suggested_order_id, split_time, last_seen
             ) values(?,?,?,?,?,?,?,?)
@@ -1331,11 +1372,12 @@ class OrderIndexStore:
         )
 
     def aimes_review_rows(self) -> list[dict]:
+        """读取当前 AIMES 待处理记录；无显式参数。"""
         rows = self.connection.execute(
             """
             select ignore_key, factory_order, factory_name, sales_order_name,
                    reason, suggested_order_id, split_time, last_seen
-            from aimes_review_rows
+            from pending_aimes_reviews
             order by last_seen desc, factory_order
             """
         ).fetchall()
@@ -1355,18 +1397,21 @@ class OrderIndexStore:
         ]
 
     def aimes_review_row(self, ignore_key: str) -> dict | None:
+        """按 ignore_key 查找一项 AIMES 待处理记录，未找到时返回 None。"""
         return next(
             (row for row in self.aimes_review_rows() if row["ignore_key"] == ignore_key),
             None,
         )
 
     def remove_aimes_review_row(self, ignore_key: str) -> None:
+        """删除 ignore_key 对应的 AIMES 待处理记录，不在此提交事务。"""
         self.connection.execute(
-            "delete from aimes_review_rows where ignore_key = ?",
+            "delete from pending_aimes_reviews where ignore_key = ?",
             (ignore_key,),
         )
 
     def assign_aimes_factory(self, issue: dict, order_id: str) -> None:
+        """保存人工订单归属并移除待处理项；issue 为问题记录，order_id 为指定订单号。"""
         self.connection.execute(
             """
             insert into aimes_order_assignments(
@@ -1392,6 +1437,7 @@ class OrderIndexStore:
         self.remove_aimes_review_row(issue["ignore_key"])
 
     def restore_aimes_assignment(self, ignore_key: str) -> None:
+        """撤销 ignore_key 对应的人工归属，并删除该指定归属下的工厂单索引行。"""
         row = self.connection.execute(
             "select factory_order, assigned_order_id from aimes_order_assignments where ignore_key = ?",
             (ignore_key,),
@@ -1407,6 +1453,7 @@ class OrderIndexStore:
             )
 
     def ignore_aimes_factory(self, issue: dict) -> None:
+        """将问题记录 issue 标记为忽略，移除对应人工归属、工厂单索引及待处理项。"""
         self.connection.execute(
             "delete from aimes_order_assignments where ignore_key = ?",
             (issue["ignore_key"],),
@@ -1440,6 +1487,7 @@ class OrderIndexStore:
         self.remove_aimes_review_row(issue["ignore_key"])
 
     def restore_aimes_factory(self, ignore_key: str) -> None:
+        """取消身份键 ignore_key 的忽略标记，使后续同步可重新处理。"""
         self.connection.execute(
             "delete from ignored_aimes_factory_orders where ignore_key = ?",
             (ignore_key,),
@@ -1457,6 +1505,10 @@ class OrderIndexStore:
         server_seen: str = "",
         aimes_seen: str = "",
         ) -> None:
+        """新增或更新订单来源和阶段，已中止状态不被普通更新覆盖。
+
+        参数：order_id 为订单号；order_type 为可选类型；source_folder 为来源目录；source_folder_mtime 为修改时间；
+        validation_status 为可选临时校验结果；stage 为可选阶段；server_seen、aimes_seen 为两侧最近观察时间。"""
         order_id = order_id.upper()
         current = self.connection.execute("select stage,order_type from orders where order_id=?",(order_id,)).fetchone()
         self.connection.execute("""insert into orders(order_id,order_type,source_folder,source_folder_mtime,stage,last_server_seen,last_aimes_seen,updated_at)
@@ -1474,12 +1526,15 @@ class OrderIndexStore:
             self.set_validation(order_id, validation_status)
 
     def set_validation(self, order_id: str, status: str, message: str = "") -> None:
-        """This operation's validation result lives only in SQLite TEMP memory."""
+        """将本次校验结果写入 SQLite 临时表，不持久保存为业务事实。
+
+        参数：order_id 为订单号；status 为校验状态；message 为说明。"""
         self.connection.execute("""insert into preview_validation(order_id,status,message) values(?,?,?)
             on conflict(order_id) do update set status=excluded.status,message=excluded.message""",
             (order_id,status,message))
 
     def server_scan_policy(self, order_id: str) -> dict | None:
+        """读取 order_id 的 Server 扫描策略、身份指纹及观察截止时间。"""
         row = self.connection.execute(
             """
             select order_id, source_folder, server_scan_policy,
@@ -1509,6 +1564,9 @@ class OrderIndexStore:
         watch_until: str = "",
         updated_at: str = "",
     ) -> None:
+        """保存订单扫描策略。
+
+        参数：order_id 为订单号；policy 为策略；aimes_fingerprint 为身份指纹；watch_until 为截止时间；updated_at 为更新时间。"""
         self.connection.execute(
             """
             update orders
@@ -1535,11 +1593,10 @@ class OrderIndexStore:
         planned_days: list[dict[str, str]],
         actual_days: list[dict[str, str]],
     ) -> dict:
-        """Save user-maintained order note and single-day installation facts.
+        """保存人工备注及计划、实际安装开始日期，每类最多一个日期。
 
-        Server/AIMES upserts never touch these fields.  Both planned and actual
-        installation are represented by at most one start-date row.
-        """
+        参数：order_id 为订单号；user_note 为备注；planned_days、actual_days 为计划及实际日期记录。
+        Server 和 AIMES 的同步更新不触碰这些人工字段。"""
         order_id = str(order_id or "").strip().upper()
         if not order_id:
             raise ValueError("保存订单信息需要订单号")
@@ -1615,10 +1672,7 @@ class OrderIndexStore:
                     for date_type, rows in normalized.items()
                 },
             }
-        # The SwiftUI dashboard applies this response to its full in-memory
-        # order snapshot.  Return the complete summaries so saving an
-        # order-level annotation cannot be mistaken for a partial dashboard
-        # response and clear every other row.
+        # SwiftUI 看板用此响应替换完整内存快照，因此返回完整摘要，避免保存一条订单备注后清空其他订单。
         return {"saved": True, "order": summary, "orders": self.summaries()}
 
     def upsert_factory(
@@ -1642,6 +1696,13 @@ class OrderIndexStore:
         server_seen: str = "",
         aimes_seen: str = "",
     ) -> None:
+        """新增或更新工厂单身份、报表及业务状态，未提供的可选状态沿用现有值。
+
+        参数：factory_order 为工厂单号；order_id 为归属；factory_name 为名称；sales_order_name 为销售单；
+        split_time 为拆单时间；name_source 为名称来源；source_folder 为目录；report_state 为报表状态；
+        ownership_status 为归属状态；has_hardware 为是否有五金；optimized 为优化标志；
+        outbound_status、outbound_document、outbound_mode、outbound_fingerprint 为出库状态、单据、方式及指纹；
+        server_seen、aimes_seen 为两侧最近观察时间。"""
         factory_order = factory_order.upper()
         current = self.connection.execute(
             """
@@ -1740,7 +1801,10 @@ class OrderIndexStore:
         split_time: str,
         seen_at: str,
     ) -> None:
-        """Update AIMES-owned identity fields without erasing Server-derived state."""
+        """更新 AIMES 管理的身份字段，保留 Server 派生状态。
+
+        参数：factory_order 为工厂单号；order_id 为归属；factory_name 为名称；sales_order_name 为销售单；
+        split_time 为拆单时间；seen_at 为观察时间。"""
         factory_order = factory_order.upper()
         self.connection.execute(
             """
@@ -1786,7 +1850,9 @@ class OrderIndexStore:
         )
 
     def mark_aimes_deleted(self, factory_orders: list[str], *, verified_at: str) -> int:
-        """Retain a deleted AIMES identity for audit, while making it inactive."""
+        """将核验删除的 AIMES 身份置为失效并保留审计信息。
+
+        参数：factory_orders 为已核验缺失的工厂单号；verified_at 为核验时间。"""
         selected = sorted({str(value).upper().strip() for value in factory_orders if str(value).strip()})
         if not selected:
             return 0
@@ -1801,7 +1867,7 @@ class OrderIndexStore:
         )
         self.connection.execute(
             f"""
-            update active_issues
+            update pending_issues
             set status='resolved', resolved_at=?
             where status='open' and factory_order in ({placeholders})
             """,
@@ -1833,6 +1899,10 @@ class OrderIndexStore:
         changed_at: str,
         metadata: dict | None = None,
     ) -> str:
+        """更新来源文件元数据、身份及内容指纹。
+
+        参数：path 为文件路径；source_folder 为所属目录；kind 为报表类型；order_id、factory_order 为归属；
+        changed_at 为变化时间；metadata 为可选已读取元数据，省略时自行读取。"""
         if metadata is None:
             stat = path.stat()
             modified_at = float(_mtime_marker(stat))
@@ -1848,10 +1918,8 @@ class OrderIndexStore:
             """,
             (str(path),),
         ).fetchone()
-        # A directory mtime is filesystem bookkeeping, not a source-data
-        # change.  Keep the folder row for discovery, grouping, and deletion
-        # detection, but do not advance its business baseline on mtime-only
-        # changes.  Recognized workbooks retain the normal mtime/size check.
+        # 目录修改时间属于文件系统记录，不代表业务资料变化；保留目录行用于发现、分组及删除检测，
+        # 仅目录时间变化不推进业务基准，已识别工作簿仍按修改时间和大小检查。
         metadata_changed = (
             previous is None
             if kind == "folder"
@@ -1862,8 +1930,7 @@ class OrderIndexStore:
             try:
                 current_fingerprint = _file_content_fingerprint(path)
             except OSError:
-                # A report which cannot be read must remain a change so the
-                # normal parser/error path can ask the user to repair it.
+                # 报表无法读取时仍保留为变化，让正常解析及错误流程提示用户修复。
                 current_fingerprint = ""
                 changed = True
             else:
@@ -1878,9 +1945,7 @@ class OrderIndexStore:
             if factory_order and not previous[5]:
                 identity_changed = True
         if not changed and not identity_changed:
-            # ``last_seen`` is diagnostic-only. Avoid a network-triggered
-            # SQLite upsert for an unchanged source entry; the scan result
-            # itself now reports the current scope and counts.
+            # last_seen 仅用于诊断；来源未变时避免网络扫描触发 SQLite 更新，本次扫描范围和数量由扫描结果报告。
             return ""
         change_type = "added" if previous is None else ("modified" if changed else "")
         self.connection.execute(
@@ -1917,6 +1982,9 @@ class OrderIndexStore:
         path: str = "",
         observed_at: str | None = None,
     ) -> None:
+        """追加一条同步变化记录。
+
+        参数：severity 为级别；kind 为变化类型；message 为说明；order_id、factory_order 为归属；path 为来源；observed_at 为观察时间。"""
         self.connection.execute(
             """
             insert into sync_changes(observed_at, severity, kind, order_id, factory_order, path, message)
@@ -1936,10 +2004,13 @@ class OrderIndexStore:
         message: str,
         seen_at: str | None = None,
     ) -> None:
+        """按问题键新增或更新待处理项。
+
+        参数：issue_key 为唯一键；kind 为类型；order_id、factory_order 为归属；path 为来源；message 为说明；seen_at 为观察时间。"""
         seen_at = seen_at or _now()
         self.connection.execute(
             """
-            insert into active_issues(
+            insert into pending_issues(
                 issue_key, kind, order_id, factory_order, path, message,
                 status, first_seen, last_seen, resolved_at
             ) values(?,?,?,?,?,?, 'open', ?, ?, '')
@@ -1966,15 +2037,25 @@ class OrderIndexStore:
         )
 
     def active_issues(self) -> list[dict]:
+        """读取未解决的待处理问题列表；无显式参数。"""
         rows = self.connection.execute(
             """
             select issue_key, kind, order_id, factory_order, path, message,
                    status, first_seen, last_seen, resolved_at
-            from active_issues
+            from pending_issues
             where status = 'open'
             order by last_seen desc, issue_key
             """
         ).fetchall()
+        from .inventory import pending_inventory_operations
+        from .aicnc_import import enabled as aicnc_enabled
+        maintenance = []
+        if aicnc_enabled(self.connection):
+            remaining = self.connection.execute("select count(*) from aicnc_legacy_watch where retired_at=''").fetchone()[0]
+            dismissed = self.connection.execute("select value from aicnc_import_settings where key='cleanup_dismissed'").fetchone()
+            if remaining == 0 and (not dismissed or dismissed[0] != '1'):
+                maintenance = [dict(issue_key='aicnc_legacy_retired',kind='aicnc_legacy_retired',order_id='',factory_order='',path='',status='open',
+                    message='旧版文件夹监控已全部结束，可以安排清理旧版监控代码及相关数据库结构',first_seen='',last_seen='',resolved_at='')]
         return [
             {
                 "issue_key": row[0],
@@ -1989,19 +2070,19 @@ class OrderIndexStore:
                 "resolved_at": row[9],
             }
             for row in rows
-        ]
+        ] + maintenance + pending_inventory_operations(self.path, connection=self.connection)
 
     def delete_stale_factory_ownership_issues(self, initial_date: str) -> int:
-        """Delete open ownership issues for factory orders before initial_date."""
+        """删除早于 initial_date 的历史工厂单未解决归属问题，返回删除数量。"""
         rows = self.connection.execute(
             """
-            select active_issues.issue_key, active_issues.factory_order,
+            select pending_issues.issue_key, pending_issues.factory_order,
                    coalesce(factory_orders.split_time, '')
-            from active_issues
+            from pending_issues
             left join factory_orders
-              on factory_orders.factory_order = active_issues.factory_order
-            where active_issues.kind = 'factory_ownership'
-              and active_issues.status = 'open'
+              on factory_orders.factory_order = pending_issues.factory_order
+            where pending_issues.kind = 'factory_ownership'
+              and pending_issues.status = 'open'
             """
         ).fetchall()
         stale_keys = [
@@ -2013,14 +2094,15 @@ class OrderIndexStore:
             return 0
         placeholders = ",".join("?" for _ in stale_keys)
         self.connection.execute(
-            f"delete from active_issues where issue_key in ({placeholders})",
+            f"delete from pending_issues where issue_key in ({placeholders})",
             stale_keys,
         )
         return len(stale_keys)
 
     def resolve_active_issue(self, issue_key: str, *, resolved_at: str | None = None) -> None:
+        """将 issue_key 对应的问题标为解决；resolved_at 为可选解决时间。"""
         self.connection.execute(
-            "update active_issues set status = 'resolved', resolved_at = ? where issue_key = ?",
+            "update pending_issues set status = 'resolved', resolved_at = ? where issue_key = ?",
             (resolved_at or _now(), issue_key),
         )
 
@@ -2030,6 +2112,9 @@ class OrderIndexStore:
         *,
         scoped_folders: set[str] | None = None,
     ) -> None:
+        """关闭已不在本次问题集合中的待处理项。
+
+        参数：issue_keys 为仍有效的问题键；scoped_folders 为可选目录限制。"""
         scope_sql = ""
         scope_args: list[str] = []
         if scoped_folders is not None:
@@ -2042,14 +2127,14 @@ class OrderIndexStore:
             scope_sql = " and (" + " or ".join(clauses) + ")"
         if issue_keys:
             placeholders = ",".join("?" for _ in issue_keys)
-            sql = f"update active_issues set status = 'resolved', resolved_at = ? where status = 'open' and issue_key not in ({placeholders}){scope_sql}"
+            sql = f"update pending_issues set status = 'resolved', resolved_at = ? where status = 'open' and issue_key not in ({placeholders}){scope_sql}"
             self.connection.execute(sql, (_now(), *sorted(issue_keys), *scope_args))
         else:
-            sql = f"update active_issues set status = 'resolved', resolved_at = ? where status = 'open'{scope_sql}"
+            sql = f"update pending_issues set status = 'resolved', resolved_at = ? where status = 'open'{scope_sql}"
             self.connection.execute(sql, (_now(), *scope_args))
 
     def clear_server_folder_pending_records(self, folders: set[str]) -> None:
-        """Remove stale lightweight baselines and close issues for excluded folders."""
+        """清理被排除目录的轻量扫描基准并关闭相关问题；folders 为目录路径集合。"""
         for folder in sorted(path.rstrip("/") for path in folders if path):
             prefix = folder + "/%"
             self.connection.execute(
@@ -2058,7 +2143,7 @@ class OrderIndexStore:
             )
             self.connection.execute(
                 """
-                update active_issues
+                update pending_issues
                 set status = 'resolved', resolved_at = ?
                 where status = 'open' and (path = ? or path like ?)
                 """,
@@ -2066,6 +2151,7 @@ class OrderIndexStore:
             )
 
     def current_issue(self, issue_key: str) -> dict | None:
+        """按 issue_key 查找当前未解决问题，未找到时返回 None。"""
         return next((issue for issue in self.active_issues() if issue["issue_key"] == issue_key), None)
 
     def update_source_file_identity(
@@ -2075,12 +2161,17 @@ class OrderIndexStore:
         order_id: str = "",
         factory_order: str = "",
     ) -> None:
+        """更新已索引文件身份；path 为文件路径，order_id 为订单号，factory_order 为工厂单字段。"""
         self.connection.execute(
             "update source_files set order_id = ?, factory_order = ? where path = ?",
             (order_id.upper(), factory_order.upper(), str(path)),
         )
     def record_run(self, started: str, finished: str, *, aimes_attempted: bool, aimes_succeeded: bool,
                    aimes_count: int, server_folder_count: int, error: str = "") -> None:
+        """记录一次同步运行结果。
+
+        参数：started、finished 为起止时间；aimes_attempted、aimes_succeeded 为 AIMES 尝试及成功标志；
+        aimes_count 为读取数量；server_folder_count 为扫描目录数；error 为可选错误说明。"""
         self.connection.execute(
             """
             insert into sync_runs(started_at, finished_at, aimes_attempted, aimes_succeeded, aimes_count, server_folder_count, error)
@@ -2090,9 +2181,11 @@ class OrderIndexStore:
         )
 
     def commit(self) -> None:
+        """提交当前数据库事务；无显式参数。"""
         self.connection.commit()
 
     def latest_sync(self) -> dict:
+        """返回最近一次同步记录，尚无记录时返回 None；无显式参数。"""
         row = self.connection.execute(
             "select started_at, finished_at, aimes_attempted, aimes_succeeded, aimes_count, server_folder_count, error from sync_runs order by id desc limit 1"
         ).fetchone()
@@ -2109,6 +2202,7 @@ class OrderIndexStore:
         }
 
     def has_successful_aimes_sync_on(self, day: str) -> bool:
+        """检查日期 day 是否已有成功的 AIMES 同步记录。"""
         row = self.connection.execute(
             "select 1 from sync_runs where aimes_succeeded = 1 and finished_at like ? limit 1",
             (f"{day}%",),
@@ -2116,9 +2210,11 @@ class OrderIndexStore:
         return row is not None
 
     def latest_change_id(self) -> int:
+        """返回最新同步变化编号，无记录时返回零；无显式参数。"""
         return int(self.connection.execute("select coalesce(max(id), 0) from sync_changes").fetchone()[0])
 
     def server_scan_xml_state(self) -> list[dict[str, object]]:
+        """读取 Server XML 扫描基准记录；无显式参数。"""
         rows = self.connection.execute(
             """
             select path, source_folder, kind, order_id, modified_at, last_seen
@@ -2145,7 +2241,9 @@ class OrderIndexStore:
         *,
         observed_at: str,
     ) -> None:
-        """Replace XML scan baselines for explicitly completed folders only."""
+        """仅替换明确完成扫描的目录基准。
+
+        参数：folders 为完成目录；entries 为 XML 元数据条目；observed_at 为观察时间。"""
         normalized_folders = sorted({str(Path(folder)) for folder in folders if str(folder)})
         for folder in normalized_folders:
             self.connection.execute(
@@ -2183,6 +2281,7 @@ class OrderIndexStore:
             )
 
     def latest_changes(self, limit: int = 20, after_id: int | None = None) -> list[dict]:
+        """读取同步变化；limit 为最大数量，after_id 为可选的起始变化编号。"""
         if after_id is None:
             rows = self.connection.execute(
                 "select id, observed_at, severity, kind, order_id, factory_order, path, message from sync_changes order by id desc limit ?",
@@ -2207,6 +2306,7 @@ class OrderIndexStore:
         ]
 
     def summaries(self, *, persist: bool = True) -> list[dict]:
+        """依据工厂单事实及安装安排组装订单看板摘要；persist 决定是否保存并提交派生阶段变化。"""
         orders = self.connection.execute(
             "select order_id, order_type, source_folder, source_folder_mtime, coalesce((select v.status from temp.preview_validation v where v.order_id=orders.order_id),'正常'), stage, case when exists(select 1 from material_items m where m.order_id=orders.order_id and m.quantity>0) then '板材 · 封边' else '待校验' end, last_server_seen, last_aimes_seen, updated_at, coalesce((select v.message from temp.preview_validation v where v.order_id=orders.order_id),''), user_note from orders order by order_id"
         ).fetchall()
@@ -2326,11 +2426,7 @@ class OrderIndexStore:
                 stage = "已中止"
             elif is_temporary:
                 if expected and shipped == expected:
-                    # A temporary folder can still represent a completed
-                    # order after manual processing.  Outbound facts are the
-                    # terminal business state; do not keep such an order in
-                    # the default unfinished list merely because its source
-                    # folder was non-standard.
+                    # 临时目录经人工处理后也可能表示已完成订单；以出库事实为最终状态，不因来源名称非标准而继续留在默认未完成列表。
                     stage = "已出货"
                 else:
                     stage = "待人工处理"
@@ -2350,10 +2446,7 @@ class OrderIndexStore:
                 stage = "部分生产"
             else:
                 stage = "已优化"
-            # Keep the separately persisted validation failure stage intact;
-            # the dashboard still presents ``数据异常`` from validation_status.
-            # For normal rows, persist the derived business stage so restart
-            # and direct SQLite reads agree with the factory-order evidence.
+            # 校验失败信息单独展示；普通订单保存由工厂单事实推导的业务阶段，使重启和直接数据库读取保持一致。
             if persist and row[5] != stage:
                 self.connection.execute(
                     "update orders set stage = ?, updated_at = ? where order_id = ?",
@@ -2408,6 +2501,7 @@ class OrderIndexStore:
 
 
 def _report_files(folder: Path) -> list[tuple[Path, str]]:
+    """发现 folder 内的五金、板材和材料报表并标记类型，跳过临时工作簿。"""
     result = []
     for path in report_paths(folder):
         if path.name.startswith("~$"):
@@ -2423,7 +2517,7 @@ def _report_files(folder: Path) -> list[tuple[Path, str]]:
 
 
 def _is_recut_material_source(path: Path) -> bool:
-    """Return whether a material source path is inside a recut scope."""
+    """判断材料路径 path 是否位于补切目录范围。"""
     return any(
         part.casefold() == "recut" or part.casefold().endswith("-recut")
         for part in path.expanduser().resolve().parts[:-1]
@@ -2431,7 +2525,7 @@ def _is_recut_material_source(path: Path) -> bool:
 
 
 def _is_recut_server_report(path: Path, source_folder: Path) -> bool:
-    """Return whether a recognized report belongs to a nested recut scope."""
+    """判断报表 path 是否属于 source_folder 内的嵌套补切目录。"""
     try:
         relative_parts = path.expanduser().resolve().relative_to(
             source_folder.expanduser().resolve()
@@ -2448,13 +2542,11 @@ def _reconcile_authoritative_server_material_sources(
     store: "OrderIndexStore",
     folders_by_order: dict[str, set[str]],
 ) -> set[str]:
-    """Retire duplicate paths only when a complete equivalent replacement exists.
+    """仅在存在完整等价替代来源时退役重复材料路径。
 
-    Folder discovery, missing workbooks and failed parsing are not permission
-    to delete confirmed material facts.  Compare whole source sets per order;
-    a shared workbook must never cause another order's facts to be removed.
-    Explicit material confirmation remains responsible for quantity changes.
-    """
+    参数：store 为索引库；folders_by_order 为订单到来源目录集合的映射。
+    目录发现、工作簿缺失或解析失败都不能授权删除已确认事实；按订单比较完整来源，
+    共享工作簿不得导致其他订单事实被删，数量变更仍由明确材料确认负责。"""
     removed_orders: set[str] = set()
     for raw_order_id, raw_folders in folders_by_order.items():
         order_id = str(raw_order_id or "").strip().upper()
@@ -2490,7 +2582,7 @@ def _reconcile_authoritative_server_material_sources(
                 "delete from server_material_allocations where order_id=? and source_path=?",
                 (order_id, path),
             )
-            # Keep shared source metadata while any order still references it.
+            # 只要仍有订单引用，就保留共享来源元数据。
             store.connection.execute(
                 "delete from source_files where path=? "
                 "and not exists (select 1 from material_items where source_path=?) "
@@ -2505,17 +2597,21 @@ def _hardware_report_paths(
     paths: Iterable[Path],
     source_folder: Path,
 ) -> list[Path]:
-    """Every report is a candidate; folder names never decide hardware scope."""
+    """筛选五金候选报表；paths 为报表路径集合，source_folder 为接口保留的目录参数。
+
+    每份报表均是候选，不能仅凭目录名决定五金范围。"""
     return sorted({Path(path) for path in paths}, key=lambda item: str(item).casefold())
 
 
 def _selected_hardware_reports(source_rows: Iterable[tuple[str, str]]) -> dict:
+    """根据来源选择规则返回工厂单对应报表；source_rows 为文件路径与所属目录的二元组集合。"""
     paths = [Path(path) for path, folder in source_rows if path and folder]
     selected, _, _, _ = select_latest_fittings(paths)
     return selected
 
 
 def _selected_hardware_report_paths(source_rows: Iterable[tuple[str, str]]) -> set[str]:
+    """返回最终所选五金报表的路径集合；source_rows 为文件路径与所属目录的二元组集合。"""
     return {str(source.path) for source in _selected_hardware_reports(source_rows).values()}
 
 
@@ -2534,21 +2630,16 @@ _OPTIMIZATION_MARKER_RELATIVE_PATHS = (
 
 
 def _optimization_artifact_paths(folder: Path) -> tuple[list[Path], bool]:
-    """Return marker files from the known AICNC layouts without file recursion.
+    """在 folder 及其直接子目录的已知 AICNC 布局查找标记文件，不递归遍历全部输出。
 
-    An order folder may contain several AICNC workspaces, but each workspace
-    is either the order folder itself or one of its direct children.  The
-    marker files then live at one of the known relative paths below that
-    workspace.  Keeping discovery to these paths avoids walking PNG/NC/CSV
-    outputs on the network Server while still supporting the current New
-    Nesting and old Auo-Label-CNC layouts.
-    """
+    兼容现行 New Nesting 和旧 Auo-Label-CNC 布局，避免遍历网络目录中的 PNG、NC、CSV 文件。"""
+    from .aicnc_import import OPTIMIZATION_RE
     scopes = [folder]
     scan_complete = True
     try:
         scopes.extend(
             sorted(
-                (path for path in folder.iterdir() if path.is_dir()),
+                (path for path in folder.iterdir() if not OPTIMIZATION_RE.fullmatch(path.name) and path.is_dir()),
                 key=lambda path: str(path).casefold(),
             )
         )
@@ -2570,18 +2661,18 @@ def _optimization_artifact_paths(folder: Path) -> tuple[list[Path], bool]:
 
 
 def _optimization_artifacts(folder: Path) -> list[Path]:
-    """Return recognizable CNC optimization outputs under known layouts."""
+    """返回 folder 已知布局中可识别的 CNC 优化产物。"""
     artifacts, _ = _optimization_artifact_paths(folder)
     return artifacts
 
 
 def _optimization_result_artifacts(folder: Path) -> list[Path]:
-    """Return AICNC nesting results that carry exact factory-order identity."""
+    """返回 folder 内携带明确工厂单身份的 AICNC 排版结果文件。"""
     return [path for path in _optimization_artifacts(folder) if path.name.casefold() == "nesting_result.xml"]
 
 
 def _optimization_result_artifacts_checked(folder: Path) -> tuple[list[Path], bool]:
-    """Return result files plus whether fixed-path discovery completed."""
+    """返回 folder 的优化结果文件及固定路径发现是否成功完成的标志。"""
     artifacts, scan_complete = _optimization_artifact_paths(folder)
     return [
         path for path in artifacts
@@ -2590,7 +2681,7 @@ def _optimization_result_artifacts_checked(folder: Path) -> tuple[list[Path], bo
 
 
 def _server_optimization_monitor_files(folder: Path) -> list[tuple[Path, str]]:
-    """Return the two XML files used as the lightweight Server change marker."""
+    """返回 folder 中用于轻量变化监测的两类 XML 文件。"""
     result: list[tuple[Path, str]] = []
     for path in _optimization_artifacts(folder):
         kind = (
@@ -2603,7 +2694,7 @@ def _server_optimization_monitor_files(folder: Path) -> list[tuple[Path, str]]:
 
 
 def _optimization_factory_orders(path: Path) -> set[str]:
-    """Read factory order ids embedded by AICNC without loading the XML at once."""
+    """流式读取 AICNC XML 文件 path 中的工厂单号，避免一次载入整个 XML。"""
     factory_orders: set[str] = set()
     for _, element in ET.iterparse(path, events=("start",)):
         factory_order = str(element.attrib.get("OrderID", "")).upper().strip()
@@ -2614,17 +2705,14 @@ def _optimization_factory_orders(path: Path) -> set[str]:
 
 
 def _file_timestamp(value: float) -> str:
+    """把秒级时间戳 value 转为本地时间文本；零值返回空字符串。"""
     return datetime.fromtimestamp(value).isoformat(timespec="seconds") if value else ""
 
 
 def _canonical_source_folder(source_root: Path, folder_name: str) -> Path:
-    """Return the existing Server child using its filesystem spelling.
+    """按文件系统实际大小写定位目录；source_root 为根目录，folder_name 为待找名称。
 
-    macOS commonly treats Server paths as case-insensitive while SQLite keys
-    remain case-sensitive.  Reusing the actual directory entry prevents a
-    manual outbound from creating a second temporary-order row whose only
-    difference is path casing.
-    """
+    避免大小写不敏感的文件系统与大小写敏感的 SQLite 路径键产生重复临时订单。"""
     root = source_root if source_root.is_absolute() else source_root.resolve()
     try:
         for candidate in root.iterdir():
@@ -2636,7 +2724,9 @@ def _canonical_source_folder(source_root: Path, folder_name: str) -> Path:
 
 
 def _record_server_baseline(store: OrderIndexStore, folder: Path, *, order_id: str = "") -> None:
-    """Record the current Server metadata after a successful manual outbound."""
+    """人工出库成功后记录当前 Server 元数据。
+
+    参数：store 为索引库；folder 为处理目录；order_id 为可选归属订单号。"""
     observed_at = _now()
     store.upsert_source_file(
         folder,
@@ -2656,7 +2746,7 @@ def _record_server_baseline(store: OrderIndexStore, folder: Path, *, order_id: s
 
 
 def record_standard_outbound_baseline(config: Config, order_id: str) -> bool:
-    """Record the current standard-order Server reports after outbound sync."""
+    """标准订单出库同步后登记当前来源报表基准；config 为配置，order_id 为订单号。"""
     store = OrderIndexStore(config.workflow_database)
     try:
         row = store.connection.execute(
@@ -2682,10 +2772,10 @@ def _record_generated_material_baseline(
     *,
     order_id: str = "",
 ) -> None:
-    """Register an App-created material file without accepting other changes."""
-    # Preserve the caller's path spelling.  The Server snapshot uses the
-    # spelling returned by directory enumeration; resolving only here can
-    # turn /var into /private/var on macOS and create a false mismatch.
+    """登记 App 生成的材料文件，不同时确认其他来源变化。
+
+    参数：store 为索引库；folder 为订单目录；materials_path 为生成文件；order_id 为可选订单号。"""
+    # 保留调用方路径拼写，与目录枚举得到的快照一致；仅在此解析路径会把 /var 变成 /private/var，造成误报。
     folder = folder.expanduser()
     materials_path = materials_path.expanduser()
     if materials_path.parent != folder or not materials_path.is_file():
@@ -2711,7 +2801,7 @@ def _record_generated_material_baseline(
 
 
 def _direct_report_files(folder: Path) -> list[tuple[Path, str]]:
-    """Return recognized reports directly inside a folder, not child folders."""
+    """只返回 folder 直属的可识别报表，不包括子目录中的文件。"""
     return [(path, kind) for path, kind in _report_files(folder) if path.parent == folder]
 
 
@@ -2719,6 +2809,11 @@ def _merge_candidate(candidates: dict[str, dict], factory_order: str, *, name: s
                      order_id: str = "", sales_order_name: str = "", split_time: str = "",
                      folder: str = "", has_hardware: bool = False,
                      derive_order_from_name: bool = True, optimized: bool = False) -> None:
+    """把工厂单来源信息合并到候选集合。
+
+    参数：candidates 为候选字典；factory_order 为工厂单号；name 为名称；source 为来源标签；
+    order_id 为订单号；sales_order_name 为销售单；split_time 为拆单时间；folder 为来源目录；
+    has_hardware 为五金标志；derive_order_from_name 决定是否从名称推导订单；optimized 为优化标志。"""
     if not FACTORY_RE.fullmatch(factory_order or ""):
         return
     item = candidates.setdefault(factory_order.upper(), {
@@ -2748,6 +2843,7 @@ def _merge_candidate(candidates: dict[str, dict], factory_order: str, *, name: s
 
 
 def _effective_factory_candidate(factory_order: str, candidate: dict) -> dict:
+    """按来源优先级解析最终工厂单候选及冲突；factory_order 为单号，candidate 为已合并来源证据。"""
     aimes_names = sorted(candidate["names"].get("aimes", set()))
     exact_aimes_names = sorted(candidate["names"].get("aimes_exact", set()))
     server_names = sorted(candidate["names"].get("server", set()))
@@ -2757,9 +2853,7 @@ def _effective_factory_candidate(factory_order: str, candidate: dict) -> dict:
     aimes_orders = {_valid_aimes_order_id(name) for name in candidate.get("sales_orders", set())}
     aimes_orders.discard("")
     if len(aimes_orders) == 1:
-        # AIMES is the authority for the factory-order name and owner. A
-        # stale/mixed server report must not turn an AIMES-confirmed factory
-        # into a false ownership conflict.
+        # AIMES 是工厂单名称与归属的权威来源，过期或混合 Server 报表不能制造虚假的归属冲突。
         orders = aimes_orders
         ownership_status = "已确认"
     elif len(aimes_orders) > 1:
@@ -2799,16 +2893,13 @@ def _merge_cached_server_candidate(
     folder_order_ids: list[str],
     manual_folder: bool,
 ) -> bool:
-    """Reuse the indexed identity for an unchanged board/fittings report.
+    """复用未变化报表的已索引身份，返回是否成功复用。
 
-    ``source_files`` already stores the factory-order identity discovered by
-    the previous parse.  The corresponding ``factory_orders`` row stores the
-    remaining candidate facts, so reopening an unchanged workbook is not
-    necessary.  Return whether a usable cached identity was found; callers
-    use a false result as the safe fallback to the normal parser.
-    """
+    参数：store 为索引库；candidates 为候选集合；path 为报表；folder 为所属目录；
+    folder_order_ids 为目录关联订单号；manual_folder 为人工目录标志。
+    来源索引及工厂单表已有身份时无需重开工作簿，返回 False 时调用方回退到正常解析。"""
     row = store.connection.execute(
-        "select order_id, factory_order from source_files where path = ?",
+        "select order_id, factory_order, kind from source_files where path = ?",
         (str(path),),
     ).fetchone()
     if row is None or not row[1]:
@@ -2827,7 +2918,7 @@ def _merge_cached_server_candidate(
         factory = store.connection.execute(
             """
             select order_id, factory_name, sales_order_name, split_time,
-                   name_source, has_hardware, (stage in ('已优化','已生产','已出货')) as optimized
+                   name_source, has_hardware, (stage in ('已优化','已生产','已出货')) as optimized, stage
             from factory_orders
             where factory_order = ? and aimes_status = 'active'
             """,
@@ -2839,6 +2930,23 @@ def _merge_cached_server_candidate(
         if not cached_order_id and len(folder_order_ids) == 1:
             cached_order_id = folder_order_ids[0].upper()
         name_source = str(factory[4] or "server_report")
+        manual_locked = bool(
+            current_report_context()
+            and current_report_context().locked_decisions.get(factory_order, {}).get("handling") == "manual"
+        )
+        has_automatic_hardware = bool(store.connection.execute(
+            "select 1 from hardware_items where factory_order=? and source_type='aicnc' limit 1",
+            (factory_order,),
+        ).fetchone())
+        if (
+            row[2] == "fittings"
+            and not has_automatic_hardware
+            and str(factory[7] or "") != "已出货"
+            and not manual_locked
+        ):
+            # 未变化报表也要能修复“来源已索引但自动五金事实缺失”的中断状态；
+            # 完整空报表会在正常解析后记录 row_count=0，人工处理则继续沿用锁定决定。
+            return False
         candidate_source = {
             "AIMES": "aimes",
             "AIMES精确查询": "aimes_exact",
@@ -2861,7 +2969,9 @@ def _merge_cached_server_candidate(
 
 
 def _confirmed_material_folders(store: OrderIndexStore, folders: list[Path]) -> list[Path]:
-    """Only a successful material write can establish a business XML baseline."""
+    """筛选已成功写入材料事实的目录；store 为索引库，folders 为候选目录列表。
+
+    只有材料写入成功，才可建立业务 XML 基准。"""
     confirmed = {
         row[0] for row in store.connection.execute(
             """select distinct source_folder from orders
@@ -2882,13 +2992,11 @@ def _refresh_cached_optimization_artifacts(
     *,
     timing_sink: list[dict[str, object]] | None = None,
 ) -> int:
-    """Record XML metadata only for factories with written, validated materials.
+    """只为材料已写入且校验通过的工厂单登记优化 XML 元数据。
 
-    ``nesting_result.xml`` embeds the AIMES factory order in ``OrderID``.
-    Its modification time is the AICNC generation time; filesystem birth time
-    is only the later copy-to-Server time.  Keeping both plus first-seen time
-    prevents an index refresh timestamp from masquerading as a business event.
-    """
+    参数：store 为索引库；validation_rows 为校验目录与状态记录；timing_sink 为可选耗时收集列表。
+    XML 的 OrderID 绑定工厂单；修改时间表示 AICNC 生成时间，创建时间可能只是复制到 Server 的时间，
+    需同时保留这些时间和首次观察时间，不能把索引刷新时间当作业务发生时间。"""
     refreshed = 0
     for order_id, source_folder in validation_rows:
         folder = Path(source_folder)
@@ -2990,8 +3098,7 @@ def _refresh_cached_optimization_artifacts(
                     "duration_seconds": round(time.perf_counter() - artifact_started, 6),
                     "error": artifact_error,
                 })
-        # Material validation already established the covered factory state.
-        # Keep XML timestamps only as supplementary provenance for that write.
+        # 材料校验已确定本次覆盖的工厂单状态，XML 时间只作为该写入的补充来源证据。
         if not scan_complete:
             continue
         for factory_order in sorted(active_factory_orders):
@@ -3054,6 +3161,7 @@ def _refresh_cached_optimization_artifacts(
 
 
 def _load_outbound_records(config: Config) -> list[dict]:
+    """读取本地持久出库记录用于对账；config 提供已准备存储的数据库配置。"""
     if config.storage_prepared and config.workflow_database.is_file():
         connection = sqlite3.connect(config.workflow_database)
         try:
@@ -3084,10 +3192,7 @@ def _load_outbound_records(config: Config) -> list[dict]:
                         "order_id": row[2],
                         "factory_order": row[3],
                         "remark": row[3],
-                        # ``remark`` identifies the exact factory for status
-                        # matching; the header value identifies the source
-                        # document (for example, an order-level materials
-                        # document whose relation covers one factory).
+                        # remark 用于精确匹配工厂单状态；单据主行字段标识来源单据，例如仅关联一个工厂单的订单级材料单。
                         "document_remark": row[4],
                         "status": row[5],
                         "source": row[6],
@@ -3103,17 +3208,17 @@ def _load_outbound_records(config: Config) -> list[dict]:
                 ]
         finally:
             connection.close()
-    # The storage cutover intentionally has no JSON fallback.  A missing
-    # central database means there is no authoritative outbound fact to use.
+    # 存储切换后不回退到 JSON；中央库缺失意味着没有可用的权威出库事实。
     return []
 
 
 def _outbound_key(value: object) -> str:
+    """移除出库身份 value 中的空白、下划线及连字符并统一大小写，生成比较键。"""
     return re.sub(r"[\s_-]+", "", str(value or "")).casefold()
 
 
 def _outbound_exact_aliases(factory: dict) -> set[str]:
-    """Return identities that can safely identify one factory order."""
+    """返回能够安全标识工厂单记录 factory 的精确身份别名。"""
     return {
         _outbound_key(factory.get("factory_name")),
         _outbound_key(factory.get("factory_order")),
@@ -3121,6 +3226,9 @@ def _outbound_exact_aliases(factory: dict) -> set[str]:
 
 
 def _outbound_record_matches_factory(record: dict, factory: dict, *, allow_order_alias: bool) -> bool:
+    """判断出库记录是否匹配工厂单。
+
+    参数：record 为出库记录；factory 为工厂单；allow_order_alias 决定是否允许仅订单号的别名匹配。"""
     if _outbound_key(record.get("order_id")) != _outbound_key(factory.get("order_id")):
         return False
     remark = _outbound_key(record.get("remark"))
@@ -3140,7 +3248,7 @@ def _has_factory_hardware_outbound_record(
     factory: dict,
     records: Iterable[dict],
 ) -> bool:
-    """Return whether a shipped hardware document is scoped to this factory."""
+    """判断工厂单是否存在对应的已出库五金单据；factory 为工厂单，records 为候选出库记录。"""
     return any(
         str(record.get("kind", "")).strip().casefold() == "hardware"
         and str(record.get("status", "")).strip() == "已出库"
@@ -3150,6 +3258,7 @@ def _has_factory_hardware_outbound_record(
 
 
 def _factory_outbound_metadata(config: Config, factory: dict) -> tuple[str, str]:
+    """取得工厂单的出库方式及指纹；config 为配置，factory 为工厂单记录。"""
     mode = str(factory.get("outbound_mode", "")).strip()
     fingerprint = str(factory.get("outbound_fingerprint", "")).strip()
     if mode or fingerprint:
@@ -3177,7 +3286,9 @@ def _refresh_outbound_status(
     records: list[dict] | None = None,
     factory_group: list[dict] | None = None,
 ) -> tuple[str, str]:
-    """Read the local outbound audit records without querying or writing JDY."""
+    """根据本地出库审计记录计算状态，不查询或写入金蝶。
+
+    参数：config 为配置；factory 为工厂单；records 为可选已有出库记录；factory_group 为可选同组工厂单。"""
     if not factory["order_id"] or not factory["factory_name"]:
         return "未查询", ""
     records = _load_outbound_records(config) if records is None else records
@@ -3186,7 +3297,7 @@ def _refresh_outbound_status(
     production_document_numbers = {
         str(record.get("document_number", "")).strip()
         for record in records
-        if str(record.get("kind", "")).strip().casefold() == "production_materials"
+        if str(record.get("kind", "")).strip().casefold() in {"production_materials", "rework_materials"}
         and str(record.get("document_number", "")).strip()
     }
     exact_records = []
@@ -3196,7 +3307,7 @@ def _refresh_outbound_status(
         if _outbound_key(record.get("order_id")) != _outbound_key(factory.get("order_id")):
             continue
         if (
-            str(record.get("kind", "")).strip().casefold() == "production_materials"
+            str(record.get("kind", "")).strip().casefold() in {"production_materials", "rework_materials"}
             or str(record.get("document_number", "")).strip() in production_document_numbers
         ):
             continue
@@ -3208,23 +3319,17 @@ def _refresh_outbound_status(
             _outbound_key(factory.get("sales_order_name")),
         }:
             order_alias_records.append(record)
-    # Prefer a factory-specific hardware document over an order-level
-    # materials document when both exist.  Otherwise the earlier materials
-    # number can mask the actual factory outbound document in the dashboard.
+    # 同时存在时优先使用工厂单五金出库单，避免较早的订单级材料单号遮蔽实际工厂单出库单。
     matching_records = exact_records + order_alias_records
-    # A split factory can have both the historical order-level materials
-    # document and a newer factory-scoped hardware document.  The material
-    # document must not make the factory look stale after the hardware was
-    # successfully shipped; once a hardware record exists, reconcile only
-    # factory-scoped hardware records for this factory.
+    # 分单可能同时有关联的历史材料单和新五金单；已有五金出货证据后，只核对该工厂单的五金单，
+    # 不能因历史材料单而把已成功出货状态判为过期。
     hardware_records = [
         record for record in matching_records
         if str(record.get("kind", "")).strip().casefold() == "hardware"
     ]
     if hardware_records:
         matching_records = hardware_records
-        # Confirmed factory-linked shipments are immutable business facts.
-        # Current source differences are audited separately, never unshipping.
+        # 已确认的工厂单出货是不可被资料变化撤销的业务事实；当前来源差异另行审计。
         confirmed = [str(record.get("document_number", "")).strip()
                      for record in hardware_records
                      if record.get("status") == "已出库"
@@ -3281,12 +3386,8 @@ def _refresh_outbound_status(
                         )
                     except (OSError, KeyError, TypeError, ValueError, RuleError):
                         has_database_document = False
-                    # Order-center material previews use the central SQLite
-                    # database as their source path.  If the document is no
-                    # longer present in the current database, do not pass
-                    # that SQLite path to ``parse_traveler``; an absent
-                    # document is a valid changed/removed-source case and is
-                    # compared as an empty item list below.
+                    # 订单中心材料预览以中央 SQLite 为来源；单据不再存在时不能把数据库路径当作 Traveler 解析，
+                    # 应作为来源变化或删除，以空明细进行比较。
                     if not has_database_document and _is_traveler_file(traveler_path):
                         traveler = parse_traveler(traveler_path)
                         current_items = next(
@@ -3297,12 +3398,8 @@ def _refresh_outbound_status(
                             [],
                         )
                     elif not has_database_document and not _is_traveler_file(traveler_path):
-                        # Standard order outbound records may retain the
-                        # material source workbook as ``traveler_path`` for a
-                        # room-level document. It is not a Traveler and its
-                        # sheet layout is intentionally different. Without a
-                        # matching database document, do not infer a changed
-                        # outbound document from an incompatible source file.
+                        # 标准订单出库记录的 traveler_path 可能保存材料工作簿路径，其布局并非 Traveler；
+                        # 没有对应数据库单据时，不能从不兼容的来源文件推断出库单已变化。
                         if document_number:
                             document_numbers.append(document_number)
                         continue
@@ -3310,9 +3407,7 @@ def _refresh_outbound_status(
                         document_numbers.append(document_number)
                         return "需要更新", "、".join(filter(None, document_numbers))
                 except (OSError, KeyError, TypeError, ValueError, RuleError):
-                    # Keep the last confirmed shipped state when the current
-                    # Traveler cannot be read; the inventory workflow will
-                    # surface the concrete parse/read error on retry.
+                    # 当前 Traveler 无法读取时保留最后确认的已出货状态，库存流程重试时会报告具体读取错误。
                     pass
             if document_number:
                 document_numbers.append(document_number)
@@ -3327,12 +3422,10 @@ def assert_factory_orders_outbound_allowed(
     factory_orders: Iterable[str],
     changed_factory_orders: Iterable[str] | None = None,
 ) -> None:
-    """Enforce the standard-order outbound gate from persisted SQLite state.
+    """依据 SQLite 事实检查标准订单出库资格。
 
-    A previously shipped factory order remains blocked unless the current
-    mapped source data has changed and the caller explicitly lists that
-    factory order in ``changed_factory_orders``.
-    """
+    参数：config 为配置；order_id 为订单号；factory_orders 为所选工厂单；changed_factory_orders 为明确允许更新的变化工厂单。
+    已出货工厂单只有映射后的来源确实变化且调用方显式列入更新范围时，才允许继续。"""
     selected = sorted({str(value).upper().strip() for value in factory_orders if str(value).strip()})
     changed = {
         str(value).upper().strip()
@@ -3343,8 +3436,7 @@ def assert_factory_orders_outbound_allowed(
         return
     store = OrderIndexStore(config.workflow_database)
     try:
-        # Refresh the derived status first so a changed Traveler/report is
-        # represented as 可更新 rather than being treated as a duplicate.
+        # 先刷新派生状态，使变化后的 Traveler 或报表能够被识别，再检查出库资格。
         reconcile_outbound_statuses(config, store, factory_orders=selected)
         placeholders = ",".join("?" for _ in selected)
         rows = store.connection.execute(
@@ -3401,13 +3493,10 @@ def reconcile_outbound_statuses(
     store: OrderIndexStore | None = None,
     *, order_ids=None, factory_orders=None,
 ) -> int:
-    """Reconcile successful inventory records into persisted factory status.
+    """把成功的本地出库证据对账到工厂单状态。
 
-    The inventory audit file is the local evidence of a successful outbound.
-    A record whose remark is only the order id is assigned only when that
-    order currently has one factory order; this prevents one outbound record
-    from incorrectly marking several split factory orders as shipped.
-    """
+    参数：config 为配置；store 为可选索引库；order_ids、factory_orders 为可选订单和工厂单范围。
+    仅有订单号的出库记录只有在订单存在唯一工厂单时才能归属，避免将多个分单误标已出货。"""
     owns_store = store is None
     store = store or OrderIndexStore(config.workflow_database)
     records = _load_outbound_records(config)
@@ -3419,7 +3508,7 @@ def reconcile_outbound_statuses(
         scope_args.extend(values)
     if factory_orders is not None:
         values = sorted({str(x).strip().upper() for x in factory_orders})
-        # Keep sibling identities for ambiguous legacy order-only documents.
+        # 保留同订单其他工厂单身份，用于判断旧的仅订单号单据是否有歧义。
         scope_sql += ' and order_id in (select order_id from factory_orders where factory_order in (' + ','.join('?' for _ in values) + '))'
         scope_args.extend(values)
     rows = store.connection.execute(
@@ -3467,16 +3556,14 @@ def reconcile_outbound_statuses(
         production_document_numbers = {
             str(record.get("document_number", "")).strip()
             for record in records
-            if str(record.get("kind", "")).strip().casefold() == "production_materials"
+            if str(record.get("kind", "")).strip().casefold() in {"production_materials", "rework_materials"}
             and str(record.get("document_number", "")).strip()
         }
         stale_production_status = (
             status == "未出库"
             and str(factory.get("outbound_document", "")).strip() in production_document_numbers
         )
-        # Legacy migration records prior hardware shipment separately from
-        # the old combined material document.  Do not let the old material
-        # fingerprint turn that historical shipment back into "需要更新".
+        # 历史迁移分别保留五金出货与旧合并材料单证据，不能让旧材料单覆盖已确认五金出货。
         legacy_production = store.connection.execute(
             """select 1 from factory_orders f
                join production_records b on b.batch_id=f.production_record_id
@@ -3551,12 +3638,10 @@ def _orders_requiring_server_scan(
     store: OrderIndexStore,
     aimes_rows: list[dict] | None = None,
 ) -> set[str]:
-    """Return AIMES orders whose factory work is not completely shipped.
+    """返回工厂单尚未全部出货的 AIMES 订单集合。
 
-    The database keeps historical AIMES sightings.  The optional current rows
-    are merged in memory so a newly split factory order can trigger a Server
-    scan before the next index write.
-    """
+    参数：config 为配置；store 为索引库；aimes_rows 为可选新读取记录。
+    新记录在内存合并，使刚拆出的工厂单在下一次索引写入前即可触发扫描。"""
     factories = _aimes_factory_records(store, aimes_rows)
     grouped: dict[str, list[dict]] = defaultdict(list)
     for factory in factories.values():
@@ -3570,9 +3655,7 @@ def _orders_requiring_server_scan(
                 for item in items
             }
         else:
-            # Outbound status is maintained transactionally when the inventory
-            # operation succeeds. A normal AIMES/Server scan consumes that
-            # fact; it does not reopen every outbound document to prove it.
+            # 出库状态在库存操作成功的事务中维护，普通 AIMES/Server 扫描直接使用，不逐一重开历史单据证明。
             statuses = {str(item.get("outbound_status") or "未查询") for item in items}
         if not statuses or statuses != {"已出库"}:
             result.add(order_id)
@@ -3583,7 +3666,7 @@ def _aimes_factory_records(
     store: OrderIndexStore,
     aimes_rows: list[dict] | None = None,
 ) -> dict[str, dict]:
-    """Return active AIMES factory facts, optionally merged with fresh rows."""
+    """读取有效 AIMES 工厂单事实并合并可选新记录；store 为索引库，aimes_rows 为新记录。"""
     factories: dict[str, dict] = {}
     for row in store.connection.execute(
         """
@@ -3635,7 +3718,9 @@ def _server_order_scan_allowed(
     requires_scan: set[str],
     now: str,
 ) -> bool:
-    """Return whether one order should remain in the automatic Server scan."""
+    """判断单个订单是否继续自动扫描。
+
+    参数：config 为配置；store 为索引库；order_id 为订单号；folder 为来源目录；requires_scan 为必扫订单集合；now 为本次时间。"""
     normalized_order = str(order_id or "").upper().strip()
     if not normalized_order:
         return False
@@ -3673,9 +3758,7 @@ def _server_order_scan_allowed(
         return policy not in {"legacy", "permanent"}
 
     if fingerprint != str(existing.get("aimes_fingerprint") or ""):
-        # The changed AIMES identity is itself a scan trigger.  The baseline
-        # is updated only after the folder has actually been included in a
-        # scan, so a failed/unavailable scan cannot silently consume a change.
+        # AIMES 身份变化本身触发扫描；目录实际扫描后才更新基准，失败或不可用的扫描不能消耗该变化。
         return True
 
     if policy in {"legacy", "permanent"}:
@@ -3691,8 +3774,7 @@ def _server_order_scan_allowed(
                 )
                 return False
         except (OSError, OverflowError, ValueError):
-            # A malformed or missing watch deadline is repaired conservatively
-            # by starting a fresh seven-day observation window.
+            # 观察截止时间缺失或无效时，保守地重新开始七天观察期。
             store.save_server_scan_policy(
                 normalized_order,
                 policy="watching",
@@ -3709,7 +3791,9 @@ def _server_folder_scan_allowed(
     folder: Path,
     aimes_rows: list[dict] | None = None,
 ) -> bool:
-    """Apply per-order historical and seven-day Server scan policies."""
+    """应用历史订单及出货后七天扫描策略。
+
+    参数：config 为配置；store 为索引库；folder 为候选目录；aimes_rows 为可选新读取记录。"""
     if _server_folder_is_ignored(store, folder):
         return False
     if _server_folder_handling_mode(store, folder, aimes_rows) in {"supplemental", "external_manual"}:
@@ -3738,7 +3822,9 @@ def _finalize_server_scan_policies(
     folders: Iterable[Path],
     scanned_at: str,
 ) -> None:
-    """Commit AIMES baselines after the corresponding folders were scanned."""
+    """在对应目录扫描后提交 AIMES 策略基准。
+
+    参数：config 为配置；store 为索引库；folders 为已扫目录；scanned_at 为扫描时间。"""
     requires_scan = _orders_requiring_server_scan(config, store)
     for folder in folders:
         if _server_folder_handling_mode(store, folder) in {"supplemental", "external_manual"}:
@@ -3776,7 +3862,7 @@ def _finalize_server_scan_policies(
 
 
 def _mark_initial_orders_shipped(config: Config, store: OrderIndexStore) -> int:
-    """Apply the user's historical shipment confirmation before scanning."""
+    """应用用户已确认的历史出货规则；config 提供初始日期，store 为索引库。"""
     updated = 0
     for root in _available_server_roots(config):
         try:
@@ -3803,10 +3889,7 @@ def _mark_initial_orders_shipped(config: Config, store: OrderIndexStore) -> int:
                 (order_id,),
             ).fetchone()
             if stale_validation and stale_validation[0] == "数据异常":
-                # Historical folders are intentionally not re-read after the
-                # initial date. Keep material validation honest as pending,
-                # but do not let an old missing-report error override the
-                # user-confirmed shipped business stage.
+                # 初始日期之前的历史目录不重新读取，材料校验保留待检查状态，但旧的缺报表错误不能覆盖用户确认的已出货阶段。
                 store.set_validation(order_id, '待校验')
                 store.add_change(
                     severity="info",
@@ -3861,7 +3944,7 @@ def _mark_initial_orders_shipped(config: Config, store: OrderIndexStore) -> int:
 
 
 def _server_folder_order_ids(folder: Path) -> set[str]:
-    """Return order ids represented by a standard or mixed Server folder."""
+    """从标准或混合来源目录 folder 提取其代表的订单号。"""
     if _is_standard_order_folder(folder.name):
         return {folder.name.upper()}
     if _is_mixed_order_folder(folder):
@@ -3875,13 +3958,10 @@ def _server_folder_is_fully_shipped(
     folder: Path,
     aimes_rows: list[dict] | None = None,
 ) -> bool:
-    """Return whether every known order in a standard/mixed folder is shipped.
+    """判断标准或混合目录内所有已知订单是否全部出货。
 
-    An order without an active AIMES mapping is deliberately not considered
-    shipped: the scanner must keep the folder eligible until its identity is
-    known.  Fresh AIMES rows are merged in memory so a newly discovered factory
-    order can reopen a folder during the same sync.
-    """
+    参数：config 为配置；store 为索引库；folder 为来源目录；aimes_rows 为可选新记录。
+    没有有效 AIMES 归属不能视作已出货；新发现工厂单可在本次同步中重新开启目录扫描。"""
     if _server_folder_handling_mode(store, folder, aimes_rows) in {"supplemental", "external_manual"}:
         return False
     order_ids = _server_folder_order_ids(folder)
@@ -3895,10 +3975,7 @@ def _server_folder_is_fully_shipped(
     }
     unmapped = order_ids - mapped_order_ids
     if unmapped:
-        # Historical folders confirmed as shipped by the user are allowed to
-        # remain permanently outside the ordinary AIMES mapping set.  A later
-        # AIMES row changes the fingerprint and reopens the folder through the
-        # dedicated scan-policy path.
+        # 用户确认已出货的历史目录可长期不在普通 AIMES 映射中；后续 AIMES 身份变化会通过专用扫描策略重新开启观察。
         if not all(
             (store.server_scan_policy(order_id) or {}).get("policy") in {"legacy", "permanent"}
             for order_id in unmapped
@@ -3908,11 +3985,9 @@ def _server_folder_is_fully_shipped(
 
 
 def _server_folder_for_issue(issue_path: str) -> Path | None:
-    """Find the standard/mixed Server folder containing an issue path."""
+    """从问题路径 issue_path 向上定位所属标准或混合 Server 订单目录。"""
     path = Path(issue_path).expanduser()
-    # Some issues point at the offending file, while folder-level issues such
-    # as hardware selection point directly at the order folder.  Include the
-    # path itself so both forms resolve to the same Server-order boundary.
+    # 问题可能指向具体文件，也可能直接指向订单目录；向上定位时包含路径自身，使两者对应同一订单边界。
     for candidate in (path, path.parent, *path.parents):
         if candidate.is_dir() and (
             _is_standard_order_folder(candidate.name)
@@ -3927,20 +4002,12 @@ def _resolve_fully_shipped_server_issues(
     store: OrderIndexStore,
     *, order_ids=None,
 ) -> int:
-    """Close stale Server issues once every order in their folder shipped.
+    """关闭已全部出货目录中遗留的 Server 待处理项，保留历史变化记录。
 
-    Material validation and hardware selection issues can be created before
-    the outbound workflow finishes.  Automatic scans correctly stop selecting
-    a fully shipped folder, so those old issues otherwise have no later
-    validation pass that could close them.  Keep the historical sync_changes
-    rows, but remove the stale open items.
-    """
-    # A validation error can remain open after the order has been completely
-    # shipped (for example, a transient AIMES credential failure during a
-    # later index refresh).  Once every known factory order in the folder has
-    # a confirmed outbound record, the folder is intentionally excluded from
-    # automatic Server scans, so that stale order-level validation issue must
-    # be closed here as well.  Keep the historical sync_changes row intact.
+    参数：config 为配置；store 为索引库；order_ids 为可选订单范围。
+    全部出货后目录可能不再自动扫描，因此需主动关闭先前材料校验或五金来源选择的遗留问题。"""
+    # 订单完全出货后仍可能残留校验错误，例如后续刷新中的短暂 AIMES 凭据错误。
+    # 目录已退出自动扫描时需在此关闭过期待处理项，保留历史同步变化记录。
     resolvable_kinds = {
         "material_validation",
         "hardware_selection",
@@ -3965,14 +4032,9 @@ def _resolve_fully_shipped_server_issues(
 def _resolve_stale_produced_material_issues(
     store: OrderIndexStore,
 ) -> int:
-    """Close material errors recorded after production finalized the order.
+    """关闭已完成生产后的过期材料问题；store 为索引库。
 
-    A completed production batch is a durable business fact.  If an older
-    parser or scan created a material-validation issue after that fact, keep
-    the history in ``sync_changes`` but remove the stale open item and restore
-    the material status when the central material facts are present.  A later
-    preview still validates the current workbook before any new write.
-    """
+    保留历史变化记录；中央材料事实存在时恢复材料状态，新写入前仍须重新预览校验当前工作簿。"""
     issues = [
         issue for issue in store.active_issues()
         if issue.get("kind") == "material_validation"
@@ -4067,6 +4129,7 @@ def _resolve_stale_produced_material_issues(
 
 
 def _aimes_row_signature(rows: list[dict]) -> list[tuple[str, str, str, str]]:
+    """为 AIMES 记录列表 rows 生成排序后的身份签名，供前后变化比较。"""
     return sorted(
         (
             row["factory_order"],
@@ -4085,15 +4148,11 @@ def _persist_valid_aimes_mapping(
     *,
     cached_rows: list[dict] | None = None,
 ) -> None:
-    """Persist only validated AIMES mapping rows.
+    """仅持久保存校验有效的 AIMES 身份映射。
 
-    Invalid rows are returned to the caller as one-operation warnings. They
-    are deliberately absent from both the source cache and the factory-name
-    cache so a malformed AIMES sales-order name cannot become business data.
-    """
-    # The online endpoint intentionally returns only a recent page.  Keep the
-    # local cache as a cumulative identity cache as well, so a later 50-row
-    # fetch cannot make older, still-valid AIMES facts disappear locally.
+    参数：config 为配置；rows 为当前记录；warnings 为本次警告；cached_rows 为可选已有记录。
+    无效记录只作为本次警告，不写来源缓存或名称缓存，避免错误销售单名称成为业务事实。"""
+    # 在线接口只返回近期页面；本地身份缓存需累积保留，避免后续读取 50 条时让旧的有效身份消失。
     cached_rows = cached_rows if cached_rows is not None else load_aimes_order_cache(config)
     merged_rows = {
         str(row.get("factory_order", "")).upper().strip(): row
@@ -4125,11 +4184,9 @@ def _persist_valid_aimes_mapping(
 
 
 def _active_aimes_factory_orders(store: OrderIndexStore) -> list[str]:
-    """Return active, unproduced identities eligible for AIMES verification.
+    """读取有资格精确核验的有效、未生产工厂单身份；store 为索引库。
 
-    Use the same completed-batch evidence as the dashboard's produced flag.
-    Completed local production remains authoritative outside the recent page.
-    """
+    使用与看板一致的完成生产证据，近期窗口外仍以本地已完成生产事实为准。"""
     return [
         str(row[0]).upper()
         for row in store.connection.execute(
@@ -4162,12 +4219,10 @@ def _verify_missing_aimes_factories(
     verified_at: str,
     verification_result: dict | None = None,
 ) -> tuple[int, str]:
-    """Exact-check local active, unproduced factories absent from recent AIMES.
+    """精确核验未出现在近期页面的本地有效未生产工厂单。
 
-    Absence from a 50-row snapshot is not deletion evidence by itself. Only
-    an explicit AIMES query returning no matching row can transition a record
-    to the inactive audit state.
-    """
+    参数：config 为配置；store 为索引库；fetched_rows 为近期记录；verified_at 为核验时间；verification_result 为可选已有核验结果。
+    最近 50 条中缺失不等于删除，只有精确查询明确没有匹配记录才可转为失效审计状态。"""
     fetched = {
         str(row.get("factory_order", "")).upper().strip()
         for row in fetched_rows
@@ -4191,13 +4246,12 @@ def _verify_missing_aimes_factories(
     return store.mark_aimes_deleted(missing, verified_at=verified_at), ""
 
 
+@pending_check_session
 def sync_aimes_index(config: Config, *, force: bool = False, if_needed: bool = False) -> dict:
-    """Refresh only AIMES identity data; never scan or parse Server files.
+    """仅刷新 AIMES 身份，不扫描或解析 Server 文件。
 
-    Keeping this boundary separate from Server scanning matters for both
-    performance and diagnosis: an AIMES refresh can update factory identity
-    evidence without implying that a Server report changed.
-    """
+    参数：config 为配置；force 为强制刷新选项；if_needed 为按需同步选项。
+    身份刷新与 Server 扫描分别记录证据，不能把身份变化误报为报表变化。"""
     from .core import refresh_aimes_recent_orders
 
     operation_started = time.perf_counter()
@@ -4363,6 +4417,7 @@ def sync_aimes_index(config: Config, *, force: bool = False, if_needed: bool = F
         "duration_seconds": round(time.perf_counter() - verify_started, 6),
     })
     store.replace_aimes_review_rows(issues)
+    audit_hardware_integrity(store.connection)
     finished = _now()
     elapsed_seconds = round(time.perf_counter() - operation_started, 6)
     aimes_stage_durations = _complete_aimes_stage_durations(
@@ -4417,18 +4472,16 @@ def sync_aimes_index(config: Config, *, force: bool = False, if_needed: bool = F
 
 
 def _folder_name_order_ids(folder: Path) -> list[str]:
-    """Read references from the name without opening reports or inferring ownership."""
+    """只从目录 folder 的名称提取订单引用，不打开报表，也不据此确定业务归属。"""
     return list(dict.fromkeys(match.group(1).upper() for match in ORDER_TOKEN_RE.finditer(folder.name)))
 
 
 def _server_folder_handling_mode(
     store: OrderIndexStore, folder: Path, aimes_rows: list[dict] | None = None,
 ) -> str:
-    """Keep external work independent; infer supplements only from known shipped facts.
+    """判断非标准目录的处理方式，外部加工保持独立，仅已知出货事实可证明补单。
 
-    AIMES facts come from the latest successful sync (or supplied fresh rows).
-    Unknown orders and newly added/unshipped factories cannot prove a supplement.
-    """
+    参数：store 为索引库；folder 为目录；aimes_rows 为可选新 AIMES 记录。未知订单或新增未出货工厂单不能证明补单。"""
     if _is_standard_order_folder(folder.name):
         return "standard"
     previous = store.temporary_order(str(folder)) or {}
@@ -4449,14 +4502,14 @@ def _server_folder_handling_mode(
 
 
 def _server_folder_is_ignored(store: OrderIndexStore, folder: Path) -> bool:
-    """A permanent review decision; do not inspect the folder's contents."""
+    """检查目录 folder 是否已有永久忽略决定；store 为索引库，不读取目录内容。"""
     return store.connection.execute(
         "select 1 from server_folder_ignores where path=?", (str(folder),)
     ).fetchone() is not None
 
 
 def ignore_server_folder(config: Config, folder: Path) -> dict:
-    """Record a review decision only; never claim external completion."""
+    """保存目录复核中的忽略决定，不声明外部业务完成；config 为配置，folder 为所选目录。"""
     roots = _available_server_roots(config)
     selected_resolved = folder.expanduser().resolve()
     root = next((root for root in roots if selected_resolved.parent == root.resolve()), None)
@@ -4494,7 +4547,7 @@ def ignore_server_folder(config: Config, folder: Path) -> dict:
 
 
 def _temporary_folder_is_candidate(config: Config, store: OrderIndexStore, folder: Path) -> bool:
-    """Select eligible recent or never-processed non-standard folders for review."""
+    """选择符合时间或未处理条件的非标准目录；config 为配置，store 为索引库，folder 为候选目录。"""
     if _server_folder_is_ignored(store, folder):
         return False
     try:
@@ -4518,25 +4571,19 @@ def _temporary_folder_is_candidate(config: Config, store: OrderIndexStore, folde
             return True
     baseline = _server_scan_baseline(config)
 
-    # Ordinary old temporary folders are excluded before any recursive report
-    # enumeration.  This is intentionally before the fingerprint call above:
-    # the age check is the inexpensive guard on a network-mounted Server.
+    # 旧的普通临时目录在递归枚举和指纹计算前先排除，以低成本日期检查保护网络目录扫描。
     if created_at < baseline and not existing:
         return False
 
     existing = store.temporary_order(str(folder))
     if existing and existing.get("outbound_status") == "已出库":
-        # A processed temporary folder gets the same lightweight XML watch as
-        # a shipped standard order, but the watch is only three days. Excel
-        # reports are intentionally not consulted after processing.
+        # 已处理临时目录只观察轻量 XML 三天，与标准已出货订单类似，但期限更短；不再读取 Excel 报表。
         policy = str(existing.get("server_scan_policy") or "").strip()
         if policy == "permanent":
             return False
         marker_files = _server_optimization_monitor_files(folder)
         if not marker_files:
-            # Without either approved XML marker there is no safe signal for
-            # the three-day observation window. Preserve the legacy shipped
-            # behavior instead of recursively reading report workbooks.
+            # 没有任何受认可的 XML 标记时无法安全观察，沿用历史已出货处理，不递归读取工作簿。
             return False
         watch_until = str(existing.get("server_scan_watch_until") or "").strip()
         if not watch_until:
@@ -4598,7 +4645,7 @@ def _temporary_folder_is_candidate(config: Config, store: OrderIndexStore, folde
 
 
 def _temporary_folders_before_server_baseline(config: Config, root: Path) -> set[str]:
-    """Find existing non-standard folders that must no longer remain pending."""
+    """查找不应继续待处理的旧非标准目录；config 提供扫描基准，root 为来源根目录。"""
     baseline = _server_scan_baseline(config)
     stale: set[str] = set()
     try:
@@ -4617,7 +4664,7 @@ def _temporary_folders_before_server_baseline(config: Config, root: Path) -> set
 
 
 def _clear_stale_server_pending_state(config: Config, store: OrderIndexStore) -> Path | None:
-    """Clear persisted pending state for old non-standard Server folders."""
+    """清除旧非标准目录的持久待处理状态；config 为配置，store 为索引库。"""
     roots = _available_server_roots(config)
     if not roots:
         return None
@@ -4632,30 +4679,24 @@ def _clear_stale_server_pending_state(config: Config, store: OrderIndexStore) ->
 
 
 def _folder_order_ids(folder: Path) -> list[str]:
-    """Return complete order ids encoded by a Server folder and its reports."""
+    """从目录 folder 及其报表提取完整订单号集合。"""
     from .order_workflow import related_order_ids
 
     return list(dict.fromkeys(order_id.upper() for order_id in related_order_ids(folder) if order_id))
 
 
 def _temporary_order_id(folder: Path) -> str:
-    """Return a stable internal key for one temporary source folder."""
+    """根据来源目录 folder 生成稳定的临时订单内部标识。"""
     stat = folder.stat()
     identity = f"{folder.resolve()}\n{getattr(stat, 'st_ino', 0)}\n{_folder_created_at(folder):.6f}"
     return "TMP:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
 
 
 def _reconcile_temporary_order_projections(store: OrderIndexStore) -> int:
-    """Remove the old temporary-folder projection from the formal order table.
+    """清除正式订单表中旧的临时目录投影；store 为索引库。
 
-    Temporary/rework folders are identified by their source path and live in
-    ``temporary_orders``.  Older sync code also inserted their parsed order
-    number into ``orders``; because ``orders.order_id`` is the formal-order
-    primary key, that projection could overwrite the formal order's type and
-    source folder.  Keep a formal row when AIMES confirms the order, otherwise
-    remove the orphan projection so the task is represented only by the
-    pending-center ledger.
-    """
+    临时和返工目录按来源路径保存在临时台账；旧投影可能覆盖正式订单类型和目录。
+    有 AIMES 确认则保留正式订单，否则清除孤立投影，让临时任务只由待处理台账表示。"""
     rows = store.connection.execute(
         "select order_id, source_folder from orders where order_type = 'temporary' and stage <> '已中止'"
     ).fetchall()
@@ -4709,14 +4750,12 @@ def _reconcile_temporary_order_projections(store: OrderIndexStore) -> int:
 
 
 def _temporary_folder_fingerprint(folder: Path) -> str:
-    """Fingerprint the folder's relevant workbooks for duplicate-outbound protection."""
+    """计算目录 folder 相关工作簿的内容指纹，用于防止重复出库。"""
     entries = []
     for path in sorted(folder.rglob("*.xlsx"), key=lambda item: str(item).casefold()):
         if path.name.startswith("~$") or not path.is_file():
             continue
-        # A material workbook generated by the app is an output of this
-        # processing run, not a new source change.  Otherwise the next scan
-        # would see its own generated file and schedule a duplicate outbound.
+        # App 生成的材料工作簿是本次处理输出，不是新来源变化；否则下次扫描会对自己的输出安排重复出库。
         if path.parent == folder and path.stem.casefold().endswith(" materials"):
             continue
         digest = hashlib.sha256()
@@ -4729,7 +4768,7 @@ def _temporary_folder_fingerprint(folder: Path) -> str:
 
 
 def _temporary_xml_baseline_matches(store: OrderIndexStore, folder: Path) -> bool:
-    """Return whether a processed temporary folder still has its XML baseline."""
+    """检查已处理临时目录是否仍符合 XML 基准；store 为索引库，folder 为目录。"""
     current = {
         str(item.get("path") or ""): int(item.get("modified_at") or 0)
         for item in _server_scan_xml_entries([folder])
@@ -4746,7 +4785,7 @@ def _temporary_xml_baseline_matches(store: OrderIndexStore, folder: Path) -> boo
 
 
 def _temporary_aimes_match(store: OrderIndexStore, folder: Path) -> dict | None:
-    """Match a non-standard folder name to one unique AIMES factory name."""
+    """把非标准目录 folder 的名称匹配到唯一 AIMES 工厂单名称；store 为索引库。"""
     wanted = re.sub(r"[\s_-]+", "", folder.name).casefold()
     if not wanted:
         return None
@@ -4777,11 +4816,9 @@ def _temporary_aimes_match(store: OrderIndexStore, folder: Path) -> dict | None:
 
 
 def _is_mixed_order_folder(folder: Path) -> bool:
-    """A non-standard name containing two order ids is a shared/mixed order.
+    """判断非标准目录 folder 的名称是否包含两个订单号，即共享混合订单。
 
-    This helper is used by the lightweight scan, so it intentionally inspects
-    only the folder name. Report contents are parsed later, after approval.
-    """
+    轻量扫描只检查名称，报表内容留待批准后的流程解析。"""
     name_order_ids = {
         match.group(1).upper()
         for match in ORDER_TOKEN_RE.finditer(folder.name)
@@ -4793,12 +4830,9 @@ def _is_mixed_order_folder(folder: Path) -> bool:
 
 
 def _temporary_folder_layout_error(folder: Path) -> str:
-    """Validate only the workbooks needed to prepare a temporary order.
+    """检查临时目录 folder 中处理必需的材料或板材工作簿，返回布局问题。
 
-    Production folders often contain auxiliary Excel exports (door lists,
-    packing lists, CNC lists).  They are not input reports and must not block
-    a temporary order when the required material/board source is present.
-    """
+    门板、包装、CNC 等辅助 Excel 不是输入报表，不因其存在而阻止临时订单。"""
     files = [
         path for path in folder.rglob("*.xlsx")
         if path.is_file() and not path.name.startswith("~$")
@@ -4812,7 +4846,7 @@ def _temporary_folder_layout_error(folder: Path) -> str:
 
 
 def record_temporary_outbound(config: Config, traveler_path: Path, outbound: dict) -> None:
-    """Mirror a successful manual outbound into the temporary-order ledger."""
+    """把成功人工出库镜像到临时订单台账；config 为配置，traveler_path 为关联文件，outbound 为出库结果。"""
     traveler_path = Path(traveler_path).resolve()
     folder_name = traveler_path.parent.name.strip()
     if not folder_name or _is_standard_order_folder(folder_name) or _is_mixed_order_folder(traveler_path.parent):
@@ -4868,11 +4902,10 @@ def mark_temporary_folder_manual(
     reference_order_ids: list[str] | None = None,
     outbound_document: str = "",
 ) -> dict:
-    """Record external completion for one folder, without calling inventory.
+    """登记目录已在外部人工处理，不调用库存系统。
 
-    Optional order references are labels, never ownership or shipment updates.
-    Repeating the same report/XML revision keeps its original completion time.
-    """
+    参数：config 为配置；folder 为目录；reference_order_ids 为可选订单标签；outbound_document 为可选单据号。
+    订单引用不改变归属或出货状态；相同报表与 XML 版本的重复登记保留原完成时间。"""
     roots = _available_server_roots(config)
     if not roots:
         from .order_workflow import resolve_source_root
@@ -4926,7 +4959,7 @@ def mark_temporary_folder_manual(
             server_scan_policy_updated_at=previous.get("server_scan_policy_updated_at", "") if same_revision else now,
             handling_mode="external_manual", reference_order_ids=references,
         )
-        # Empty is intentional: a new revision must not inherit an old external document.
+        # 这里有意使用空单据号，新版本不能继承旧外部单据。
         store.connection.execute(
             "update temporary_orders set outbound_document=? where source_folder=?",
             (outbound_document.strip(), path),
@@ -4963,10 +4996,9 @@ def mark_temporary_folder_manual(
 
 
 def _temporary_order_ids(folder: Path) -> list[str]:
+    """提取临时目录 folder 的订单号，无法提取时使用目录名作为标签。"""
     order_ids = _folder_order_ids(folder)
-    # A temporary folder may intentionally have no PP/CS order number.  Its
-    # folder name is the user-visible temporary order identity and is written
-    # to Traveler/Usage List and the outbound remark.
+    # 临时目录可以没有 PP/CS 订单号；目录名作为用户可见身份，写入 Traveler、Usage List 和出库备注。
     return order_ids or [folder.name.strip()]
 
 
@@ -4977,7 +5009,9 @@ def _process_temporary_folder(
     store: OrderIndexStore,
     include_hardware: bool = True,
 ) -> dict:
-    """Validate, prepare Travelers, and perform the requested temporary outbound."""
+    """校验临时目录、准备 Traveler 并执行请求的临时出库。
+
+    参数：config 为配置；folder 为目录；store 为索引库；include_hardware 决定是否包含五金。"""
     from .inventory import run_jdy
     from .order_workflow import (
         generate_material_from_reports,
@@ -5074,9 +5108,7 @@ def _process_temporary_folder(
                 include_hardware=include_hardware,
                 temporary_factory_order=aimes_match["factory_order"] if aimes_match else "",
                 temporary_factory_name=aimes_match["factory_name"] if aimes_match else folder.name,
-                # A rework/replacement task is tracked by temporary_orders and
-                # the pending center. Its materials must not overwrite the
-                # formal order's central material/hardware facts.
+                # 返工或补做由临时台账和待处理中心管理，其材料不能覆盖正式订单的中央材料和五金事实。
                 persist_facts=False,
             )
             traveler = find_existing_traveler(config, order_id)
@@ -5157,7 +5189,7 @@ def _process_temporary_folder(
 def _server_snapshot_folder(
     folder: Path | tuple[Path, bool],
 ) -> tuple[dict[str, dict], dict[str, object]]:
-    """Build one read-only Server folder snapshot without touching SQLite."""
+    """只读建立单个来源目录快照，不访问 SQLite；folder 为目录或带扫描选项的目录二元组。"""
     xml_only = False
     if isinstance(folder, tuple):
         folder, xml_only = folder
@@ -5169,10 +5201,7 @@ def _server_snapshot_folder(
         if is_mixed_folder
         else ([folder.name.upper()] if is_order_folder else [])
     )
-    # Standard AICNC order folders use the two XML markers as their complete
-    # change signal. Temporary and mixed folders do not have that contract:
-    # their Excel reports are the only way to discover/ retry the manual
-    # workflow, so retain the legacy report metadata scan for those folders.
+    # 标准 AICNC 目录用两类 XML 作为完整变化信号；临时和混合目录仍靠 Excel 报表发现或重试人工流程，保留报表元数据扫描。
     optimization_files = _server_optimization_monitor_files(folder)
     monitor_files = (
         optimization_files
@@ -5235,10 +5264,7 @@ def _server_snapshot_folder(
         })
     return snapshot, {
         "source_folder": str(folder),
-        # ``duration_seconds`` is the accounted folder total shown to the
-        # user: it is deliberately the exact sum of the per-file timings.
-        # Keep the wall-clock measurement separately because folder.stat(),
-        # directory iteration, and thread scheduling are not file processing.
+        # 显示给用户的目录处理耗时严格等于各文件耗时之和；目录取元数据、枚举和线程调度的墙钟耗时另存。
         "duration_seconds": round(
             sum(float(item.get("duration_seconds", 0) or 0) for item in file_timings),
             6,
@@ -5263,11 +5289,14 @@ def _server_snapshot(
     *,
     timing_sink: list[dict[str, object]] | None = None,
 ) -> tuple[Path, dict[str, dict]]:
-    # Automatic scans apply the persisted per-order policy: historical orders
-    # are skipped unless AIMES changes, while a newly fully-shipped order is
-    # watched for seven days before it becomes permanent. Manual folder
-    # selection does not use this snapshot path and remains an explicit
-    # override.
+    # 自动扫描使用持久化订单策略：历史单除 AIMES 变化外跳过，新全部出货订单观察七天。
+    # 人工选择目录不走此快照路径，仍属于明确的手动处理请求。
+    """汇总可扫描 Server 目录快照，并应用既有历史出货规则。
+
+    参数：config 为配置；store 为索引库；timing_sink 为可选分阶段耗时收集列表。"""
+    from .aicnc_import import enabled, legacy_snapshot
+    if enabled(store.connection):
+        return legacy_snapshot(config, store, timing_sink)
     _mark_initial_orders_shipped(config, store)
     roots = _available_server_roots(config)
     if not roots:
@@ -5334,7 +5363,7 @@ def _server_snapshot(
 
 
 def _server_scan_xml_entries(folders: Iterable[Path]) -> list[dict[str, object]]:
-    """Read the current XML marker metadata for completed Server scopes."""
+    """读取已完成扫描目录 folders 中的 XML 标记元数据。"""
     entries: list[dict[str, object]] = []
     for folder in folders:
         snapshot, _ = _server_snapshot_folder((Path(folder), True))
@@ -5347,6 +5376,7 @@ def _server_scan_xml_entries(folders: Iterable[Path]) -> list[dict[str, object]]
 
 
 def _server_scan_snapshot_path(config: Config) -> Path:
+    """返回配置 config 的状态目录中的扫描快照文件路径。"""
     return config.state_dir / SERVER_SCAN_SNAPSHOT_FILENAME
 
 
@@ -5358,7 +5388,9 @@ def _write_server_scan_snapshot(
     scanned_at: str,
     entries: dict[str, dict],
 ) -> Path:
-    """Persist the read-only scan result for the immediately following index update."""
+    """保存只读扫描结果，供紧接的索引更新复用。
+
+    参数：config 为配置；root 为主要根目录；roots 为全部根目录；scanned_at 为扫描时间；entries 为快照条目。"""
     path = _server_scan_snapshot_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     draft = path.with_name(f".{path.name}.tmp")
@@ -5377,7 +5409,7 @@ def _load_server_scan_snapshot(
     config: Config,
     snapshot_path: Path | None,
 ) -> tuple[Path, list[Path], dict[str, dict]] | None:
-    """Load a scan snapshot only when it still matches the configured roots."""
+    """读取仍与当前来源根目录一致的快照；config 为配置，snapshot_path 为可选快照路径。"""
     if snapshot_path is None:
         return None
     try:
@@ -5408,6 +5440,7 @@ def _load_server_scan_snapshot(
 
 
 def _server_change_message(change_type: str, item: dict, path: str) -> str:
+    """生成来源变化的中文提示；change_type 为变化类型，item 为文件信息，path 为来源路径。"""
     if change_type == "missing_report":
         order_id = str(item.get("order_id") or "").strip()
         order_suffix = f"（订单 {order_id}）" if order_id else ""
@@ -5435,13 +5468,12 @@ def _server_change_message(change_type: str, item: dict, path: str) -> str:
 
 
 def _server_folder_rename_pairs(previous: dict[str, dict], current: dict[str, dict]) -> list[tuple[str, str]]:
-    """Match a renamed folder only when its recognized reports are identical.
+    """保守匹配前后快照中改名的目录；previous 为原快照，current 为当前快照。
 
-    The match is deliberately conservative: same parent, non-empty identical
-    report metadata, and exactly one candidate with the same order identity.
-    Ambiguous or content-changing folders remain ordinary add/remove changes.
-    """
+    仅接受同一父目录、非空且完全相同的报表元数据、同一订单身份且唯一的候选；
+    有歧义或内容变化时仍作为普通新增和删除处理。"""
     def folders(entries: dict[str, dict], previous_entries: bool) -> dict[str, set[str]]:
+        """按目录收集报表相对路径和元数据签名；entries 为快照，previous_entries 为当前未使用的保留参数。"""
         result: dict[str, set[str]] = {}
         for path, item in entries.items():
             if item.get("kind") == "folder":
@@ -5475,6 +5507,7 @@ def _server_folder_rename_pairs(previous: dict[str, dict], current: dict[str, di
         if not signature:
             continue
         def content_matches(old_folder: str, new_folder: str) -> bool:
+            """比较候选改名前后的文件指纹；old_folder 为旧目录，new_folder 为新目录，读取失败视为不一致。"""
             for relative, _, _, _ in signature:
                 previous_row = previous.get(str(Path(old_folder) / relative), {})
                 fingerprint = str(previous_row.get("content_fingerprint") or "")
@@ -5504,7 +5537,7 @@ def _server_folder_rename_pairs(previous: dict[str, dict], current: dict[str, di
 
 
 def _rebase_server_folder_paths(store: "OrderIndexStore", pairs: list[tuple[str, str]]) -> None:
-    """Move indexed source paths after a confirmed folder rename."""
+    """在目录改名被确认后迁移索引路径；store 为索引库，pairs 为旧路径到新路径的二元组列表。"""
     for old_folder, new_folder in pairs:
         rows = store.connection.execute(
             "select path from source_files where source_folder=? order by path",
@@ -5527,7 +5560,7 @@ def _rebase_server_folder_paths(store: "OrderIndexStore", pairs: list[tuple[str,
                 pass
         try:
             store.connection.execute(
-                "update active_issues set path=? where path=? or path like ?",
+                "update pending_issues set path=? where path=? or path like ?",
                 (new_folder, old_folder, old_folder + "/%"),
             )
         except sqlite3.OperationalError:
@@ -5547,6 +5580,9 @@ def _server_data_change_message(
     data_label: str,
     path: str = "",
 ) -> str:
+    """生成业务资料变化提示。
+
+    参数：change_type 为变化类型；order_ids 为订单号；factory_order 为工厂单号；data_label 为资料类别；path 为可选路径。"""
     action = {"added": "新增", "modified": "修改", "removed": "删除"}[change_type]
     visible_orders = "、".join(dict.fromkeys(order_id for order_id in order_ids if order_id)) or "相关订单"
     subject = f"订单 {visible_orders}"
@@ -5561,6 +5597,7 @@ def _server_data_change_message(
 
 
 def _source_file_data_label(kind: str) -> str:
+    """将来源类别 kind 转换为面向用户的资料名称。"""
     return {
         "board": "板材信息",
         "fittings": "五金信息",
@@ -5571,12 +5608,9 @@ def _source_file_data_label(kind: str) -> str:
 
 
 def _summarize_server_read_items(items: list[tuple[str, str, str]]) -> str:
-    """Summarize indexed Server reads without exposing every absolute path.
+    """汇总已索引来源的读取说明，供看板提示使用。
 
-    ``items`` contains ``(path, source_folder, kind)`` entries.  The complete
-    paths remain in the index and error records; this display-only summary is
-    intentionally short enough for the dashboard hover panel.
-    """
+    参数：items 为文件路径、所属目录、类别三元组列表；完整路径仍留在索引及错误记录中，显示摘要保持简短。"""
     groups: dict[str, dict[str, int]] = {}
     group_order: list[str] = []
     for path, source_folder, kind in items:
@@ -5617,7 +5651,7 @@ def _summarize_server_read_items(items: list[tuple[str, str, str]]) -> str:
 
 
 def _trace_rows(rows: list[dict]) -> tuple[int, int]:
-    """Return distinct order and factory-order counts for an operation trace."""
+    """统计 rows 中不重复的订单和工厂单数量，供操作记录展示。"""
     orders = {
         str(row.get("sales_order_name") or row.get("order_id") or "").strip().upper()
         for row in rows
@@ -5634,7 +5668,7 @@ def _trace_rows(rows: list[dict]) -> tuple[int, int]:
 
 
 def _flat_aimes_stage_durations(values: object) -> list[dict[str, object]]:
-    """Keep only non-overlapping AIMES stages in the display contract."""
+    """从耗时数据 values 提取互不重叠的 AIMES 阶段，排除重复的汇总项。"""
     if not isinstance(values, list):
         return []
     return [
@@ -5650,7 +5684,7 @@ def _complete_aimes_stage_durations(
     values: object,
     total_seconds: float,
 ) -> list[dict[str, object]]:
-    """Make the flat stage list account for backend-only preparation/cleanup."""
+    """补齐后台准备和清理耗时；values 为已有阶段数据，total_seconds 为端到端总耗时秒数。"""
     stages = _flat_aimes_stage_durations(values)
     tracked = sum(
         max(0.0, float(item.get("duration_seconds", 0)))
@@ -5677,6 +5711,10 @@ def _aimes_trace(
     elapsed_seconds: float | None = None,
     stage_durations: list[dict] | None = None,
 ) -> list[str]:
+    """组装 AIMES 操作的来源、计数、错误及耗时说明。
+
+    参数：config 为配置；source 为来源类型；rows 为记录；wrote_cache 为是否写缓存；error 为错误；
+    warnings 为可选警告；elapsed_seconds 为总耗时；stage_durations 为阶段耗时列表。"""
     order_count, factory_count = _trace_rows(rows)
     if error:
         return [
@@ -5723,6 +5761,7 @@ def _server_scan_trace(
     roots: list[str] | None = None,
     folder_timings: list[dict[str, object]] | None = None,
 ) -> list[str]:
+    """组装 Server 扫描统计及耗时说明；stats 为计数统计，roots 为可选根目录，folder_timings 为目录耗时。"""
     root_detail = f"（目录：{'、'.join(roots)}）" if roots else ""
     excel_detail = ""
     if int(stats.get("related_excel_count", 0) or 0):
@@ -5763,14 +5802,12 @@ def _server_scan_trace(
     return trace
 
 
+@pending_check_session
 def scan_server_changes(config: Config) -> dict:
-    """Compare Server metadata without advancing the processed baseline.
+    """比较 Server 元数据，不推进已处理业务基准；config 为扫描配置。
 
-    The scan may clean stale pending state for folders excluded by the configured
-    baseline; it never marks currently visible material/report files as processed.
-    Optimization XML is an in-memory discovery only. Its evidence, timestamps
-    and comparison baseline belong to the material confirmation transaction.
-    """
+    可清理配置基准外的过期待处理状态，但不将当前材料或报表标为已处理。
+    优化 XML 仅在内存中发现，其证据、时间及比较基准由材料确认事务负责。"""
     scanned_at = _now()
     scan_started = time.perf_counter()
     store = OrderIndexStore(config.workflow_database)
@@ -5908,8 +5945,7 @@ def scan_server_changes(config: Config) -> dict:
             "mixed_order": bool(item.get("mixed_order")),
             "event_time": _display_timestamp(item["modified_at"] / 1_000),
         })
-    # Temporary and mixed folders retain the report-metadata workflow. Their
-    # reports are deliberately outside the XML-only standard-order contract.
+    # 临时及混合目录继续使用报表元数据流程，不适用标准订单仅检查 XML 的约定。
     for path in sorted(current_legacy.keys() - previous_legacy.keys()):
         item = current_legacy[path]
         changes.append({
@@ -5957,9 +5993,7 @@ def scan_server_changes(config: Config) -> dict:
             "mixed_order": bool(item.get("mixed_order")),
             "event_time": _display_timestamp(item["modified_at"] / 1_000),
         })
-    # A mixed-order folder is recognized from its name before report parsing.
-    # Keep it actionable when no usable report exists, but leave the actual
-    # workbook parsing to the explicit preview/processing step.
+    # 先从名称识别混合订单目录；即使暂无可用报表，也保留待处理入口，实际解析留到明确预览或处理时。
     for path, item in sorted(current_legacy.items()):
         if item["kind"] != "folder" or not item.get("mixed_order"):
             continue
@@ -5993,11 +6027,8 @@ def scan_server_changes(config: Config) -> dict:
                 "mixed_order": True,
                 "event_time": _display_timestamp(item["modified_at"] / 1_000),
             })
-    # A failed temporary-order processing run must remain actionable, but it
-    # must not erase the metadata baseline.  Keep the original source paths as
-    # the comparison baseline and surface a virtual pending change from the
-    # active issue instead.  This prevents an unchanged retry from being
-    # mislabeled as a newly discovered order.
+    # 临时订单处理失败后仍须可操作，但不清除元数据基准；保留原路径比较基准，从当前问题生成待处理变化，
+    # 避免未变化的重试被误报为新发现订单。
     failed_temporary_paths = {
         str(issue.get("path") or "")
         for issue in store.active_issues()
@@ -6040,25 +6071,24 @@ def scan_server_changes(config: Config) -> dict:
         if item.get("handling_mode") in {"supplemental", "external_manual"}:
             change["manual_only"] = True
             change["order_id"] = item.get("order_id", "")
+    from .aicnc_import import enabled as aicnc_enabled, discover as discover_optimizations
+    if aicnc_enabled(store.connection):
+        changes.extend(discover_optimizations(config, store.connection))
+
     order_folder_count = sum(item["kind"] == "folder" for item in current.values())
     related_xml_count = len(current_xml)
     related_legacy_count = sum(item["kind"] != "folder" for item in current_legacy.values())
     metadata_finished = time.perf_counter()
     scan_stats: dict[str, int | float] = {
-        # Keep this distinct from the full scan total below.  The ordinary
-        # Server scan is metadata/XML-only; material parsing belongs to the
-        # explicit preview/confirmation path.
+        # 此项与完整扫描总数分开；普通 Server 扫描仅比较元数据和 XML，材料解析属于明确预览及确认流程。
         "metadata_scan_seconds": round(metadata_finished - scan_started, 6),
         "order_folder_count": order_folder_count,
-        # The current scanner checks only the two optimization XML markers in
-        # each included folder. Report workbooks are parsed later only when a
-        # user opens the preview.
+        # 当前扫描器只检查纳入目录中的两类优化 XML，工作簿仅在用户打开预览时解析。
         "quick_checked_file_count": related_xml_count + related_legacy_count,
         "reused_folder_count": 0,
         "deep_scanned_folder_count": order_folder_count,
         "related_xml_count": related_xml_count,
-        # Keep the old key for clients that decode older scan payloads. It no
-        # longer represents the files considered by this Server scan.
+        # 保留旧字段名供已有客户端解码，但它不再代表当前 Server 扫描涉及的文件。
         "related_excel_count": related_legacy_count,
         "added_count": sum(item["change_type"] == "added" for item in changes),
         "modified_count": sum(item["change_type"] == "modified" for item in changes),
@@ -6097,7 +6127,7 @@ def scan_server_changes(config: Config) -> dict:
             )
         )
     except OSError:
-        # The next sync can safely fall back to its own read-only traversal.
+        # 下一次同步可以安全回退到自行进行只读遍历。
         snapshot_path = ""
     completed = time.perf_counter()
     scan_stats["finalize_seconds"] = round(completed - finalize_started, 6)
@@ -6149,6 +6179,7 @@ def scan_server_changes(config: Config) -> dict:
 
 
 def _path_is_within(path: Path, root: Path) -> bool:
+    """判断路径 path 是否位于根目录 root 内。"""
     try:
         path.resolve().relative_to(root.resolve())
     except ValueError:
@@ -6164,6 +6195,10 @@ def _server_folders_for_sync(
     store: OrderIndexStore | None = None,
     aimes_rows: list[dict] | None = None,
 ) -> tuple[Path, list[Path]]:
+    """确定本次同步目录并校验来源范围。
+
+    参数：config 为配置；selected_folder 为单选目录；selected_folders 为可选多选目录；
+    store 为可选索引库；aimes_rows 为可选最新身份记录。"""
     roots = _available_server_roots(config)
     if not roots:
         from .order_workflow import resolve_source_root
@@ -6171,7 +6206,23 @@ def _server_folders_for_sync(
     root = roots[0]
 
     def containing_root(candidate: Path) -> Path | None:
+        """查找包含候选路径 candidate 的已配置 Server 根目录，未找到时返回 None。"""
         return next((server_root for server_root in roots if _path_is_within(candidate, server_root)), None)
+
+    def assert_legacy_selection(candidate: Path) -> None:
+        # 显式旧入口也不得绕过新版确认台账；尚未创建数据库时保持原目录校验。
+        if not config.workflow_database.is_file():
+            return
+        from .aicnc_import import enabled as aicnc_enabled
+        check_connection = store.connection if store is not None else connect_database(config.workflow_database)
+        try:
+            if aicnc_enabled(check_connection):
+                legacy_paths = {Path(row[0]).resolve() for row in check_connection.execute('select path from aicnc_legacy_watch')}
+                if candidate.resolve() not in legacy_paths:
+                    raise RuleError('aicnc_preview_required','新版目录请在待处理中心选择单个优化文件夹，预览并确认后处理')
+        finally:
+            if store is None:
+                check_connection.close()
 
     if selected_folders is not None:
         folders = []
@@ -6185,7 +6236,8 @@ def _server_folders_for_sync(
                     "server_folder_invalid",
                     f"无法识别所选文件夹：{candidate}。该目录及子目录中未找到可识别的 material、板材清单或 Fittingslist .xlsx 报表。请选择包含这些报表的订单目录；若选择的是优化结果目录，请返回上一级订单目录。",
                 )
-            # Independent folder records use the configured scan root spelling.
+            assert_legacy_selection(candidate)
+            # 独立目录记录保留配置中的扫描根路径拼写。
             if not _is_standard_order_folder(candidate.name):
                 candidate = source_root / candidate.relative_to(source_root.resolve())
             folders.append(candidate)
@@ -6197,6 +6249,13 @@ def _server_folders_for_sync(
             close_store = True
         else:
             close_store = False
+        from .aicnc_import import enabled as aicnc_enabled
+        if aicnc_enabled(store.connection):
+            folders = [Path(row[0]) for row in store.connection.execute("select path from aicnc_legacy_watch where retired_at=''")
+                       if Path(row[0]).is_dir() and _server_folder_scan_allowed(config, store, Path(row[0]), aimes_rows)]
+            if close_store:
+                store.close()
+            return root, folders
         folders = []
         for server_root in roots:
             folders.extend(
@@ -6229,14 +6288,17 @@ def _server_folders_for_sync(
     source_root = containing_root(selected)
     if not selected.is_dir() or source_root is None:
         raise RuleError("server_folder_invalid", "所选文件夹无法访问，请重新选择 Server 订单文件夹。")
+    from .aicnc_import import OPTIMIZATION_RE
+    if OPTIMIZATION_RE.fullmatch(selected.name):
+        assert_legacy_selection(selected)
     if not _is_standard_order_folder(selected.name):
         selected = source_root / selected.relative_to(source_root.resolve())
     if _is_standard_order_folder(selected.name):
+        assert_legacy_selection(selected)
         return selected, [selected]
     if _direct_report_files(selected):
-        # A non-standard folder containing recognized Server reports is a
-        # temporary or mixed order. Keep the folder itself as the processing scope;
-        # never expand it into child order folders.
+        assert_legacy_selection(selected)
+        # 包含已识别报表的非标准目录属于临时或混合订单，以目录自身为处理范围，不扩展为子订单目录。
         return selected, [selected]
     raise RuleError(
         "server_folder_invalid",
@@ -6250,7 +6312,9 @@ def _clear_stale_mapping_validation_status(
     current_issue_keys: set[str],
     seen_at: str,
 ) -> int:
-    """Clear an old SKU validation error after its mapping is now resolved."""
+    """在 SKU 映射已解决后清除旧校验错误。
+
+    参数：store 为索引库；order_ids 为订单范围；current_issue_keys 为仍有效的问题；seen_at 为观察时间。"""
     cleared = 0
     for order_id in sorted({value.upper() for value in order_ids if value}):
         mapping_prefixes = (
@@ -6271,14 +6335,10 @@ def _clear_stale_mapping_validation_status(
 
 
 def _exact_resolve_unowned_factories(config: Config, candidates: dict[str, dict]) -> str:
-    """Use exact AIMES lookups only for factory orders absent from local DB.
+    """仅对本地没有身份的新工厂单进行 AIMES 精确查询。
 
-    The local factory-order table is the durable identity index. A Server
-    report may be re-read with only a partial name, so callers hydrate
-    candidates from that table before considering an online exact lookup.
-    Exact lookup is reserved for a genuinely new factory order that has no
-    local identity.
-    """
+    参数：config 为配置；candidates 为候选集合。调用方先用持久身份补全候选，
+    不能因 Server 报表只有部分名称就重复进行在线查询。"""
     missing = sorted(
         factory_order
         for factory_order, candidate in candidates.items()
@@ -6309,7 +6369,7 @@ def _merge_database_factory_candidates(
     store: OrderIndexStore,
     candidates: dict[str, dict],
 ) -> set[str]:
-    """Reuse durable factory identity before any exact AIMES lookup."""
+    """在线精确查询前复用持久工厂单身份；store 为索引库，candidates 为待补全候选集合。"""
     if not candidates:
         return set()
     placeholders = ",".join("?" for _ in candidates)
@@ -6346,7 +6406,7 @@ def _merge_database_factory_candidates(
 
 
 def _preview_fittings_groups(path: Path, cache: dict | None = None) -> list:
-    """Reuse parsed hardware facts within one preview; never across requests."""
+    """在单次预览内复用五金解析结果，不跨请求保存；path 为报表路径，cache 为可选请求内缓存。"""
     from .order_workflow import parse_fittings_groups
 
     stat = path.stat()
@@ -6360,6 +6420,7 @@ def _preview_fittings_groups(path: Path, cache: dict | None = None) -> list:
 
 
 @with_source_decisions
+@pending_check_session
 def sync_order_index(
     config: Config,
     *,
@@ -6376,13 +6437,13 @@ def sync_order_index(
     server_snapshot_path: Path | None = None,
     fittings_cache: dict | None = None,
 ) -> dict:
-    """Refresh AIMES/Server facts into the local order index and return summaries.
+    """同步 AIMES、Server 事实到订单索引并返回看板摘要。
 
-    Normal dashboard refreshes are incremental: unchanged report metadata is
-    reused from SQLite and only orders touched by a Server report change are
-    previewed again.  ``full_refresh`` remains available for an explicit
-    integrity refresh or troubleshooting.
-    """
+    参数：config 为配置；refresh_aimes 为刷新身份；aimes_if_needed 为按需刷新；selected_folder、selected_folders 为所选目录；
+    process_temporary 为是否处理临时目录；include_hardware 为是否包含五金；full_refresh 为完整重查；
+    validate_selected_orders 为是否校验所选订单；refresh_outbound_statuses 为是否刷新出库状态；
+    reconcile_outbound 为是否执行出库对账；server_snapshot_path 为可选扫描快照；fittings_cache 为请求内五金解析缓存。
+    普通看板刷新复用未变化报表的元数据，仅重新预览受变化影响的订单；完整刷新用于明确的核查或诊断。"""
     from .order_workflow import (
         ORDER_FOLDER_RE as SOURCE_ORDER_FOLDER_RE,
         MaterialItem,
@@ -6403,6 +6464,7 @@ def sync_order_index(
     phase_durations: dict[str, float] = {}
 
     def finish_phase(name: str) -> None:
+        """记录阶段 name 的耗时并重置下一阶段计时起点。"""
         nonlocal phase_started
         now = time.perf_counter()
         phase_durations[name] = round(now - phase_started, 3)
@@ -6412,9 +6474,7 @@ def sync_order_index(
         InventoryMappings(config.workflow_database, connection=config.workflow_connection)
         if config.storage_prepared else None
     )
-    # InventoryMappings opens short-lived read connections to the same
-    # workflow database.  Initialize it before OrderIndexStore starts its
-    # schema transaction, and reuse it throughout this sync.
+    # 商品映射会另开短期读连接；在索引库开启结构事务前初始化，并在本次同步中复用。
     store = OrderIndexStore(config.workflow_database, connection=config.workflow_connection)
     store.connection.execute("delete from temp.preview_validation")
     _mark_initial_orders_shipped(config, store)
@@ -6746,9 +6806,7 @@ def sync_order_index(
                 for order_id in folder_order_ids:
                     store.upsert_order(
                         order_id,
-                        # A standard or mixed Server folder is authoritative
-                        # evidence that a previously temporary-looking order
-                        # is now a normal owned/cut-to-size order.
+                        # 标准或混合 Server 目录可证明先前看似临时的订单已属于正常自有或 CUT TO SIZE 订单。
                         order_type=_order_type(order_id),
                         source_folder=str(folder),
                         server_seen=server_seen,
@@ -6763,10 +6821,7 @@ def sync_order_index(
                     ],
                     key=lambda item: str(item[0]).casefold(),
                 )
-                # The lightweight scan snapshot intentionally contains only
-                # the XML change markers. Explicit preview/confirmation still
-                # needs the current Excel reports, so discover those files
-                # only after the user has selected the folder for processing.
+                # 轻量快照仅包含 XML 变化标记；明确预览及确认仍需当前 Excel，所以只在用户选择处理目录后发现这些文件。
                 if not report_files:
                     report_files = [
                         (path, kind, None) for path, kind in _report_files(folder)
@@ -6816,18 +6871,13 @@ def sync_order_index(
                     metadata=file_metadata,
                 )
                 if file_change_type:
-                    # A changed workbook must not fall back to the previous
-                    # identity if parsing it fails; unchanged workbooks may
-                    # safely retain their cached identity for reuse.
+                    # 工作簿已变且解析失败时，不能回退到旧身份；只有未变化的工作簿可以安全复用已索引身份。
                     store.connection.execute(
                         "update source_files set order_id = '', factory_order = '' where path = ?",
                         (str(path),),
                     )
                 seen_source_paths.add(str(path))
-                # Temporary/rework reports are actionable only through the
-                # pending-center approval flow. Keep their metadata baseline,
-                # but never parse or project business facts into the formal
-                # order index during this sync.
+                # 临时或返工报表只通过待处理中心批准流程处理；此同步保留元数据基准，不解析或投影到正式业务事实。
                 if manual_folder:
                     continue
                 if file_change_type:
@@ -6838,11 +6888,8 @@ def sync_order_index(
                         changed_order_level_ids.update(
                             order_id.upper() for order_id in folder_order_ids if order_id
                         )
-                # Fittings are optional user input.  When the user chose not
-                # to include hardware, do not parse or validate the report at
-                # all.  A non-standard temporary folder is also parsed only
-                # during the approved processing step, where its AIMES match
-                # (or lack of one) selects strict versus unscoped rules.
+                # 五金属于用户可选输入，未选择时不解析或校验；非标准临时目录也只在批准处理时解析，
+                # 届时依据是否匹配 AIMES 选择严格归属或无归属规则。
                 if kind == "fittings" and not include_hardware:
                     continue
                 if kind == "material" and config.storage_prepared:
@@ -6855,12 +6902,7 @@ def sync_order_index(
                     from .inventory import resolve_inventory_items, TravelerItem
 
                     try:
-                        # Room-level allocation is used to preserve factory
-                        # ownership, but it must not bypass the order-level
-                        # material workbook checks. In particular, a standard
-                        # single-order folder with explicit room rows would
-                        # otherwise go straight to _select_room_materials()
-                        # and skip Color/Color Table validation entirely.
+                        # 房间级分配用于保留工厂单归属，但不能跳过订单材料工作簿校验；标准单目录即使有房间行，也须检查颜色及颜色汇总表。
                         validation_order_id = next(
                             iter(folder_order_ids),
                             display_order_id or Path(str(folder)).name,
@@ -6899,9 +6941,7 @@ def sync_order_index(
                         mappings = inventory_mappings
                         if mappings is None:
                             raise RuleError("material_mapping", "库存映射数据库尚未准备好")
-                        # resolve_inventory_items reads mapping rules through a
-                        # separate SQLite connection. Commit the source-file
-                        # metadata update before opening that reader.
+                        # 商品解析通过另一个 SQLite 连接读取规则；先提交来源元数据更新，避免阻塞该读连接。
                         store.commit()
                         for material_order_id, (parsed_materials, parsed_edges) in parsed_by_order.items():
                             resolution_items = [
@@ -7118,13 +7158,10 @@ def sync_order_index(
                             path=str(path),
                         )
                 elif kind == "fittings":
-                    # Keep the folder-derived order hint available to both
-                    # the successful parser path and every error path.  A
-                    # malformed Fittingslist must report its own file, not
-                    # raise a secondary UnboundLocalError for order_hint.
+                    # 目录推导的订单提示须同时供成功和错误路径使用；损坏的五金报表应报告自身问题，不能因变量未初始化再抛异常。
                     order_hint = folder_order_ids[0] if len(folder_order_ids) == 1 else ""
                     factory_orders = []
-                    store.commit()  # Discovery metadata is evidence, not confirmed hardware.
+                    store.commit()  # 发现阶段元数据只是证据，不是已确认五金事实。
                     report_write_started = False
                     try:
                         groups = _preview_fittings_groups(path, fittings_cache)
@@ -7134,9 +7171,23 @@ def sync_order_index(
                             (factory_order, items)
                             for factory_order, items in groups
                             if (
-                                not (current_report_context() and factory_order.upper() in current_report_context().keep_factories)
+                                not (
+                                    current_report_context()
+                                    and factory_order.upper() in current_report_context().keep_factories
+                                    and (
+                                        current_report_context().locked_decisions.get(
+                                            factory_order.upper(), {}
+                                        ).get("handling") == "manual"
+                                        or store.connection.execute(
+                                            "select 1 from hardware_items where factory_order=? and source_type='aicnc' limit 1",
+                                            (factory_order.upper(),),
+                                        ).fetchone()
+                                    )
+                                )
                                 and selected_fittings.get(factory_order.upper()) is not None
-                                and selected_fittings[factory_order.upper()].path.resolve() == path.resolve()
+                                and same_selected_fittings_source(
+                                    selected_fittings[factory_order.upper()], path, items
+                                )
                             )
                         ]
                         if config.storage_prepared:
@@ -7391,10 +7442,7 @@ def sync_order_index(
                     factory_order.upper() in changed_factory_orders
                     or item["order_id"].upper() in changed_order_level_ids
                 )
-                # An order-level material source can change independently of
-                # a factory-scoped hardware shipment.  Do not reopen that
-                # factory's shipped status when its hardware document is
-                # still confirmed locally.
+                # 订单材料来源可独立于工厂单五金出货变化；本地五金单仍已确认时，不重新打开已出货状态。
                 and not _has_factory_hardware_outbound_record(item, outbound_records)
             ):
                 outbound_status = "需要更新"
@@ -7463,8 +7511,7 @@ def sync_order_index(
                     message=f"删除订单 {order_id or '相关订单'} 的{_source_file_data_label(kind)}：{Path(old_path).name}",
                     path=old_path,
                 )
-            # A missing file changes discovery metadata, not confirmed material
-            # demand or historical allocations. Keep facts until explicit replacement.
+            # 文件缺失只改变发现元数据，不改变已确认材料需求或历史分配；保留事实直至明确替换。
             store.connection.execute("delete from source_files where path = ?", (old_path,))
             if kind in {"board", "fittings", "material"}:
                 changed_order_ids.update(
@@ -7481,11 +7528,8 @@ def sync_order_index(
     finish_phase("material_source_scope_reconciliation")
 
     validation_params: list[str] = []
-    # A manually selected Server folder is an explicit request to recheck the
-    # contained order.  Do not let the candidate-resolution phase's temporary
-    # ``Server`` identity prevent that order from entering validation; doing
-    # so would leave the previous validation_status/validation_message in the
-    # preview database and make a repaired report look broken forever.
+    # 人工选择目录就是明确请求重查订单，不能因候选解析中的临时 Server 标签而跳过校验，
+    # 否则预览库旧错误会让已修复报表一直显示异常。
     if selected_folder is not None or selected_folders is not None:
         selected_validation_folders = sorted(scanned_folder_paths)
         if selected_validation_folders:
@@ -7503,6 +7547,7 @@ def sync_order_index(
         "select distinct orders.order_id, orders.source_folder "
         "from orders join factory_orders on factory_orders.order_id = orders.order_id "
         "where orders.source_folder <> '' "
+        "and orders.stage <> '已中止' "
         "and factory_orders.aimes_status = 'active' and ("
         + validation_scope_sql
         + ")"
@@ -7523,12 +7568,8 @@ def sync_order_index(
         if str(row[0]).upper() in changed_order_ids
     ]
 
-    # Validate the current source against each logical order. A successful
-    # preview is the existing, auditable material/factory evidence for the
-    # dashboard's “已优化” count; it is not a claim about CNC production.
-    # ``preview_order`` also persists its normalized facts. Commit the report
-    # parsing transaction first so its separate SQLite connection cannot be
-    # blocked by this index connection's pending writes.
+    # 按每个逻辑订单校验当前来源，以成功预览作为材料和工厂单证据。
+    # preview_order 也会保存标准化事实，先提交报表解析事务，避免阻塞其独立 SQLite 连接。
     validations = store.connection.execute('select * from temp.preview_validation').fetchall()
     store.commit()
     store.close()
@@ -7537,16 +7578,11 @@ def sync_order_index(
     for order in validation_rows:
         order_id, source_folder = order
         try:
-            # Validation must not overwrite the source-scoped Server facts
-            # just parsed above.  ``preview_order`` historically persisted
-            # the root material workbook and would erase recut increments
-            # before the confirmation payload was built.
+            # 校验不能覆盖刚解析的来源级事实；历史 preview_order 会保存根材料工作簿并抹去补切增量，故在此禁止该覆盖。
             preview = preview_order(
                 config, Path(source_folder), order_id, persist_facts=False, include_hardware=include_hardware
             )
-            # Ownership in AIMES alone does not mean this material write covers
-            # a newly added factory. Require its identity in the selected reports
-            # or XML; XML only scopes the write, never establishes state by itself.
+            # AIMES 归属不能单独证明材料写入覆盖新工厂单；必须在所选报表或 XML 中有身份，XML 只界定范围，不单独确定状态。
             source_factory_ids = {
                 factory.strip().upper()
                 for row in store.connection.execute(
@@ -7589,10 +7625,7 @@ def sync_order_index(
             }
             optimization_outputs = _optimization_result_artifacts(Path(source_folder))
             if order_id.upper().startswith("CS") and indexed_factory_ids and optimization_outputs:
-                # Some CUT TO SIZE exports contain only the production reports
-                # and CNC nesting output, without a generated material workbook.
-                # Keep missing materials visibly pending; XML alone must not
-                # establish optimization state or a processed-file baseline.
+                # 部分 CUT TO SIZE 导出只有生产报表和排版结果，没有材料工作簿；缺材料须保持待处理，XML 不能单独建立优化状态或处理基准。
                 store.set_validation(order_id, '待校验',
                     f"已发现优化产物：{optimization_outputs[0].name}；material 尚未生成，材料数据仍待校验")
                 continue
@@ -7628,8 +7661,7 @@ def sync_order_index(
                 observed_at=server_seen,
             )
         except OSError:
-            # The business sync can still complete when a network folder
-            # disappears during this optional scan-baseline refresh.
+            # 可选的扫描基准刷新中即使网络目录消失，已完成的业务同步仍可返回成功。
             pass
     finished = _now()
     store.record_run(
@@ -7725,10 +7757,10 @@ def process_server_folder(
     include_hardware: bool = True,
     process_temporary: bool = False,
 ) -> dict:
-    """Parse one user-selected Server folder using the normal index update path."""
-    # Validate before opening/updating the index.  This command is the explicit
-    # folder picker flow, so an invalid selection must be a fatal user-facing
-    # error rather than an ordinary sync warning that looks successful in the UI.
+    """通过正常索引更新流程处理所选来源目录。
+
+    参数：config 为配置；folder 为目录；include_hardware 为是否含五金；process_temporary 为是否处理临时目录。"""
+    # 打开或更新索引前先校验人工选择的目录；无效选择必须作为明确错误返回，不能降为界面看似成功的普通警告。
     _server_folders_for_sync(config, folder)
     return sync_order_index(
         config,
@@ -7739,12 +7771,14 @@ def process_server_folder(
 
 
 def _server_preview_directory(config: Config) -> Path:
+    """创建并返回配置 config 下的磁盘预览目录。"""
     directory = config.state_dir / "server-previews"
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
 
 def _server_preview_path(config: Config, token: str) -> Path:
+    """校验预览令牌并定位影子数据库；config 为配置，token 为预览令牌。"""
     token = str(token or "").strip()
     if not re.fullmatch(r"[0-9a-f]{32}", token):
         raise ValueError("Server 预览标识无效，请重新扫描")
@@ -7755,7 +7789,7 @@ def _server_preview_path(config: Config, token: str) -> Path:
 
 
 def _clone_workflow_database(config: Config, destination: Path) -> None:
-    """Clone the production index without copying its WAL files by hand."""
+    """通过 SQLite 备份机制复制数据库，不手工复制 WAL；config 为源配置，destination 为目标路径。"""
     destination.parent.mkdir(parents=True, exist_ok=True)
     if config.workflow_database.is_file():
         source = sqlite3.connect(config.workflow_database)
@@ -7771,6 +7805,7 @@ def _clone_workflow_database(config: Config, destination: Path) -> None:
 
 
 def _preview_config(config: Config, state_dir: Path) -> Config:
+    """从 config 派生预览配置并使用隔离状态目录 state_dir。"""
     return Config(
         source_root=config.source_root,
         order_root=state_dir / "travelers",
@@ -7789,6 +7824,7 @@ def _preview_config(config: Config, state_dir: Path) -> Config:
 
 
 def _path_in_folders(path: str, folders: list[str]) -> bool:
+    """判断路径 path 是否位于 folders 所列任一目录中。"""
     try:
         path_value = Path(path).expanduser().resolve()
         return any(
@@ -7805,6 +7841,7 @@ def _server_material_allocation_rows(
     source_path: str,
     material_key: str,
 ) -> list[dict]:
+    """读取来源材料的订单分配记录；store 为索引库，source_path 为来源路径，material_key 为材料身份键。"""
     rows = store.connection.execute(
         """
         select order_id, allocated_quantity
@@ -7824,6 +7861,7 @@ def _server_material_allocation_rows(
 
 
 def _server_material_preview_row(store: OrderIndexStore, row: dict) -> dict:
+    """组装材料行的来源数量及分配预览；store 为索引库，row 为来源材料记录。"""
     source_quantity = float(row.get("quantity", 0) or 0)
     source_path = str(row.get("source_path", "") or "")
     product_code = str(row.get("product_code", "") or "").strip().upper()
@@ -7853,6 +7891,7 @@ def _server_material_source_rows(
     store: OrderIndexStore | sqlite3.Connection,
     folder_paths: list[str],
 ) -> list[dict]:
+    """读取所选目录的材料来源行；store 为索引库或连接，folder_paths 为目录路径列表。"""
     connection = store.connection if isinstance(store, OrderIndexStore) else store
     rows = connection.execute(
         """
@@ -7880,6 +7919,7 @@ def _server_material_source_rows(
 
 
 def _server_material_sort_key(item: dict) -> tuple:
+    """为材料预览记录 item 生成按类型、属性等排列的稳定排序键。"""
     kind = str(item.get("material_type", "")).casefold()
     try:
         thickness = float(item.get("thickness") or 0)
@@ -7895,10 +7935,12 @@ def _server_material_sort_key(item: dict) -> tuple:
 
 
 def _server_change_key(*values: object) -> tuple[str, ...]:
+    """将可变参数 values 标准化为不区分大小写的比较元组，用于资料差异匹配。"""
     return tuple(str(value or "").strip().casefold() for value in values)
 
 
 def _sqlite_table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    """检查数据库连接 connection 中是否存在 table_name 指定的表。"""
     return connection.execute(
         "select 1 from sqlite_master where type='table' and name=?",
         (table_name,),
@@ -7911,8 +7953,11 @@ def _server_material_change_rows(
     order_id: str,
     folder_paths: list[str],
 ) -> list[dict]:
-    """Compare order-level material facts, aggregating duplicate source rows."""
+    """比较订单级材料事实，先汇总重复来源行。
+
+    参数：current 为当前库连接；preview 为预览连接；order_id 为订单号；folder_paths 为所选来源目录。"""
     def grouped(connection: sqlite3.Connection, source_paths: list[str]) -> dict[tuple[str, ...], dict]:
+        """按商品 SKU 汇总订单材料；connection 为待比较连接，source_paths 为可选来源范围。"""
         if not _sqlite_table_exists(connection, "material_items"):
             return {}
         params: list[object] = [order_id]
@@ -7991,7 +8036,9 @@ def _server_hardware_changes(
     preview: sqlite3.Connection,
     factory_order: str,
 ) -> list[dict]:
+    """比较指定工厂单的五金资料变化；current 为当前库，preview 为预览库，factory_order 为工厂单号。"""
     def grouped(connection: sqlite3.Connection) -> dict[tuple[str, ...], dict]:
+        """从连接 connection 按 SKU 汇总当前工厂单五金，不以显示名称或单位差异拆分身份。"""
         if not _sqlite_table_exists(connection, "hardware_items"):
             return {}
         rows = connection.execute(
@@ -8002,11 +8049,7 @@ def _server_hardware_changes(
         ).fetchall()
         grouped_rows: dict[tuple[str, ...], dict] = {}
         for row in rows:
-            # SKU is the stable business identity.  Source labels such as
-            # ``Hinge`` and ``TestFullHinge`` may vary between exports, while
-            # report specs and units may be absent or localized (``pcs`` vs
-            # ``Piece``); comparing those presentation fields creates false
-            # delete/add pairs in the preview.
+            # SKU 是稳定业务身份；不同导出的五金名称、规格和本地化单位可能不同，比较这些显示字段会制造虚假的删除和新增。
             key = _server_change_key(row[0])
             item = grouped_rows.setdefault(key, {
                 "product_code": str(row[0] or ""), "name": str(row[1] or ""),
@@ -8046,14 +8089,11 @@ def _refresh_server_preview_hardware(
     preview_store: OrderIndexStore | None = None,
     fittings_cache: dict | None = None,
 ) -> list[dict]:
-    """Rebuild preview hardware with the current SKU rules.
+    """使用当前 SKU 规则重建预览五金，正式事实只在用户确认后写入。
 
-    Server confirmation is allowed to resolve a hardware mapping after the
-    read-only preview was opened.  The preview database is therefore rebuilt
-    from the source Fittingslist files immediately before payload generation
-    and again immediately before the final write.  Production facts remain
-    untouched until the user confirms the combined write.
-    """
+    参数：config 为配置；preview_path 为预览库路径；folder_paths 为来源目录；skip_hardware_order_ids 为跳过订单；
+    preview_store 为可选已打开预览库；fittings_cache 为请求内解析缓存。
+    预览后可能补充商品映射，因此生成预览内容和最终写入前都需重新解析映射。"""
     from .inventory import TravelerItem, resolve_inventory_items, resolved_product_code
     from .order_workflow import parse_fittings_groups
 
@@ -8082,17 +8122,25 @@ def _refresh_server_preview_hardware(
             try:
                 groups = _preview_fittings_groups(Path(path), fittings_cache)
             except Exception:
-                # The regular Server parser already records malformed report
-                # issues.  This helper only owns SKU resolution.
+                # 普通 Server 解析流程已记录损坏报表问题，此辅助步骤只负责 SKU 匹配。
                 continue
 
             group_rows = []
             file_missing: list[dict] = []
             for factory_order, items in groups:
-                if current_report_context() and factory_order.upper() in current_report_context().keep_factories:
+                locked = current_report_context()
+                manual_locked = bool(
+                    locked
+                    and locked.locked_decisions.get(factory_order.upper(), {}).get("handling") == "manual"
+                )
+                has_automatic_hardware = bool(preview.connection.execute(
+                    "select 1 from hardware_items where factory_order=? and source_type='aicnc' limit 1",
+                    (factory_order.upper(),),
+                ).fetchone())
+                if locked and factory_order.upper() in locked.keep_factories and (manual_locked or has_automatic_hardware):
                     continue
                 source = selected_reports.get(factory_order.upper())
-                if source is None or str(source.path) != path:
+                if source is None or not same_selected_fittings_source(source, Path(path), items):
                     continue
                 factory = preview.connection.execute(
                     """select order_id, (case when stage='已出货' then '已出库' else '未出库' end) as outbound_status from factory_orders
@@ -8103,9 +8151,7 @@ def _refresh_server_preview_hardware(
                     continue
                 order_id = str(factory[0] or "").strip().upper()
                 if order_id in skipped_orders:
-                    # The user selected the decision at order level for a
-                    # cut-to-size order.  Do not require SKU resolution for
-                    # this order, and do not rebuild its preview hardware.
+                    # 用户在订单级决定跳过 CUT TO SIZE 五金，不再要求该订单五金匹配，也不重建其预览五金。
                     group_rows.append((str(factory_order).strip().upper(), order_id, items, None))
                     continue
                 pairs = [
@@ -8143,9 +8189,7 @@ def _refresh_server_preview_hardware(
                     file_missing.append({"name": name, "source_code": str(missing.get("source_code", "") or "")})
                 group_rows.append((str(factory_order).strip().upper(), order_id, items, resolution))
 
-            # Do not leave a partially rebuilt Fittingslist in the preview.
-            # The whole source file is blocked until every item is mapped or
-            # explicitly ignored.
+            # 预览中不能留下只重建一部分的五金报表；每项都匹配或明确忽略后，整份来源才可放行。
             if file_missing:
                 continue
             hardware_rows_by_factory: dict[str, list[dict]] = {}
@@ -8208,26 +8252,44 @@ def _server_preview_payload(
     *,
     preview_store: OrderIndexStore | None = None,
 ) -> dict:
+    """组装 Server 预览中的订单、资料差异和待确认写入记录。
+
+    参数：config 为配置；preview_path 为预览库路径；token 为预览令牌；folders 为来源目录；
+    include_hardware 为是否包含五金；preview_store 为可选已打开的预览库。"""
     owns_store = preview_store is None
     store = preview_store or OrderIndexStore(preview_path)
     current = sqlite3.connect(config.workflow_database)
     from .inventory import InventoryMappings
     display_mappings = InventoryMappings(config.workflow_database, connection=current)
     folder_paths = [str(folder) for folder in folders]
+    aborted_orders = {
+        str(row[0]).upper()
+        for row in current.execute("select order_id from orders where stage='已中止'")
+    } if _sqlite_table_exists(current, "orders") else set()
     order_ids: set[str] = set()
     source_rows = store.connection.execute(
         "select path, source_folder, kind, order_id, factory_order from source_files"
     ).fetchall()
+    # 共享目录中的历史报表仍保留，但已中止订单不进入本次确认及其写入记录。
+    source_rows = [
+        row for row in source_rows
+        if not (
+            owners := {value.strip().upper() for value in str(row[3] or "").split("、") if value.strip()}
+        ) or not owners.issubset(aborted_orders)
+    ]
     for path, source_folder, kind, order_id, factory_order in source_rows:
         if not _path_in_folders(str(source_folder), folder_paths):
             continue
         order_ids.update(
             value.strip().upper()
             for value in str(order_id or "").split("、")
-            if value.strip()
+            if value.strip() and value.strip().upper() not in aborted_orders
         )
 
-    material_source_rows = _server_material_source_rows(store, folder_paths)
+    material_source_rows = [
+        row for row in _server_material_source_rows(store, folder_paths)
+        if str(row["order_id"]).upper() not in aborted_orders
+    ]
     material_sources = [
         _server_material_preview_row(store, row)
         for row in material_source_rows
@@ -8258,6 +8320,8 @@ def _server_preview_payload(
     selected_factories: set[str] = set()
     for row in factory_rows:
         factory_order, order_id = str(row[0]), str(row[1]).upper()
+        if order_id in aborted_orders:
+            continue
         source_folder = str(row[6] or "")
         if order_id not in order_ids and not _path_in_folders(source_folder, folder_paths):
             continue
@@ -8407,6 +8471,7 @@ def _server_preview_payload(
     selected_factory_orders = sorted(selected_factories)
 
     def table_records(table: str, where: str, params: tuple = ()) -> list[dict]:
+        """读取预览表的指定记录并转为字典；table 为表名，where 为筛选条件，params 为绑定参数。"""
         columns = [row[1] for row in store.connection.execute(f"pragma table_info({table})").fetchall()]
         if not columns:
             return []
@@ -8471,6 +8536,11 @@ def _server_preview_payload(
             tuple(selected_source_paths),
         ),
     }
+    for table in ("material_items", "server_material_allocations"):
+        write_records[table] = [
+            row for row in write_records[table]
+            if str(row.get("order_id", "")).upper() not in aborted_orders
+        ]
     no_change_revision = (
         _server_business_revision(current, sorted(order_ids))
         if _sqlite_table_exists(current, "orders") else ""
@@ -8499,7 +8569,7 @@ def _server_preview_payload(
 
 
 def _server_preview_has_business_changes(payload: dict) -> bool:
-    """Return whether a Server preview contains a real business delta."""
+    """判断预览内容 payload 是否包含实际业务资料增减变化。"""
     if "has_business_changes" in payload:
         return bool(payload.get("has_business_changes"))
     return any(
@@ -8512,7 +8582,9 @@ def _server_preview_has_business_changes(payload: dict) -> bool:
 
 
 def _server_business_revision(connection: sqlite3.Connection, order_ids: list[str]) -> str:
-    """Detect local changes since the preview without including scan baselines."""
+    """计算订单事实版本以检测预览后的本地变化，不包括扫描基准。
+
+    参数：connection 为数据库连接；order_ids 为订单范围。"""
     placeholders = ",".join("?" for _ in order_ids) or "NULL"
     state = {}
     for table in ("orders", "factory_orders", "material_items", "hardware_items"):
@@ -8520,7 +8592,7 @@ def _server_business_revision(connection: sqlite3.Connection, order_ids: list[st
             f"select * from {table} where order_id in ({placeholders}) order by rowid",
             tuple(order_ids),
         )
-        # Scans/list refreshes update bookkeeping times even when facts agree.
+        # 扫描和列表刷新即使事实未变也会更新记录时间，因此版本比较排除这些记账时间。
         columns = [column[0] for column in cursor.description]
         state[table] = [
             {name: value for name, value in zip(columns, row)
@@ -8537,6 +8609,7 @@ def _server_business_revision(connection: sqlite3.Connection, order_ids: list[st
 
 
 def _server_preview_can_acknowledge(payload: dict) -> bool:
+    """判断预览 payload 是否完整、无业务变化且满足仅确认扫描基准的条件。"""
     orders = payload.get("orders", [])
     return bool(
         orders and payload.get("source_folders") and payload.get("include_hardware")
@@ -8555,7 +8628,9 @@ def _server_preview_can_acknowledge(payload: dict) -> bool:
 
 
 def acknowledge_server_preview_memory(config: Config, payload: dict, *, confirm_write: bool = False) -> dict:
-    """Acknowledge a complete unchanged preview, writing only its XML baseline."""
+    """确认完整且无变化的内存预览，只写其 XML 基准。
+
+    参数：config 为配置；payload 为保留的预览；confirm_write 表示明确确认。"""
     if not confirm_write:
         raise RuleError("write_confirmation_required", "更新监控基线需要用户明确确认")
     _memory_preview_records(payload)
@@ -8598,7 +8673,9 @@ def _server_preview_hardware_source_items(
     *,
     fittings_cache: dict | None = None,
 ) -> list[dict]:
-    """Capture parsed Fittingslist facts for later in-memory SKU resolution."""
+    """提取解析后的五金来源事实，供后续内存 SKU 匹配。
+
+    参数：preview_store 为预览库；folder_paths 为所选目录；fittings_cache 为可选解析缓存。"""
     from .order_workflow import parse_fittings_groups
 
     rows = preview_store.connection.execute(
@@ -8611,21 +8688,29 @@ def _server_preview_hardware_source_items(
         and str(path or "")
     ]
     selected_reports = _selected_hardware_reports(scoped_rows)
-    selected_paths = {str(source.path) for source in selected_reports.values()}
     result: list[dict] = []
     for path, source_folder in scoped_rows:
         path = str(path or "")
-        if not path or path not in selected_paths:
+        if not path:
             continue
         try:
             groups = _preview_fittings_groups(Path(path), fittings_cache)
         except Exception:
             continue
         for factory_order, items in groups:
-            if current_report_context() and factory_order.upper() in current_report_context().keep_factories:
+            locked = current_report_context()
+            manual_locked = bool(
+                locked
+                and locked.locked_decisions.get(factory_order.upper(), {}).get("handling") == "manual"
+            )
+            has_automatic_hardware = bool(preview_store.connection.execute(
+                "select 1 from hardware_items where factory_order=? and source_type='aicnc' limit 1",
+                (factory_order.upper(),),
+            ).fetchone())
+            if locked and factory_order.upper() in locked.keep_factories and (manual_locked or has_automatic_hardware):
                 continue
             source = selected_reports.get(factory_order.upper())
-            if source is None or str(source.path) != path:
+            if source is None or not same_selected_fittings_source(source, Path(path), items):
                 continue
             factory = preview_store.connection.execute(
                 "select order_id from factory_orders where factory_order=?",
@@ -8659,20 +8744,24 @@ def preview_server_changes(
     include_hardware: bool = True,
     hardware_source_choices: dict[str, str] | None = None,
 ) -> dict:
-    """Parse selected Server folders into a process-local preview.
+    """将所选 Server 目录解析到进程内预览，不在正式库写业务事实。
 
-    The preview database is an in-memory working connection backed by the
-    local production database. Nothing is written under ``state_dir`` and no
-    token is returned. The caller must retain the returned payload until the
-    user confirms it.
-    """
+    参数：config 为配置；selected_folders 为所选目录；include_hardware 为是否包含五金；
+    hardware_source_choices 为工厂单到所选来源标识的映射。
+    预览以本地库为底本建立内存连接，不在状态目录落盘，也不返回令牌；调用方保留内容直至用户确认。"""
     if not selected_folders:
         raise ValueError("请先选择要预览的 Server 文件夹")
+    from .aicnc_import import OPTIMIZATION_RE, preview as preview_optimization
+    if any(OPTIMIZATION_RE.fullmatch(folder.name) for folder in selected_folders):
+        if len(selected_folders) != 1:
+            raise RuleError('aicnc_selection', '请一次选择一个优化文件夹进行分配和确认')
+        return preview_optimization(config, selected_folders[0])
     timing_started = time.perf_counter()
     stage_started = timing_started
     timing_stages: list[dict[str, object]] = []
 
     def finish_timing_stage(stage: str, label: str) -> None:
+        """结束并登记预览阶段耗时；stage 为阶段标识，label 为中文显示名称。"""
         nonlocal stage_started
         now = time.perf_counter()
         timing_stages.append({
@@ -8714,13 +8803,11 @@ def preview_server_changes(
                     "choices": hardware_source_choices or {},
                     "conflicts": exc.context["conflicts"],
                 }}
-            # Preserve existing detailed workbook validation/error presentation.
+            # 保留原有详细工作簿校验及错误展示。
     context.decisions_prepared = True
     finish_timing_stage("source_selection", "检查五金来源")
-    # The shadow database must include the current catalog parents before any
-    # parsed material can bind its SKU foreign key or business attributes.
-    # Importing after the backup would update only the disk database and leave
-    # the in-memory preview with an empty ``products`` table.
+    # 影子库必须先包含当前商品目录，解析材料才能绑定 SKU 外键及业务属性；
+    # 若备份后才导入商品，只有磁盘库更新，内存预览中的商品表仍可能为空。
     from .inventory import bootstrap_product_database
     bootstrap_product_database(config)
     memory = sqlite3.connect(":memory:")
@@ -8734,13 +8821,10 @@ def preview_server_changes(
     stage_config.workflow_connection = memory
     preview_store = OrderIndexStore(config.workflow_database, connection=memory)
     try:
-        # Capture discovery separately from optimization evidence: partially
-        # optimized folders can acknowledge unchanged files without optimizing
-        # their remaining factories. Later file versions remain pending.
+        # 发现快照与优化证据分别保存；部分优化目录可确认未变文件，但不能因此把其余工厂单标为优化，后续版本仍待处理。
         monitoring_xml_entries = _server_scan_xml_entries(normalized_folders)
         finish_timing_stage("preview_database", "复制中央数据库到内存预览")
-        # The preview intentionally never runs temporary-order outbound or
-        # traveler generation. Those are separate user-approved operations.
+        # 预览不执行临时出库或 Traveler 生成，这些属于单独批准的操作。
         progress("正在读取材料并核对数据库中的工厂单归属")
         sync_result = sync_order_index(
             stage_config,
@@ -8755,7 +8839,7 @@ def preview_server_changes(
         )
         finish_timing_stage("server_parse", "读取、解析并校验 Server 文件")
         material_issues = preview_store.connection.execute(
-            "select path, message from active_issues where kind = 'material_validation' and status = 'open' order by path"
+            "select path, message from pending_issues where kind = 'material_validation' and status = 'open' order by path"
         ).fetchall()
         if material_issues:
             issue_details = [
@@ -8784,7 +8868,7 @@ def preview_server_changes(
             )
             if include_hardware else []
         )
-        # Build the final diff only after hardware mapping has been resolved.
+        # 五金映射解决后再生成最终差异。
         progress("正在组装材料、五金及写入差异预览")
         payload = _server_preview_payload(
             config, None, "", normalized_folders, include_hardware,
@@ -8834,7 +8918,9 @@ def allocate_server_material(
     order_id: str,
     quantity: float,
 ) -> dict:
-    """Record one order-level material allocation in the shadow database."""
+    """在影子数据库中登记订单级材料分配。
+
+    参数：config 为配置；token 为预览令牌；material_id 为来源材料编号；order_id 为目标订单；quantity 为分配数量。"""
     preview_path = _server_preview_path(config, token)
     order_id = str(order_id or "").strip().upper()
     try:
@@ -8929,6 +9015,7 @@ def allocate_server_material(
 
 
 def _memory_preview_records(payload: dict) -> dict[str, list[dict]]:
+    """校验并提取内存预览 payload 中按表分类的待写记录。"""
     records = payload.get("write_records")
     if not isinstance(records, dict):
         raise ValueError("Server 预览数据不完整，请重新读取文件夹")
@@ -8941,6 +9028,7 @@ def _memory_preview_records(payload: dict) -> dict[str, list[dict]]:
 
 
 def _memory_factory_selection(payload: dict, order_id: str = "", factory_order: str = "") -> list[tuple[str, str]]:
+    """提取内存预览的订单与工厂单选择集合；payload 为预览，order_id、factory_order 为可选选择限制。"""
     selected: set[tuple[str, str]] = set()
     wanted_order = str(order_id or "").strip().upper()
     wanted_factory = str(factory_order or "").strip().upper()
@@ -8963,11 +9051,8 @@ def _memory_factory_selection(payload: dict, order_id: str = "", factory_order: 
             current_factory = str(factory.get("factory_order", "")).strip().upper()
             if current_factory and (not wanted_factory or current_factory == wanted_factory):
                 selected.add((current_factory, current_order))
-    # A factory with a new fittings source must remain selectable even when
-    # its identity fields are otherwise unchanged and therefore omitted from
-    # the visual "factory changes" list. This also keeps mapping validation
-    # from being bypassed when optimization state is derived only from AICNC
-    # evidence rather than a successful report preview.
+    # 有新五金来源的工厂单即使身份字段未变、未出现在可视变化列表中，也必须保留可选资格，
+    # 避免仅依据 AICNC 证据推导优化状态时绕过商品映射校验。
     for group in payload.get("hardware_source_items", []):
         if not isinstance(group, dict):
             continue
@@ -8992,7 +9077,9 @@ def _server_preview_order_validation_errors(
     *,
     require_recomputed: bool = False,
 ) -> list[str]:
-    """Return validation failures that must block a Server confirmation."""
+    """收集应阻止确认的订单校验错误。
+
+    参数：orders 为预览订单；selected_order_ids 为可选确认范围；require_recomputed 决定是否要求重新计算过的校验结果。"""
     wanted = {
         str(order_id or "").strip().upper()
         for order_id in (selected_order_ids or set())
@@ -9007,11 +9094,8 @@ def _server_preview_order_validation_errors(
             continue
         status = str(order.get("validation_status", "")).strip() or "待校验"
         message = str(order.get("validation_message", "")).strip()
-        # Older token-based material-allocation previews did not run the
-        # selected-order validation pass and therefore carry the schema
-        # default ``待同步`` without an error message. Preserve that legacy
-        # contract; the in-memory Server folder flow sets
-        # ``require_recomputed`` and rejects it instead.
+        # 旧令牌式分配预览未运行所选订单校验，允许其旧约定中的默认待校验状态；
+        # 内存目录预览设置 require_recomputed，必须拒绝未重新计算的结果。
         if not require_recomputed and status == "待同步" and not message:
             continue
         if status == "正常":
@@ -9026,6 +9110,9 @@ def _require_valid_server_preview_orders(
     *,
     require_recomputed: bool = False,
 ) -> None:
+    """检查预览订单并在存在阻断错误时抛出业务异常。
+
+    参数：orders 为预览订单；selected_order_ids 为可选范围；require_recomputed 为重新计算要求。"""
     failures = _server_preview_order_validation_errors(
         orders,
         selected_order_ids,
@@ -9040,6 +9127,7 @@ def _require_valid_server_preview_orders(
 
 
 def _insert_memory_records(connection: sqlite3.Connection, table: str, rows: list[dict]) -> None:
+    """按目标表实际字段插入内存预览记录；connection 为连接，table 为表名，rows 为记录列表。"""
     target_columns = {
         str(row[1]) for row in connection.execute(f"pragma table_info({table})").fetchall()
     }
@@ -9061,7 +9149,7 @@ def _upsert_memory_optimization_artifacts(
     connection: sqlite3.Connection,
     rows: list[dict],
 ) -> None:
-    """Merge selected optimization evidence without replacing its history."""
+    """合并选中的优化证据而不替换其历史；connection 为连接，rows 为待合并证据记录。"""
     target_columns = {
         str(row[1])
         for row in connection.execute("pragma table_info(optimization_artifacts)").fetchall()
@@ -9103,12 +9191,22 @@ def _materialize_memory_hardware(
     selected_factory_ids: set[str],
     skipped_orders: set[str],
 ) -> None:
-    """Resolve mappings from captured fittings facts without reopening Server."""
+    """用已捕获五金事实匹配当前 SKU，不重开 Server 报表。
+
+    参数：config 为配置；payload 为预览；records 为待写记录；selected_factory_ids 为所选工厂单；skipped_orders 为跳过订单。"""
     from .inventory import TravelerItem, resolve_inventory_items, resolved_product_code
 
+    source_factories = {
+        str(group.get("factory_order", "")).strip().upper()
+        for group in payload.get("hardware_source_items", [])
+        if isinstance(group, dict)
+    }
     existing = [
         row for row in records.get("hardware_items", [])
-        if str(row.get("factory_order", "")).strip().upper() not in selected_factory_ids
+        if (
+            str(row.get("factory_order", "")).strip().upper() not in selected_factory_ids
+            or str(row.get("factory_order", "")).strip().upper() not in source_factories
+        )
     ]
     resolved_rows = list(existing)
     for group in payload.get("hardware_source_items", []):
@@ -9179,7 +9277,7 @@ def _materialize_memory_hardware(
 
 
 def _validated_memory_allocations(payload: dict, records: dict) -> list[dict]:
-    """Balance every source/SKU before any formal write, for all material kinds."""
+    """在正式写入前核对所有材料类型的来源与 SKU 数量平衡；payload 为预览，records 为待写记录。"""
     totals: dict[tuple[str, str], float] = defaultdict(float)
     allocations: dict[tuple[str, str, str], float] = defaultdict(float)
     fingerprints = {}
@@ -9223,12 +9321,11 @@ def _confirm_memory_preview(
     skip_hardware_order_ids: Iterable[str] = (),
     confirm_write: bool = False,
 ) -> dict:
-    """Commit only the JSON preview retained by the App.
+    """只提交 App 保留的 JSON 预览，校验身份与数量后写入正式库。
 
-    This function deliberately has no Server path or fingerprint input.  The
-    preview is the authority for this confirmation transaction; the local
-    database is only the destination and post-write verification source.
-    """
+    参数：config 为配置；payload 为预览；order_id、factory_order 为可选确认范围；
+    skip_hardware_order_ids 为跳过五金的订单；confirm_write 为明确确认标志。
+    不接受重新读取 Server 的路径或指纹输入；预览是本次确认依据，本地库为写入目标及写后校验来源。"""
     if not confirm_write:
         raise RuleError("write_confirmation_required", "写入 Server 事实需要用户明确确认")
     timing_started = time.perf_counter()
@@ -9407,9 +9504,7 @@ def _confirm_memory_preview(
                     "server_material_identity",
                     f"材料 {identity[2] or '未知 SKU'} 的已验证商品属性缺失，请重新扫描",
                 )
-            # Validate against the still-present production facts before any
-            # source rows are deleted.  Historical consumption/allocation
-            # references also keep an SKU's workflow attributes immutable.
+            # 删除来源行前先对照仍存在的正式事实校验；历史消耗和分配引用也要求 SKU 的业务属性保持稳定。
             confirm_product_material_attributes(
                 production.connection,
                 identity[2],
@@ -9458,7 +9553,14 @@ def _confirm_memory_preview(
                 raise RuleError("missing_confirmed_material", "工厂单完成优化前必须先写入有效材料明细")
             _insert_memory_records(production.connection, "factory_orders", [row])
             preserve_confirmed_shipment(production.connection, current_factory)
-            if current_order in skipped_orders or current_factory in payload.get('hardware_keep_factories', []):
+            existing_automatic_hardware = production.connection.execute(
+                "select 1 from hardware_items where factory_order=? and source_type='aicnc' limit 1",
+                (current_factory,),
+            ).fetchone()
+            if current_order in skipped_orders or (
+                current_factory in payload.get('hardware_keep_factories', [])
+                and existing_automatic_hardware
+            ):
                 continue
             replace_factory_hardware(
                 production.connection, current_factory,
@@ -9469,6 +9571,8 @@ def _confirm_memory_preview(
                 allow_empty=any(str(group.get("factory_order", "")).strip().upper() == current_factory
                     for group in payload.get("hardware_source_items", [])),
             )
+
+        audit_hardware_integrity(production.connection)
 
         source_paths = {
             str(row.get("source_path", "")) for row in material_rows if row.get("source_path")
@@ -9578,6 +9682,9 @@ def confirm_server_preview_memory(
     *,
     confirm_write: bool = False,
 ) -> dict:
+    """确认内存预览中指定订单和工厂单。
+
+    参数：config 为配置；payload 为预览；order_id 为订单号；factory_order 为工厂单号；confirm_write 为明确确认标志。"""
     return _confirm_memory_preview(
         config,
         payload,
@@ -9594,6 +9701,9 @@ def confirm_server_material_preview_memory(
     confirm_write: bool = False,
     skip_hardware_order_ids: Iterable[str] = (),
 ) -> dict:
+    """一并确认内存预览中的订单材料及已解析工厂单五金。
+
+    参数：config 为配置；payload 为预览；confirm_write 为明确确认；skip_hardware_order_ids 为跳过五金的订单。"""
     result = _confirm_memory_preview(
         config,
         payload,
@@ -9612,7 +9722,9 @@ def confirm_server_material_allocations(
     confirm_write: bool = False,
     skip_hardware_order_ids: Iterable[str] = (),
 ) -> dict:
-    """Write balanced order-level material allocations to production."""
+    """把已平衡的订单材料分配写入正式库。
+
+    参数：config 为配置；token 为磁盘预览令牌；confirm_write 为明确确认；skip_hardware_order_ids 为跳过五金的订单。"""
     if not confirm_write:
         raise RuleError("write_confirmation_required", "材料分配写入需要用户明确确认")
     preview_path = _server_preview_path(config, token)
@@ -9710,11 +9822,8 @@ def confirm_server_material_allocations(
                 "quantity": float(row[5] or 0),
                 "product_code": str(row[3] or "").strip().upper(),
             })
-        # Material room ownership is already explicit in the Server workbook
-        # and is persisted as source_order_id during the read-only preview.
-        # Default unallocated quantity to that source order so confirmation
-        # never asks the user to select a factory order for order-level
-        # material facts. Existing manual splits remain untouched.
+        # 材料房间归属已由 Server 工作簿明确并在只读预览保存为 source_order_id；
+        # 未分配数量默认归入该来源订单，不要求用户为订单级材料选择工厂单，已有人工分配保持原样。
         for row in material_rows:
             source_order_id = str(row["order_id"] or "").strip().upper()
             source_quantity = float(row["quantity"] or 0)
@@ -9917,10 +10026,7 @@ def confirm_server_material_allocations(
                 )
                 preserve_confirmed_shipment(production.connection, factory_order)
                 if order_id in skipped_hardware_orders:
-                    # The order-level choice means this Server confirmation
-                    # must not change hardware facts for any factory order in
-                    # the order.  The factory identity/material facts still
-                    # commit in the same transaction.
+                    # 订单级跳过选择意味着本次确认不改该订单任何工厂单的五金事实；身份和材料仍在同一事务提交。
                     continue
                 cursor = preview.connection.execute(
                     "select * from hardware_items where factory_order=? and source_type='aicnc' order by id",
@@ -9993,9 +10099,7 @@ def confirm_server_material_allocations(
                 )
 
             production.connection.commit()
-            # A successful transaction is not enough for the UI to claim
-            # completion. Read the committed rows back from the production
-            # database and verify the exact source-path quantities.
+            # 事务成功还不足以让界面宣称完成；提交后须从正式库读回，并精确校验来源路径对应的数量。
             for order_id in affected_orders:
                 expected = defaultdict(float)
                 for row in material_rows:
@@ -10077,7 +10181,9 @@ def confirm_server_material_preview(
     confirm_write: bool = False,
     skip_hardware_order_ids: Iterable[str] = (),
 ) -> dict:
-    """Confirm order materials and resolved factory-order hardware together."""
+    """同时确认订单材料及已匹配工厂单五金。
+
+    参数：config 为配置；token 为预览令牌；confirm_write 为明确确认；skip_hardware_order_ids 为跳过五金的订单。"""
     result = confirm_server_material_allocations(
         config,
         token,
@@ -10097,7 +10203,9 @@ def confirm_server_preview(
     *,
     confirm_write: bool = False,
 ) -> dict:
-    """Merge only the selected order/factory evidence into production."""
+    """仅将所选订单及工厂单证据合并到正式库。
+
+    参数：config 为配置；token 为预览令牌；order_id 为订单号；factory_order 为工厂单号；confirm_write 为明确确认。"""
     if not confirm_write:
         raise RuleError("write_confirmation_required", "写入 Server 订单事实需要用户明确确认")
     preview_path = _server_preview_path(config, token)
@@ -10221,13 +10329,16 @@ def confirm_server_preview(
     }
 
 
+@pending_check_session
 def process_server_changes(
     config: Config,
     selected_folders: list[Path] | None = None,
     *,
     include_hardware: bool = True,
 ) -> dict:
-    """Process the changes explicitly approved in the Server prompt."""
+    """处理用户在 Server 提示中明确选择的变化。
+
+    参数：config 为配置；selected_folders 为可选目录范围；include_hardware 为是否包含五金。"""
     return sync_order_index(
         config,
         selected_folders=selected_folders,
@@ -10242,6 +10353,9 @@ def _confirm_current_factory_issue(
     order_id: str,
     factory_name: str = "",
 ) -> None:
+    """确认当前工厂单问题的订单归属及名称。
+
+    参数：store 为索引库；issue 为问题记录；order_id 为确认订单号；factory_name 为可选工厂单名称。"""
     order_id = _valid_aimes_order_id(order_id)
     if not order_id:
         raise ValueError("确认归属的订单号必须是有效的 PP 四位数字或 CS 三位数字")
@@ -10275,19 +10389,17 @@ def _confirm_current_factory_issue(
     )
 
 
+@pending_check_session
 def auto_resolve_current_issue(config: Config, issue_key: str) -> dict:
+    """尝试自动解析指定待处理问题并更新结果；config 为配置，issue_key 为问题唯一键。"""
     store = OrderIndexStore(config.workflow_database)
     issue = store.current_issue(issue_key)
     if issue is None:
         store.close()
         raise ValueError("当前问题已解决或不存在，请刷新问题列表")
     if issue["kind"] != "factory_ownership":
-        store.resolve_active_issue(issue_key)
-        store.add_change(severity="info", kind="issue_resolved", message=f"已标记问题为已处理：{issue['message']}", path=issue["path"])
-        store.commit()
-        result = list_order_index(config)
         store.close()
-        return result
+        return recheck_current_issue(config, issue_key)
 
     order_id = ""
     factory_name = ""
@@ -10327,7 +10439,9 @@ def auto_resolve_current_issue(config: Config, issue_key: str) -> dict:
     return result
 
 
+@pending_check_session
 def resolve_current_issue(config: Config, issue_key: str, order_id: str = "", factory_name: str = "") -> dict:
+    """按人工指定归属处理问题；config 为配置，issue_key 为问题键，order_id 为订单号，factory_name 为名称。"""
     store = OrderIndexStore(config.workflow_database)
     issue = store.current_issue(issue_key)
     if issue is None:
@@ -10336,30 +10450,61 @@ def resolve_current_issue(config: Config, issue_key: str, order_id: str = "", fa
     if issue["kind"] == "factory_ownership":
         _confirm_current_factory_issue(store, issue, order_id, factory_name)
     else:
-        store.resolve_active_issue(issue_key)
-        store.add_change(severity="info", kind="issue_resolved", message=f"已标记问题为已处理：{issue['message']}", path=issue["path"])
+        store.close()
+        return recheck_current_issue(config, issue_key)
     store.commit()
     result = list_order_index(config)
     store.close()
     return result
 
 
+@pending_check_session
+def recheck_current_issue(config: Config, issue_key: str) -> dict:
+    """重新核对问题对应资料；校验成功才清除当前会话提示，不提交预览业务事实。"""
+    store = OrderIndexStore(config.workflow_database)
+    try:
+        issue = store.current_issue(issue_key)
+        if issue is None:
+            raise ValueError("检查结果已过期，请重新扫描或预览")
+        if issue["kind"] == "server_missing_report":
+            if not issue["path"] or not Path(issue["path"]).is_dir():
+                raise ValueError("文件夹无法访问，状态尚未确认，请恢复连接后重新检查")
+            if not _report_files(Path(issue["path"])):
+                raise ValueError("仍未找到可用报表，请补齐后重新检查")
+        elif issue["kind"] in {"hardware_integrity", "outbound_hardware_difference"}:
+            from .hardware_facts import hardware_integrity_findings
+            if issue["kind"] == "hardware_integrity":
+                findings = hardware_integrity_findings(store.connection, factory_orders=[issue["factory_order"]])
+                if findings:
+                    raise ValueError("；".join(row["message"] for row in findings))
+            else:
+                audit_factory_hardware(store.connection, issue["factory_order"])
+                if store.current_issue(issue_key):
+                    raise ValueError("当前五金与历史单据仍不一致，请核对后重新检查")
+        elif issue["path"]:
+            path = Path(issue["path"])
+            folder = path if path.is_dir() else path.parent
+            result = preview_server_changes(config, [folder])
+            if result.get("hardware_source_selection"):
+                raise ValueError("需要选择五金来源，请使用预览入口完成选择后继续检查")
+        else:
+            raise ValueError("缺少可检查的来源，请重新同步对应订单并核对详情")
+        store.resolve_active_issue(issue_key)
+        store.commit()
+        result = list_order_index(config)
+        result["current_issues"] = store.active_issues()
+        result["checked_issue_key"] = issue_key
+        return result
+    finally:
+        store.close()
+
+
 def list_order_index(config: Config) -> dict:
+    """读取并整理订单看板摘要及待处理信息；config 为配置，读取过程包含既有投影清理。"""
     store = OrderIndexStore(config.workflow_database)
     _reconcile_temporary_order_projections(store)
     cached_source_rows = load_aimes_order_cache(config)
-    _, cached_aimes_warnings = _partition_aimes_rows(
-        cached_source_rows,
-        store.ignored_aimes_keys(),
-        store.aimes_assignments(),
-    )
-    aimes_warnings_by_key = {
-        issue["ignore_key"]: issue
-        for issue in store.aimes_review_rows()
-    }
-    for issue in cached_aimes_warnings:
-        aimes_warnings_by_key.setdefault(issue["ignore_key"], issue)
-    aimes_warnings = list(aimes_warnings_by_key.values())
+    aimes_warnings = store.aimes_review_rows()
     result = {
         "orders": store.summaries(),
         "changes": store.latest_changes(),
@@ -10385,7 +10530,7 @@ def list_order_index(config: Config) -> dict:
 
 
 def abort_order(config: Config, order_id: str, *, confirmed: bool = False) -> dict:
-    """Persist an explicit terminal decision without changing factory facts."""
+    """持久保存订单中止决定，不改工厂单事实；config 为配置，order_id 为订单号，confirmed 为明确确认标志。"""
     if not confirmed:
         raise RuleError("confirmation_required", "中止订单需要再次确认")
     order_id = str(order_id or "").strip().upper()
@@ -10415,6 +10560,7 @@ def save_order_annotations(
     planned_days: list[dict[str, str]],
     actual_days: list[dict[str, str]],
 ) -> dict:
+    """保存人工备注和安装开始日期；config 为配置，order_id 为订单号，user_note 为备注，planned_days、actual_days 为日期记录。"""
     store = OrderIndexStore(config.workflow_database)
     try:
         return store.save_order_annotations(
@@ -10427,7 +10573,9 @@ def save_order_annotations(
         store.close()
 
 
+@pending_check_session
 def ignore_aimes_factories(config: Config, ignore_keys: list[str]) -> dict:
+    """批量忽略 AIMES 待处理身份并提交；config 为配置，ignore_keys 为所选身份键列表。"""
     store = OrderIndexStore(config.workflow_database)
     _, cached_issues = _partition_aimes_rows(
         load_aimes_order_cache(config),
@@ -10451,6 +10599,7 @@ def ignore_aimes_factories(config: Config, ignore_keys: list[str]) -> dict:
 
 
 def restore_aimes_factories(config: Config, ignore_keys: list[str]) -> dict:
+    """批量取消 AIMES 忽略标记并提交；config 为配置，ignore_keys 为身份键列表。"""
     store = OrderIndexStore(config.workflow_database)
     for key in ignore_keys:
         store.restore_aimes_factory(key)
@@ -10459,7 +10608,9 @@ def restore_aimes_factories(config: Config, ignore_keys: list[str]) -> dict:
     return list_order_index(config)
 
 
+@pending_check_session
 def assign_aimes_factory_order(config: Config, ignore_key: str, order_id: str) -> dict:
+    """校验并保存 AIMES 工厂单的人工订单归属；config 为配置，ignore_key 为问题身份键，order_id 为目标订单号。"""
     order_id = _valid_aimes_order_id(order_id)
     if not order_id:
         raise ValueError("手工确认的订单号不符合当前订单规则，请使用 PP 加 4 位数字或 CS 加 3 位数字")
@@ -10505,6 +10656,7 @@ def assign_aimes_factory_order(config: Config, ignore_key: str, order_id: str) -
 
 
 def restore_aimes_order_assignment(config: Config, ignore_key: str) -> dict:
+    """撤销人工 AIMES 订单归属；config 为配置，ignore_key 为身份键。"""
     store = OrderIndexStore(config.workflow_database)
     if ignore_key not in store.aimes_assignments():
         store.close()
@@ -10516,6 +10668,7 @@ def restore_aimes_order_assignment(config: Config, ignore_key: str) -> dict:
 
 
 def add_manual_factory(config: Config, order_id: str, factory_order: str, factory_name: str) -> dict:
+    """校验后登记人工工厂单；config 为配置，order_id 为订单号，factory_order 为工厂单号，factory_name 为名称。"""
     order_id = order_id.upper().strip()
     factory_order = factory_order.upper().strip()
     factory_name = factory_name.strip()

@@ -1,6 +1,5 @@
-// Order-center views and layout helpers.  The dashboard renders persisted
-// order facts and starts operations through AppModel; it should not infer
-// production, shipment, or installation facts from display-only state.
+// 订单中心视图与布局辅助方法。看板显示已持久化订单事实，并通过 AppModel 发起操作；
+// 不得从仅用于显示的状态推断生产、出货或安装事实。
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
@@ -17,10 +16,9 @@ let orderDashboardStatuses = [
 let orderDashboardMetricColumnCount = 8
 let orderDashboardMetricMinimumWidth: CGFloat = 110
 let orderDashboardMetricSpacing: CGFloat = 10
-// Give the factory identity/status columns practical minimum widths. The
-// order-level Panel colors are shown above the table, so the table no longer
-// needs a separate color column.
-let orderDashboardFactoryColumnWidths: [CGFloat] = [150, 220, 110, 110, 120, 170]
+// 为工厂单身份和状态列保留实用的最小宽度。订单级 Panel 颜色已在表格上方显示，
+// 因此表格无需单独的颜色列。
+let orderDashboardFactoryColumnWidths: [CGFloat] = [150, 220, 127.5, 127.5, 127.5, 127.5]
 let orderDashboardFactorySelectionColumnWidth: CGFloat = 54
 let orderDashboardOperationColumnWidth: CGFloat = 136
 let orderDashboardFactoryCountColumnWidth: CGFloat = 90
@@ -44,6 +42,9 @@ private struct OrderDashboardTableLayout {
     let totalWidth: CGFloat
     let containerWidth: CGFloat
 
+    /// 根据容器宽度分配固定列和弹性列，并预留滚动条空间。
+    /// - Parameters:
+    ///   - totalWidth: 表格容器总宽度，单位为逻辑点。
     init(totalWidth: CGFloat) {
         self.containerWidth = totalWidth
         let fixedWidth = orderDashboardLeadingColumnWidth
@@ -61,10 +62,12 @@ private struct OrderDashboardTableLayout {
         )
     }
 
+    /// 返回不包含操作按钮列的数据区域宽度。
     var dataWidth: CGFloat {
         totalWidth - orderDashboardOperationColumnWidth
     }
 
+    /// 计算表格内容之后需要补齐的空白宽度。
     var trailingSpacerWidth: CGFloat {
         max(0, containerWidth - totalWidth)
     }
@@ -84,6 +87,7 @@ private struct OrderDashboardTableLayout {
         ].map { GridItem(.fixed($0), spacing: 0) }
     }
 
+    /// 取得不包含最后操作列的网格列配置。
     var dataColumns: [GridItem] {
         Array(columns.dropLast())
     }
@@ -105,18 +109,25 @@ struct AppGlassDatePickerCalendar: View {
 
     private let weekdays = ["日", "一", "二", "三", "四", "五", "六"]
 
+    /// 绑定日期选择，并用当前选择初始化显示月份。
+    /// - Parameters:
+    ///   - selection: 日历选中日期的双向绑定。
+    ///   - compact: 是否使用紧凑日历尺寸。
     init(selection: Binding<Date>, compact: Bool = false) {
         _selection = selection
         _displayedMonth = State(initialValue: selection.wrappedValue)
         self.compact = compact
     }
 
+    /// 根据紧凑模式选择日历日期单元格边长。
     private var daySize: CGFloat { compact ? 30 : 34 }
+    /// 根据紧凑模式选择日历网格间距。
     private var gridSpacing: CGFloat { compact ? 4 : 6 }
     private var columns: [GridItem] {
         Array(repeating: GridItem(.fixed(daySize), spacing: gridSpacing), count: 7)
     }
 
+    /// 创建周日开始的公历，用于日历网格和日期选择。
     private var calendar: Calendar {
         var value = Calendar(identifier: .gregorian)
         value.locale = Locale(identifier: "zh_CN")
@@ -125,6 +136,7 @@ struct AppGlassDatePickerCalendar: View {
         return value
     }
 
+    /// 生成当前显示月份所需的完整周日期网格。
     private var gridDates: [Date] {
         guard let month = calendar.dateInterval(of: .month, for: displayedMonth) else { return [] }
         let firstDay = calendar.startOfDay(for: month.start)
@@ -182,6 +194,11 @@ struct AppGlassDatePickerCalendar: View {
         .onAppear { displayedMonth = selection }
     }
 
+    /// 构造日历切月按钮并按月份偏移更新显示。
+    /// - Parameters:
+    ///   - symbol: 系统图标名称。
+    ///   - delta: 切换月份的偏移量，前月为负、后月为正。
+    ///   - label: 按钮的辅助功能说明。
     private func monthButton(symbol: String, delta: Int, label: String) -> some View {
         Button {
             if let nextMonth = calendar.date(byAdding: .month, value: delta, to: displayedMonth) {
@@ -198,6 +215,9 @@ struct AppGlassDatePickerCalendar: View {
         .accessibilityLabel(label)
     }
 
+    /// 构造单个日历日期按钮并保持原选择的时间分量。
+    /// - Parameters:
+    ///   - date: 待显示、选择或计算的日期时间。
     private func dayButton(_ date: Date) -> some View {
         let isSelected = calendar.isDate(date, inSameDayAs: selection)
         let isToday = calendar.isDateInToday(date)
@@ -234,6 +254,11 @@ struct AppGlassDatePickerCalendar: View {
     }
 }
 
+/// 采用选中日期的年月日并保留原时间分量。
+/// - Parameters:
+///   - date: 待显示、选择或计算的日期时间。
+///   - original: 需要保留时分秒的原日期时间。
+///   - calendar: 用于日期计算的日历。
 func appGlassDatePickerDate(_ date: Date, preservingTimeFrom original: Date, calendar: Calendar) -> Date {
     let dateParts = calendar.dateComponents([.year, .month, .day], from: date)
     let timeParts = calendar.dateComponents([.hour, .minute, .second, .nanosecond], from: original)
@@ -249,6 +274,9 @@ func appGlassDatePickerDate(_ date: Date, preservingTimeFrom original: Date, cal
     return calendar.date(from: combined) ?? date
 }
 
+/// 生成日期选择器的中文日期文字。
+/// - Parameters:
+///   - date: 待显示、选择或计算的日期时间。
 private func appGlassDatePickerDisplayDate(_ date: Date) -> String {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "zh_CN")
@@ -257,6 +285,9 @@ private func appGlassDatePickerDisplayDate(_ date: Date) -> String {
     return formatter.string(from: date)
 }
 
+/// 格式化日历顶部显示的年月标题。
+/// - Parameters:
+///   - date: 待显示、选择或计算的日期时间。
 private func appGlassDatePickerMonthTitle(_ date: Date) -> String {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "zh_CN")
@@ -266,12 +297,17 @@ private func appGlassDatePickerMonthTitle(_ date: Date) -> String {
 }
 
 extension View {
+    /// 为日历弹出层应用统一玻璃背景和圆角。
+    /// 无参数。
     func appGlassDatePickerPopoverSurface() -> some View {
         padding(10)
             .presentationBackground(.clear)
     }
 }
 
+/// 识别明确的 SKU 映射问题，避免把普通报表错误送入映射工作区。
+/// - Parameters:
+///   - issue: 待判断或处理的当前业务问题。
 func currentIssueRequiresInventoryMapping(_ issue: CurrentIssue) -> Bool {
     if issue.kind == "material_mapping" || issue.kind == "hardware_mapping" {
         return true
@@ -279,14 +315,15 @@ func currentIssueRequiresInventoryMapping(_ issue: CurrentIssue) -> Bool {
     if issue.kind == "temporary_processing" && issue.message.contains("未映射材料") {
         return true
     }
-    // Material SKU failures are currently persisted as material_validation
-    // together with ordinary workbook/read failures. Only the explicit SKU
-    // wording should open the mapping workspace; malformed files must keep
-    // the normal "mark handled" action.
+    // 材料 SKU 失败目前与普通工作簿或读取失败一起保存为 material_validation。
+    // 只有明确的 SKU 提示才应打开映射工作区；文件格式错误仍使用普通的“标记已处理”操作。
     return issue.kind == "material_validation"
         && issue.message.contains("未完成商品 SKU 处理")
 }
 
+/// 为 Server 材料变化列表中的类别分配排序权重。
+/// - Parameters:
+///   - materialType: 材料类别代码。
 private func serverWriteMaterialTypeRank(_ materialType: String) -> Int {
     switch materialType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
     case "plywood": return 0
@@ -296,6 +333,9 @@ private func serverWriteMaterialTypeRank(_ materialType: String) -> Int {
     }
 }
 
+/// 按常用 Plywood 厚度设置变化列表显示优先级。
+/// - Parameters:
+///   - thickness: 材料厚度，按毫米表示。
 private func serverWritePlywoodThicknessRank(_ thickness: String) -> Int {
     let value = Double(thickness) ?? .greatestFiniteMagnitude
     if abs(value - 18) < 0.01 { return 0 }
@@ -304,6 +344,9 @@ private func serverWritePlywoodThicknessRank(_ thickness: String) -> Int {
     return 3
 }
 
+/// 按类别、颜色、厚度等规格排列 Server 材料变化。
+/// - Parameters:
+///   - changes: Server 材料数量变化列表。
 func sortedServerWriteMaterialChanges(_ changes: [ServerWriteMaterialChange]) -> [ServerWriteMaterialChange] {
     changes.sorted { left, right in
         let leftType = serverWriteMaterialTypeRank(left.materialType)
@@ -330,6 +373,10 @@ func sortedServerWriteMaterialChanges(_ changes: [ServerWriteMaterialChange]) ->
     }
 }
 
+/// 仅在 App 活动且主窗口位于前方时允许悬停详情。
+/// - Parameters:
+///   - appIsActive: App 当前是否处于活动状态。
+///   - mainWindowIsFrontmost: 主窗口是否位于最前方。
 func dashboardMessageHoverCanPresent(appIsActive: Bool, mainWindowIsFrontmost: Bool) -> Bool {
     appIsActive && mainWindowIsFrontmost
 }
@@ -342,12 +389,19 @@ let orderDashboardMetricColumns = Array(
 let orderDetailGridColumnCount = 4
 let orderDetailCardMinHeight: CGFloat = 50
 
+/// 判断可用宽度是否足够容纳整行订单统计卡片。
+/// - Parameters:
+///   - width: 单元格或容器宽度，单位为逻辑点。
+///   - horizontalPadding: 统计区域左右留白，单位为逻辑点。
 func orderDashboardMetricsFit(width: CGFloat, horizontalPadding: CGFloat) -> Bool {
     let cards = CGFloat(orderDashboardMetricColumnCount) * orderDashboardMetricMinimumWidth
     let gaps = CGFloat(orderDashboardMetricColumnCount - 1) * orderDashboardMetricSpacing
     return width - horizontalPadding * 2 >= cards + gaps
 }
 
+/// 从订单材料中提取去重的 Panel 颜色。
+/// - Parameters:
+///   - materials: 订单材料预览列表。
 func orderDashboardPanelColors(_ materials: [OrderMaterialPreview]) -> [String] {
     var result: [String] = []
     for material in materials where material.kind == "panel" {
@@ -358,6 +412,9 @@ func orderDashboardPanelColors(_ materials: [OrderMaterialPreview]) -> [String] 
     return result
 }
 
+/// 提取用于订单行显示的 Panel 材料并整理顺序。
+/// - Parameters:
+///   - materials: 订单材料预览列表。
 func orderDashboardPanelMaterials(_ materials: [OrderMaterialPreview]) -> [OrderMaterialPreview] {
     var result: [OrderMaterialPreview] = []
     for material in materials where material.kind == "panel" {
@@ -371,6 +428,9 @@ func orderDashboardPanelMaterials(_ materials: [OrderMaterialPreview]) -> [Order
     return result
 }
 
+/// 根据材料 SKU 构造图片路径，缺少有效代码时返回空值。
+/// - Parameters:
+///   - productCode: 库存商品的规范 SKU 代码。
 func panelMaterialImageURL(productCode: String) -> URL? {
     let code = productCode.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !code.isEmpty,
@@ -391,6 +451,8 @@ private final class PanelMaterialHoverTrackingView: NSView {
     var onMouseEntered: (() -> Void)?
     var onMouseExited: (() -> Void)?
 
+    /// 按当前视图边界重新注册鼠标进入和离开跟踪区域。
+    /// 无参数。
     override func updateTrackingAreas() {
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(
@@ -404,11 +466,17 @@ private final class PanelMaterialHoverTrackingView: NSView {
         super.updateTrackingAreas()
     }
 
+    /// 将鼠标进入跟踪区域的事件转发给悬停回调。
+    /// - Parameters:
+    ///   - event: 系统派发的鼠标进入或离开事件。
     override func mouseEntered(with event: NSEvent) {
         onMouseEntered?()
         super.mouseEntered(with: event)
     }
 
+    /// 将鼠标离开跟踪区域的事件转发给悬停回调。
+    /// - Parameters:
+    ///   - event: 系统派发的鼠标进入或离开事件。
     override func mouseExited(with event: NSEvent) {
         onMouseExited?()
         super.mouseExited(with: event)
@@ -419,6 +487,9 @@ private struct PanelMaterialHoverTracking: NSViewRepresentable {
     let onMouseEntered: () -> Void
     let onMouseExited: () -> Void
 
+    /// 创建材料悬停跟踪视图并连接进入、离开回调。
+    /// - Parameters:
+    ///   - context: SwiftUI 提供的桥接上下文与协调器。
     func makeNSView(context: Context) -> PanelMaterialHoverTrackingView {
         let view = PanelMaterialHoverTrackingView(frame: .zero)
         view.onMouseEntered = onMouseEntered
@@ -426,6 +497,10 @@ private struct PanelMaterialHoverTracking: NSViewRepresentable {
         return view
     }
 
+    /// 将最新材料悬停回调更新到已有跟踪视图。
+    /// - Parameters:
+    ///   - nsView: 已创建并需要更新或卸载的 AppKit 视图。
+    ///   - context: SwiftUI 提供的桥接上下文与协调器。
     func updateNSView(_ nsView: PanelMaterialHoverTrackingView, context: Context) {
         nsView.onMouseEntered = onMouseEntered
         nsView.onMouseExited = onMouseExited
@@ -439,19 +514,26 @@ struct PanelMaterialHoverPreview<Content: View>: View {
     @State private var isPresented = false
     @State private var hoverGeneration = 0
 
+    /// 保存材料与内容，供悬停时展示对应 Panel 图片。
+    /// - Parameters:
+    ///   - material: 订单材料预览。
+    ///   - content: 生成卡片或容器内部视图的闭包。
     init(material: OrderMaterialPreview, @ViewBuilder content: () -> Content) {
         self.material = material
         self.content = content()
     }
 
+    /// 取得当前 Panel 材料对应的预览图片位置。
     private var imageURL: URL? {
         panelMaterialImageURL(productCode: material.productCode)
     }
 
+    /// 读取当前材料的本地预览图片。
     private var previewImage: NSImage? {
         imageURL.flatMap { NSImage(contentsOf: $0) }
     }
 
+    /// 按图片比例计算预览宽度，避免变形或超出限制。
     private var previewImageWidth: CGFloat {
         guard let image = previewImage, image.size.height > 0 else {
             return previewImageHeight
@@ -459,6 +541,7 @@ struct PanelMaterialHoverPreview<Content: View>: View {
         return previewImageHeight * image.size.width / image.size.height
     }
 
+    /// 组合当前 Panel 材料的可读名称。
     private var panelDisplayName: String {
         let brand = material.brand.trimmingCharacters(in: .whitespacesAndNewlines)
         let color = material.color.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -511,10 +594,16 @@ struct PanelMaterialHoverPreview<Content: View>: View {
     }
 }
 
+/// 筛选订单 Plywood 材料并按业务厚度顺序排序。
+/// - Parameters:
+///   - rows: 订单材料预览列表。
 func orderDetailPlywoodRows(_ rows: [OrderMaterialPreview]) -> [OrderMaterialPreview] {
     orderedMaterialRows(rows.filter { $0.kind == "plywood" })
 }
 
+/// 筛选 Panel 并按颜色、厚度优先级和数量排序。
+/// - Parameters:
+///   - rows: 订单材料预览列表。
 func orderDetailPanelRows(_ rows: [OrderMaterialPreview]) -> [OrderMaterialPreview] {
     rows
         .filter { $0.kind == "panel" }
@@ -533,12 +622,18 @@ func orderDetailPanelRows(_ rows: [OrderMaterialPreview]) -> [OrderMaterialPrevi
         }
 }
 
+/// 优先显示 19.1 毫米门板，其次为 8 或 9 毫米背板。
+/// - Parameters:
+///   - thickness: 材料厚度，按毫米表示。
 func orderDetailPanelThicknessRank(_ thickness: Double) -> Int {
     if abs(thickness - 19.1) < 0.01 { return 0 }
     if abs(thickness - 8) < 0.01 || abs(thickness - 9) < 0.01 { return 1 }
     return 2
 }
 
+/// 按自然名称顺序排列订单详情中的封边颜色。
+/// - Parameters:
+///   - colors: 待排列的颜色名称列表。
 func orderDetailEdgeColors(_ colors: [String]) -> [String] {
     colors.sorted {
         let left = $0.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -547,16 +642,29 @@ func orderDetailEdgeColors(_ colors: [String]) -> [String] {
     }
 }
 
+/// 统计库存预览中数量不足的商品行数。
+/// - Parameters:
+///   - rows: 实时库存预览列表。
 func orderDashboardShortageCount(_ rows: [OrderStockPreview]) -> Int {
     rows.filter { !$0.sufficient }.count
 }
 
+/// 按错误和预览校验状态生成订单行状态文字。
+/// - Parameters:
+///   - previewValidated: 订单预览是否通过校验。
+///   - hasError: 预览或校验是否存在错误。
+///   - isExistingTraveler: 是否已有 Traveler；当前状态推导不使用此值。
 func orderDashboardStatus(previewValidated: Bool, hasError: Bool, isExistingTraveler: Bool) -> String {
     if hasError { return "数据异常" }
     if previewValidated { return "已优化" }
     return "待校验"
 }
 
+/// 根据点击和强制展开标志决定展开的订单身份。
+/// - Parameters:
+///   - current: 当前展开的订单身份；为空表示全部折叠。
+///   - tapped: 本次点击的订单身份。
+///   - forceOpen: 是否强制展开，禁止再次点击时折叠。
 func orderDashboardExpandedID(current: String?, tapped: String, forceOpen: Bool = false) -> String? {
     if !forceOpen, current == tapped { return nil }
     return tapped
@@ -567,6 +675,11 @@ struct OrderDashboardClickContainer<Content: View>: View {
     let onSingleClick: () -> Void
     let onDoubleClick: () -> Void
 
+    /// 保存行内容及单击、双击回调，供透明手势层接收事件。
+    /// - Parameters:
+    ///   - onSingleClick: 单击订单行时执行的回调。
+    ///   - onDoubleClick: 双击订单行时执行的回调。
+    ///   - content: 生成卡片或容器内部视图的闭包。
     init(
         onSingleClick: @escaping () -> Void,
         onDoubleClick: @escaping () -> Void,
@@ -584,16 +697,21 @@ struct OrderDashboardClickContainer<Content: View>: View {
     }
 }
 
-// This view has no intrinsic content size and never hosts SwiftUI content.
-// Its parent supplies the hit area; gestures cannot feed size constraints back.
+// 此视图没有固有内容尺寸，也不承载 SwiftUI 内容。父视图提供点击区域，
+// 手势不能反向影响尺寸约束。
 struct OrderDashboardClickReceiver: NSViewRepresentable {
     let onSingleClick: () -> Void
     let onDoubleClick: () -> Void
 
+    /// 创建负责 AppKit 事件与 SwiftUI 状态衔接的协调器。
+    /// 无参数。
     func makeCoordinator() -> Coordinator {
         Coordinator(onSingleClick: onSingleClick, onDoubleClick: onDoubleClick)
     }
 
+    /// 创建透明点击视图，注册单击和双击手势并设置依赖关系。
+    /// - Parameters:
+    ///   - context: SwiftUI 提供的桥接上下文与协调器。
     func makeNSView(context: Context) -> NSView {
         let container = NSView(frame: .zero)
         let doubleClick = NSClickGestureRecognizer(
@@ -613,6 +731,10 @@ struct OrderDashboardClickReceiver: NSViewRepresentable {
         return container
     }
 
+    /// 将最新订单行单击和双击回调同步到协调器。
+    /// - Parameters:
+    ///   - nsView: 已创建并需要更新或卸载的 AppKit 视图。
+    ///   - context: SwiftUI 提供的桥接上下文与协调器。
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.onSingleClick = onSingleClick
         context.coordinator.onDoubleClick = onDoubleClick
@@ -622,11 +744,19 @@ struct OrderDashboardClickReceiver: NSViewRepresentable {
         var onSingleClick: () -> Void
         var onDoubleClick: () -> Void
 
+        /// 保存订单行的单击与双击事件回调。
+        /// - Parameters:
+        ///   - onSingleClick: 单击订单行时执行的回调。
+        ///   - onDoubleClick: 双击订单行时执行的回调。
         init(onSingleClick: @escaping () -> Void, onDoubleClick: @escaping () -> Void) {
             self.onSingleClick = onSingleClick
             self.onDoubleClick = onDoubleClick
         }
 
+        /// 让单击识别等待双击失败，避免双击同时触发单击。
+        /// - Parameters:
+        ///   - gestureRecognizer: 正在询问依赖关系的手势识别器。
+        ///   - otherGestureRecognizer: 可能优先处理双击的另一手势识别器。
         func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldRequireFailureOf otherGestureRecognizer: NSGestureRecognizer) -> Bool {
             gestureRecognizer is NSClickGestureRecognizer
                 && (gestureRecognizer as? NSClickGestureRecognizer)?.numberOfClicksRequired == 1
@@ -634,11 +764,19 @@ struct OrderDashboardClickReceiver: NSViewRepresentable {
                 && (otherGestureRecognizer as? NSClickGestureRecognizer)?.numberOfClicksRequired == 2
         }
 
+        /// 执行订单行单击回调。
+        /// 无参数。
         @objc func singleClick() { onSingleClick() }
+        /// 执行订单行双击回调。
+        /// 无参数。
         @objc func doubleClick() { onDoubleClick() }
     }
 }
 
+/// 返回切换指定工厂单选择后的新集合。
+/// - Parameters:
+///   - selected: 当前选中的工厂单号集合。
+///   - factoryOrder: 目标工厂单号。
 func toggledOrderFactorySelection(_ selected: Set<String>, factoryOrder: String) -> Set<String> {
     var next = selected
     if next.contains(factoryOrder) {
@@ -649,6 +787,10 @@ func toggledOrderFactorySelection(_ selected: Set<String>, factoryOrder: String)
     return next
 }
 
+/// 按所选工厂单身份取得非空订单名称。
+/// - Parameters:
+///   - factories: 工厂单预览列表。
+///   - selected: 当前选中的工厂单号集合。
 func selectedOrderFactoryNames(_ factories: [OrderFactoryPreview], selected: Set<String>) -> [String] {
     factories
         .filter { selected.contains($0.factoryOrder) }
@@ -656,6 +798,10 @@ func selectedOrderFactoryNames(_ factories: [OrderFactoryPreview], selected: Set
         .filter { !$0.isEmpty }
 }
 
+/// 检查所选工厂单是否包含已出库记录。
+/// - Parameters:
+///   - selected: 当前选中的工厂单号集合。
+///   - statuses: 以工厂单号为键的出库状态。
 func orderDashboardHasShippedSelection(
     _ selected: Set<String>,
     statuses: [String: String]
@@ -663,6 +809,10 @@ func orderDashboardHasShippedSelection(
     selected.contains { statuses[$0] == "已出库" }
 }
 
+/// 检查所选工厂单是否包含需要更新出库的记录。
+/// - Parameters:
+///   - selected: 当前选中的工厂单号集合。
+///   - statuses: 以工厂单号为键的出库状态。
 func orderDashboardNeedsOutboundUpdateSelection(
     _ selected: Set<String>,
     statuses: [String: String]
@@ -670,6 +820,10 @@ func orderDashboardNeedsOutboundUpdateSelection(
     selected.contains { statuses[$0] == "需要更新" }
 }
 
+/// 检查所选工厂单是否已有生产完成事实。
+/// - Parameters:
+///   - selected: 当前选中的工厂单号集合。
+///   - produced: 以工厂单号为键的生产完成状态。
 func orderDashboardHasProducedSelection(
     _ selected: Set<String>,
     produced: [String: Bool]
@@ -677,6 +831,10 @@ func orderDashboardHasProducedSelection(
     selected.contains { produced[$0] == true }
 }
 
+/// 返回当前统一使用的出货按钮标题。
+/// - Parameters:
+///   - selected: 当前选中的工厂单号集合。
+///   - statuses: 以工厂单号为键的出库状态。
 func orderDashboardOutboundActionTitle(
     _ selected: Set<String>,
     statuses: [String: String]
@@ -684,6 +842,10 @@ func orderDashboardOutboundActionTitle(
     "出货"
 }
 
+/// 显示出库状态；已出库且有单号时附加单据号。
+/// - Parameters:
+///   - status: 业务状态文字或状态代码。
+///   - documentNumber: 外部系统返回的出库单据号。
 func orderDashboardOutboundDisplay(status: String, documentNumber: String) -> String {
     let trimmedStatus = status.trimmingCharacters(in: .whitespacesAndNewlines)
     let trimmedDocument = documentNumber.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -691,6 +853,10 @@ func orderDashboardOutboundDisplay(status: String, documentNumber: String) -> St
     return "\(trimmedStatus) · \(trimmedDocument)"
 }
 
+/// 判断订单阶段是否符合全部、未完成或指定状态筛选。
+/// - Parameters:
+///   - stage: 订单或操作的当前阶段标识。
+///   - statusFilter: 当前订单阶段筛选选项。
 func orderDashboardStageMatchesFilter(_ stage: String, statusFilter: String) -> Bool {
     if statusFilter == "全部订单" {
         return true
@@ -701,10 +867,17 @@ func orderDashboardStageMatchesFilter(_ stage: String, statusFilter: String) -> 
     return stage == statusFilter
 }
 
+/// 将已出货和已中止视为列表筛选中的已完成阶段。
+/// - Parameters:
+///   - stage: 订单或操作的当前阶段标识。
 func orderDashboardIsCompleted(_ stage: String) -> Bool {
     stage == "已出货" || stage == "已中止"
 }
 
+/// 为数据异常状态提供校验详情或默认处理建议。
+/// - Parameters:
+///   - status: 业务状态文字或状态代码。
+///   - validationMessage: 订单校验的详细提示。
 func orderDashboardStatusHelp(status: String, validationMessage: String) -> String {
     guard status == "数据异常" else { return "" }
     let message = validationMessage.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -713,11 +886,18 @@ func orderDashboardStatusHelp(status: String, validationMessage: String) -> Stri
         : message
 }
 
+/// 将完成数转换为限制在零到一之间的进度比例。
+/// - Parameters:
+///   - completed: 该阶段已完成的工厂单数量。
+///   - total: 该阶段工厂单总数。
 func orderDashboardProgressFraction(completed: Int, total: Int) -> Double {
     guard total > 0 else { return 0 }
     return min(max(Double(completed) / Double(total), 0), 1)
 }
 
+/// 将年月日字符串转为中文日期；无法拆分时保留原值。
+/// - Parameters:
+///   - value: 待解析或显示的业务日期时间字符串。
 func orderInstallationDisplayDate(_ value: String) -> String {
     let parts = value.split(separator: "-")
     guard parts.count == 3,
@@ -728,16 +908,26 @@ func orderInstallationDisplayDate(_ value: String) -> String {
     return "\(parts[0])年\(month)月\(day)日"
 }
 
+/// 提取最早实际安装日期并格式化为摘要。
+/// - Parameters:
+///   - days: 用于摘要的安装日期与人员记录。
 func orderInstallationDateSummary(_ days: [OrderInstallationDay]) -> String {
     guard let date = days.map(\.date).sorted().first else { return "" }
     return orderInstallationDisplayDate(date)
 }
 
+/// 提取最早计划安装日期并格式化为摘要。
+/// - Parameters:
+///   - days: 用于摘要的安装日期与人员记录。
 func orderInstallationPlannedDateSummary(_ days: [OrderInstallationDay]) -> String {
     guard let date = days.map(\.date).sorted().first else { return "" }
     return orderInstallationDisplayDate(date)
 }
 
+/// 组合非空的计划安装和实际安装日期提示。
+/// - Parameters:
+///   - planned: 计划安装记录列表。
+///   - actual: 实际安装记录列表。
 func orderInstallationQuickSummaries(
     planned: [OrderInstallationDay],
     actual: [OrderInstallationDay]
@@ -759,16 +949,23 @@ private struct OrderDashboardProgressBar: View {
     let total: Int
     let accessibilityTitle: String
 
+    /// 保存阶段完成数、总数和辅助功能名称。
+    /// - Parameters:
+    ///   - completed: 该阶段已完成的工厂单数量。
+    ///   - total: 该阶段工厂单总数。
+    ///   - accessibilityTitle: 辅助功能朗读的进度名称。
     init(completed: Int, total: Int, accessibilityTitle: String = "优化进度") {
         self.completed = completed
         self.total = total
         self.accessibilityTitle = accessibilityTitle
     }
 
+    /// 将阶段完成数转换为进度条填充比例。
     private var fraction: Double {
         orderDashboardProgressFraction(completed: completed, total: total)
     }
 
+    /// 按阶段是否全部完成选择进度条颜色。
     private var progressColor: Color {
         completed >= total ? AppPalette.success : AppPalette.warning
     }
@@ -790,6 +987,11 @@ private struct OrderDashboardProgressBar: View {
     }
 }
 
+/// 根据显示选项和 AIMES 待确认、格式警告决定是否打开待处理中心。
+/// - Parameters:
+///   - presentIfNeeded: 有待处理问题时是否主动打开面板。
+///   - pendingAimesReviews: 尚未人工确认的 AIMES 工厂单记录。
+///   - aimesFormatWarnings: AIMES 销售单格式异常记录。
 func shouldPresentPendingCenterAfterAimes(
     presentIfNeeded: Bool,
     pendingAimesReviews: [AimesReviewItem],
@@ -811,6 +1013,19 @@ struct DashboardMessage: Identifiable, Equatable {
     let duration: TimeInterval?
     let operationDurations: [DashboardOperationDuration]
 
+    /// 建立看板消息并规范化、去重关联的人工处理路径。
+    /// - Parameters:
+    ///   - id: 记录或请求的唯一标识。
+    ///   - source: 看板操作来源键，如 aimes、server、inventory 或 sync。
+    ///   - time: 消息或步骤的显示时间。
+    ///   - title: 界面或操作记录的标题。
+    ///   - detail: 操作或消息的详细说明。
+    ///   - state: 运行、成功、警告或失败等展示状态。
+    ///   - manualPaths: 消息关联的人工处理路径。
+    ///   - operationDetails: 操作执行过程的说明列表。
+    ///   - contextDetails: 消息关联的业务上下文说明。
+    ///   - duration: 操作耗时，单位为秒。
+    ///   - operationDurations: 互不重叠的操作阶段及耗时。
     init(
         id: String,
         source: String,
@@ -843,6 +1058,9 @@ struct DashboardOperationDisplay {
     let isRunning: Bool
 }
 
+/// 通过状态前缀识别消息的失败、警告、成功或普通状态。
+/// - Parameters:
+///   - text: 待解析或显示的文本。
 func dashboardMessageState(_ text: String) -> String {
     if text.hasPrefix("❌") { return "failure" }
     if text.hasPrefix("⚠️") { return "warning" }
@@ -850,6 +1068,9 @@ func dashboardMessageState(_ text: String) -> String {
     return "info"
 }
 
+/// 去除消息开头的状态图标并清理空白。
+/// - Parameters:
+///   - text: 待解析或显示的文本。
 func dashboardMessageDetail(_ text: String) -> String {
     for marker in ["✅", "⚠️", "❌"] where text.hasPrefix(marker) {
         return String(text.dropFirst(marker.count)).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -857,18 +1078,23 @@ func dashboardMessageDetail(_ text: String) -> String {
     return text
 }
 
+/// 识别实际运行中的状态文字，排除终态和待处理中心名称。
+/// - Parameters:
+///   - text: 待解析或显示的文本。
 func dashboardStatusIsInProgress(_ text: String) -> Bool {
     if ["✅", "⚠️", "❌"].contains(where: { text.hasPrefix($0) }) { return false }
-    // The screen name contains “处理中”, but is not an active operation.
-    // Remove only that noun so “正在读取待处理中心…” still counts as running.
+    // 页面名称包含“处理中”，但不代表正在执行操作。仅去掉该名词，
+    // 确保“正在读取待处理中心…”仍被识别为运行中。
     let detail = dashboardMessageDetail(text).replacingOccurrences(of: "待处理中心", with: "")
     return detail.contains("正在") || detail.contains("处理中")
 }
 
+/// 优先使用显式消息状态，必要时兼容旧运行文字。
+/// - Parameters:
+///   - message: 需要解析、记录或显示的业务消息。
 func dashboardMessageIsRunning(_ message: DashboardMessage) -> Bool {
     if message.state == "running" { return true }
-    // Keep compatibility with older callers that did not set the explicit
-    // running state. Terminal markers always win over text matching.
+    // 兼容未显式设置运行状态的旧调用方；终态标记始终优先于文字匹配。
     guard message.state == "info" else { return false }
     return dashboardStatusIsInProgress(message.detail)
 }
@@ -880,6 +1106,23 @@ private let dashboardStatusPlaceholders: Set<String> = [
     "Server 尚未扫描",
 ]
 
+/// 合并会话历史和各来源当前状态，去重并保留耗时与上下文详情。
+/// - Parameters:
+///   - syncStatus: 订单同步当前状态。
+///   - syncTime: 订单同步状态发生时间。
+///   - inventoryStatus: 库存操作当前状态提示。
+///   - inventoryTime: 库存操作状态发生时间。
+///   - aimesStatus: AIMES 当前状态提示。
+///   - aimesTime: AIMES 状态发生时间。
+///   - serverStatus: Server 当前扫描或处理状态。
+///   - serverTime: Server 状态发生时间。
+///   - activity: 当前订单活动步骤列表。
+///   - operationDetailsBySource: 按操作来源归组的执行过程说明。
+///   - manualPathsBySource: 按来源归组的人工处理路径。
+///   - contextDetailsBySource: 按操作来源归组的业务上下文说明。
+///   - durationsBySource: 按操作来源保存的总耗时（秒）。
+///   - operationDurationsBySource: 按来源归组的独立阶段耗时。
+///   - sessionMessages: 本次会话已记录的消息；为空时从活动列表生成历史。
 func dashboardMessages(
     syncStatus: String,
     syncTime: String,
@@ -897,9 +1140,8 @@ func dashboardMessages(
     operationDurationsBySource: [String: [DashboardOperationDuration]] = [:],
     sessionMessages: [DashboardMessage]? = nil
 ) -> [DashboardMessage] {
-    // When the AIMES status is also copied into syncStatus, prefer the AIMES
-    // message so its authoritative duration, stages, and warning details are
-    // not discarded by the duplicate-detail filter below.
+    // AIMES 状态也被复制到 syncStatus 时，优先保留 AIMES 消息，
+    // 避免后续详情去重丢失其权威耗时、阶段和警告信息。
     let statuses = [
         ("inventory", "库存操作", inventoryStatus, inventoryTime),
         ("aimes", "AIMES", aimesStatus, aimesTime),
@@ -959,11 +1201,19 @@ func dashboardMessages(
         .map(\.element)
 }
 
+/// 任务运行时从历史区移除运行中消息，避免与顶部当前操作重复。
+/// - Parameters:
+///   - messages: 待展示或筛选的看板消息列表。
+///   - isRunning: 是否存在正在执行的操作。
 func dashboardVisibleMessages(_ messages: [DashboardMessage], isRunning: Bool) -> [DashboardMessage] {
     guard isRunning else { return messages }
     return messages.filter { !dashboardMessageIsRunning($0) }
 }
 
+/// 从消息集合中选择顶部当前操作显示内容。
+/// - Parameters:
+///   - messages: 待展示或筛选的看板消息列表。
+///   - isRunning: 是否存在正在执行的操作。
 func dashboardCurrentOperation(
     messages: [DashboardMessage],
     isRunning: Bool
@@ -978,6 +1228,9 @@ func dashboardCurrentOperation(
     return messages.last.map { DashboardOperationDisplay(message: $0, isRunning: false) }
 }
 
+/// 生成随消息内容变化的滚动定位键。
+/// - Parameters:
+///   - messages: 待展示或筛选的看板消息列表。
 func dashboardMessageScrollKey(_ messages: [DashboardMessage]) -> String {
     messages.map {
         let stageKey = $0.operationDurations
@@ -987,6 +1240,9 @@ func dashboardMessageScrollKey(_ messages: [DashboardMessage]) -> String {
     }.joined(separator: "\n")
 }
 
+/// 判断消息是否具备可供悬停展示的扩展详情。
+/// - Parameters:
+///   - message: 需要解析、记录或显示的业务消息。
 func dashboardMessageSupportsHoverDetail(_ message: DashboardMessage) -> Bool {
     !dashboardMessageIsRunning(message)
         && (message.state == "warning" || message.state == "failure"
@@ -996,6 +1252,9 @@ func dashboardMessageSupportsHoverDetail(_ message: DashboardMessage) -> Bool {
             || !message.operationDurations.isEmpty)
 }
 
+/// 在消息正文后附加总耗时和独立阶段耗时。
+/// - Parameters:
+///   - message: 需要解析、记录或显示的业务消息。
 func dashboardMessageDetailText(_ message: DashboardMessage) -> String {
     var detail = message.detail
     if let duration = message.duration {
@@ -1010,6 +1269,10 @@ func dashboardMessageDetailText(_ message: DashboardMessage) -> String {
     return detail
 }
 
+/// 生成一行消息摘要，并按选项附加耗时。
+/// - Parameters:
+///   - message: 需要解析、记录或显示的业务消息。
+///   - showsDuration: 是否在步骤或消息中显示耗时。
 func dashboardMessageSummaryText(_ message: DashboardMessage, showsDuration: Bool = true) -> String {
     var summary = message.detail
     if showsDuration, let duration = message.duration {
@@ -1018,6 +1281,10 @@ func dashboardMessageSummaryText(_ message: DashboardMessage, showsDuration: Boo
     return summary
 }
 
+/// 组合工厂单、销售单和原因形成 AIMES 处理说明。
+/// - Parameters:
+///   - item: AIMES 人工确认记录。
+///   - status: 业务状态文字或状态代码。
 func dashboardAimesReviewDetail(_ item: AimesReviewItem, status: String) -> String {
     let factoryOrder = item.factoryOrder.isEmpty ? "工厂单号为空" : item.factoryOrder
     let factoryName = item.factoryName.isEmpty ? "名称为空" : item.factoryName
@@ -1029,6 +1296,11 @@ func dashboardAimesReviewDetail(_ item: AimesReviewItem, status: String) -> Stri
     return detail
 }
 
+/// 分别汇总待确认、已忽略和已指定归属的 AIMES 工厂单。
+/// - Parameters:
+///   - pending: 尚待人工确认的 AIMES 工厂单。
+///   - ignored: 已被人工忽略的 AIMES 工厂单记录。
+///   - assigned: 已人工指定订单归属的 AIMES 记录。
 func dashboardAimesActionDetails(
     pending: [AimesReviewItem],
     ignored: [AimesReviewItem],
@@ -1050,6 +1322,9 @@ func dashboardAimesActionDetails(
     return details
 }
 
+/// 将 AIMES 警告转换为可展示的逐条详情。
+/// - Parameters:
+///   - warnings: 后端返回的 AIMES 警告记录。
 func dashboardAimesWarningDetails(_ warnings: [[String: Any]]) -> [String] {
     guard !warnings.isEmpty else { return [] }
     var details = ["销售单格式异常 " + String(warnings.count) + " 条，均未写入数据库："]
@@ -1124,6 +1399,9 @@ private struct DashboardMessageTracePopover: View {
         .background(AppPalette.surface)
     }
 
+    /// 构造消息详情中的项目符号文本行。
+    /// - Parameters:
+    ///   - text: 待解析或显示的文本。
     private func dashboardTraceBullet(_ text: String) -> some View {
         HStack(alignment: .top, spacing: 7) {
             Text("•")
@@ -1139,6 +1417,8 @@ private final class DashboardMessageTraceTrackingView: NSView {
     var onMouseEntered: (() -> Void)?
     var onMouseExited: (() -> Void)?
 
+    /// 按当前视图边界重新注册鼠标进入和离开跟踪区域。
+    /// 无参数。
     override func updateTrackingAreas() {
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(
@@ -1152,11 +1432,17 @@ private final class DashboardMessageTraceTrackingView: NSView {
         super.updateTrackingAreas()
     }
 
+    /// 将鼠标进入跟踪区域的事件转发给悬停回调。
+    /// - Parameters:
+    ///   - event: 系统派发的鼠标进入或离开事件。
     override func mouseEntered(with event: NSEvent) {
         onMouseEntered?()
         super.mouseEntered(with: event)
     }
 
+    /// 将鼠标离开跟踪区域的事件转发给悬停回调。
+    /// - Parameters:
+    ///   - event: 系统派发的鼠标进入或离开事件。
     override func mouseExited(with event: NSEvent) {
         onMouseExited?()
         super.mouseExited(with: event)
@@ -1169,16 +1455,25 @@ private struct DashboardMessageTracePanelPresenter: NSViewRepresentable {
     let onPanelEntered: () -> Void
     let onPanelExited: () -> Void
 
+    /// 创建负责 AppKit 事件与 SwiftUI 状态衔接的协调器。
+    /// 无参数。
     func makeCoordinator() -> Coordinator {
         Coordinator()
     }
 
+    /// 创建用于定位消息悬停详情面板的透明锚点视图。
+    /// - Parameters:
+    ///   - context: SwiftUI 提供的桥接上下文与协调器。
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
         view.wantsLayer = true
         return view
     }
 
+    /// 把消息、显示状态和鼠标回调传给详情面板协调器。
+    /// - Parameters:
+    ///   - nsView: 已创建并需要更新或卸载的 AppKit 视图。
+    ///   - context: SwiftUI 提供的桥接上下文与协调器。
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.update(
             anchorView: nsView,
@@ -1189,6 +1484,10 @@ private struct DashboardMessageTracePanelPresenter: NSViewRepresentable {
         )
     }
 
+    /// 在桥接视图卸载时关闭悬停详情面板。
+    /// - Parameters:
+    ///   - nsView: 已创建并需要更新或卸载的 AppKit 视图。
+    ///   - coordinator: 持有事件监听和面板状态的桥接协调器。
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
         coordinator.close()
     }
@@ -1202,6 +1501,13 @@ private struct DashboardMessageTracePanelPresenter: NSViewRepresentable {
         private var onPanelEntered: (() -> Void)?
         private var onPanelExited: (() -> Void)?
 
+        /// 同步悬停锚点、消息和面板回调，按显示状态打开或关闭面板。
+        /// - Parameters:
+        ///   - anchorView: 决定悬停生命周期的 AppKit 锚点视图。
+        ///   - message: 需要解析、记录或显示的业务消息。
+        ///   - isPresented: 面板当前的显示状态或其双向绑定。
+        ///   - onPanelEntered: 鼠标进入详情面板的回调。
+        ///   - onPanelExited: 鼠标离开详情面板的回调。
         func update(
             anchorView: NSView,
             message: DashboardMessage,
@@ -1225,6 +1531,8 @@ private struct DashboardMessageTracePanelPresenter: NSViewRepresentable {
             }
         }
 
+        /// 创建或刷新悬停详情面板，并注册位置跟踪。
+        /// 无参数。
         private func presentIfNeeded() {
             guard panel == nil,
                   let message,
@@ -1287,20 +1595,19 @@ private struct DashboardMessageTracePanelPresenter: NSViewRepresentable {
             panel.orderFront(nil)
         }
 
+        /// 依据鼠标与屏幕可用范围放置详情面板，保持行作为悬停生命周期锚点。
+        /// 无参数。
         private func updatePosition() {
             guard let panel, let anchorView, anchorView.window != nil else { return }
-            // Keep the message row as the hover lifetime anchor. Placement is
-            // intentionally pointer-based below for the established UI
-            // behavior; the close grace and panel tracking prevent small
-            // pointer movements from closing the detail immediately.
+            // 保持消息行作为悬停生命周期的锚点。下面有意沿用基于鼠标位置的布局；
+            // 关闭宽限期和面板跟踪可避免鼠标小幅移动就立即关闭详情。
             let screenPoint = NSEvent.mouseLocation
             let visibleFrame = NSScreen.screens.first(where: { $0.frame.contains(screenPoint) })?.visibleFrame
                 ?? NSScreen.main?.visibleFrame
                 ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
             let gap: CGFloat = 14
-            // Keep the previous placement behavior: position relative to the
-            // current pointer and flip left/right when the screen edge clips
-            // the panel. The row remains the hover lifetime anchor.
+            // 沿用原有定位行为：相对当前鼠标放置面板，在屏幕边缘空间不足时左右翻转；
+            // 消息行仍作为悬停生命周期锚点。
             var originX = screenPoint.x + gap
             var originY = screenPoint.y - panel.frame.height - gap
             if originX + panel.frame.width > visibleFrame.maxX {
@@ -1314,12 +1621,16 @@ private struct DashboardMessageTracePanelPresenter: NSViewRepresentable {
             panel.setFrameOrigin(NSPoint(x: originX, y: originY))
         }
 
+        /// 关闭悬停详情面板并释放窗口引用。
+        /// 无参数。
         func close() {
             panel?.orderOut(nil)
             panel = nil
             hostingController = nil
         }
 
+        /// 释放协调器时移除事件监听并关闭详情面板。
+        /// 无参数。
         deinit {
             close()
         }
@@ -1337,8 +1648,7 @@ private struct DashboardMessageTraceHost<Content: View>: View {
 
     var body: some View {
         content()
-            // Keep the hover tracking area at the full row width instead of
-            // the content's intrinsic width.
+            // 悬停跟踪区域覆盖整行宽度，不局限于内容的固有宽度。
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .onHover { hovering in
@@ -1365,6 +1675,8 @@ private struct DashboardMessageTraceHost<Content: View>: View {
             )
     }
 
+    /// 进入消息行后安排延迟显示，并复用宽限期内的已有面板。
+    /// 无参数。
     private func beginHover() {
         guard !anchorHovering else { return }
         let wasPopoverVisible = showPopover
@@ -1372,8 +1684,7 @@ private struct DashboardMessageTraceHost<Content: View>: View {
         anchorHovering = true
         hoverGeneration += 1
         if wasPopoverVisible {
-            // Re-entering the row during the close grace period keeps the
-            // already-visible panel instead of hiding and re-presenting it.
+            // 关闭宽限期内重新进入消息行时，保留已显示的面板，避免先隐藏再弹出。
             return
         }
         showPopover = false
@@ -1384,6 +1695,8 @@ private struct DashboardMessageTraceHost<Content: View>: View {
         }
     }
 
+    /// 标记已离开消息行并安排延迟关闭详情。
+    /// 无参数。
     private func endHover() {
         guard activeMessageID == message.id else { return }
         anchorHovering = false
@@ -1391,6 +1704,8 @@ private struct DashboardMessageTraceHost<Content: View>: View {
         schedulePopoverClose()
     }
 
+    /// 当行和面板均未悬停时，在宽限期后关闭详情。
+    /// 无参数。
     private func schedulePopoverClose() {
         let generation = hoverGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + dashboardMessageHoverCloseGrace) {
@@ -1402,6 +1717,8 @@ private struct DashboardMessageTraceHost<Content: View>: View {
         }
     }
 
+    /// 进入详情面板时取消延迟关闭。
+    /// 无参数。
     private func panelEntered() {
         guard activeMessageID == nil || activeMessageID == message.id else { return }
         activeMessageID = message.id
@@ -1409,6 +1726,8 @@ private struct DashboardMessageTraceHost<Content: View>: View {
         hoverGeneration += 1
     }
 
+    /// 离开详情面板后安排延迟关闭。
+    /// 无参数。
     private func panelExited() {
         guard activeMessageID == message.id else { return }
         panelHovering = false
@@ -1417,8 +1736,8 @@ private struct DashboardMessageTraceHost<Content: View>: View {
     }
 }
 
-// A transient value snapshot, not a data cache. Equality excludes order selection,
-// materials, hardware and detail loading; real message/progress changes still render.
+// 这是短暂的值快照，不是数据缓存。相等性排除订单选择、材料、五金和详情加载；
+// 真正的消息或进度变化仍会触发渲染。
 struct OrderDashboardActivityInput: Equatable {
     let pendingServerChanges: [ServerChangePreview]
     let pendingAimesReviews: [AimesReviewItem]
@@ -1442,6 +1761,9 @@ struct OrderDashboardActivityInput: Equatable {
     let dashboardOperationStartUptimes: [String: TimeInterval]
     let aimesWarningDetails: [String]
 
+    /// 从 AppModel 提取仅影响消息区域的短暂值快照。
+    /// - Parameters:
+    ///   - model: 共享的 App 状态及业务命令入口。
     init(model: AppModel) {
         pendingServerChanges = model.pendingServerChanges
         pendingAimesReviews = model.pendingAimesReviews
@@ -1466,12 +1788,14 @@ struct OrderDashboardActivityInput: Equatable {
         aimesWarningDetails = dashboardAimesWarningDetails(model.aimesWarnings)
     }
 
+    /// 合并库存运行标志和各来源状态，判断是否显示当前操作。
     var operationRunning: Bool {
         inventoryRunning || [dashboardSyncStatus, dashboardInventoryOperationStatus,
                              dashboardAimesStatus, dashboardServerStatus]
             .contains(where: dashboardStatusIsInProgress)
     }
 
+    /// 合并各来源操作详情和去重后的实时进度文字。
     var dashboardMessageOperationDetails: [String: [String]] {
         var merged = dashboardOperationDetails
         for (source, progress) in dashboardOperationProgress {
@@ -1482,6 +1806,9 @@ struct OrderDashboardActivityInput: Equatable {
         return merged
     }
 
+    /// 按单调时钟计算指定来源操作的已运行秒数。
+    /// - Parameters:
+    ///   - source: 看板操作来源键，如 aimes、server、inventory 或 sync。
     func dashboardElapsedTime(_ source: String) -> TimeInterval? {
         guard let start = dashboardOperationStartUptimes[source] else { return nil }
         return max(0, ProcessInfo.processInfo.systemUptime - start)
@@ -1491,6 +1818,8 @@ struct OrderDashboardActivityInput: Equatable {
 #if TESTING
 enum OrderDashboardRenderProbe {
     static var messageBodyCount = 0
+    /// 记录消息视图正文的求值次数，供渲染隔离测试使用。
+    /// 无参数。
     static func recordMessageBody() { messageBodyCount += 1 }
 }
 #endif
@@ -1586,8 +1915,16 @@ struct OrderDashboardActivityView: View, Equatable {
     @State private var activeMessageID: String?
     @State private var dashboardMessageContentWidth: CGFloat?
 
+    /// 仅比较消息输入快照，判断是否需要重新计算消息视图。
+    /// - Parameters:
+    ///   - lhs: 等值比较左侧的视图。
+    ///   - rhs: 等值比较右侧的视图。
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.input == rhs.input }
 
+    /// 为具备详情的消息包裹悬停面板宿主。
+    /// - Parameters:
+    ///   - message: 需要解析、记录或显示的业务消息。
+    ///   - content: 生成卡片或容器内部视图的闭包。
     @ViewBuilder
     private func traceHost<Content: View>(
         for message: DashboardMessage,
@@ -1613,9 +1950,8 @@ struct OrderDashboardActivityView: View, Equatable {
             input.pendingAimesReviews + input.ignoredAimesFactories + input.assignedAimesFactories
         ).map(\.sourcePath)
         let serverManualPaths = input.pendingServerChanges.map(\.path)
-        // The sync status row represents the latest warning/error. Attach only
-        // that activity's file path; do not aggregate paths from unrelated
-        // Server/AIMES operations into the hovered message.
+        // 同步状态行代表最新警告或错误。仅附上该活动的文件路径，
+        // 不要把无关 Server/AIMES 操作的路径汇入悬停消息。
         let latestActivityPaths = input.dashboardActivity.first {
             $0.state == "failure" || $0.state == "warning"
         }?.paths ?? []
@@ -1725,10 +2061,13 @@ struct OrderDashboardActivityView: View, Equatable {
                 }
             }
         }
-        // The header and history share one glass surface and one outer contour.
+        // 标题和历史共用同一玻璃背景及外轮廓。
         .clipShape(RoundedRectangle(cornerRadius: AppLayout.cardCornerRadius, style: .continuous))
     }
 
+    /// 构造顶部当前操作行，显示状态和运行耗时。
+    /// - Parameters:
+    ///   - display: 当前操作消息及运行状态。
     @ViewBuilder
     private func currentOperationRow(_ display: DashboardOperationDisplay?) -> some View {
         if let display {
@@ -1766,6 +2105,9 @@ struct OrderDashboardActivityView: View, Equatable {
         }
     }
 
+    /// 按当前操作的运行或结束状态选择图标。
+    /// - Parameters:
+    ///   - display: 当前操作消息及运行状态。
     @ViewBuilder
     private func currentOperationIcon(_ display: DashboardOperationDisplay) -> some View {
         if display.isRunning {
@@ -1785,6 +2127,10 @@ struct OrderDashboardActivityView: View, Equatable {
         }
     }
 
+    /// 在消息变化后滚动到最新一条消息。
+    /// - Parameters:
+    ///   - proxy: 控制消息滚动位置的代理。
+    ///   - messages: 待展示或筛选的看板消息列表。
     private func scrollMessagesToBottom(_ proxy: ScrollViewProxy, messages: [DashboardMessage]) {
         guard let lastID = messages.last?.id else { return }
         DispatchQueue.main.async {
@@ -1792,6 +2138,9 @@ struct OrderDashboardActivityView: View, Equatable {
         }
     }
 
+    /// 将活动状态映射到系统图标名称。
+    /// - Parameters:
+    ///   - state: 运行、成功、警告或失败等展示状态。
     private func activityIcon(_ state: String) -> String {
         switch state {
         case "failure": return "xmark.circle.fill"
@@ -1801,6 +2150,9 @@ struct OrderDashboardActivityView: View, Equatable {
         }
     }
 
+    /// 将活动状态映射到对应的强调颜色。
+    /// - Parameters:
+    ///   - state: 运行、成功、警告或失败等展示状态。
     private func activityColor(_ state: String) -> Color {
         switch state {
         case "failure": return AppPalette.danger
@@ -1828,6 +2180,7 @@ struct OrderDashboardListView: View {
     @State private var showOutboundScope = false
     @Binding var showServerFolderImporter: Bool
 
+    /// 按搜索词与阶段筛选当前订单列表。
     private var filteredOrders: [OrderDashboardItem] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return model.dashboardOrders.filter { item in
@@ -1838,10 +2191,12 @@ struct OrderDashboardListView: View {
         }
     }
 
+    /// 取得当前选择的工厂单预览。
     private var selectedFactory: OrderFactoryPreview? {
         model.orderFactories.first { $0.factoryOrder == selectedFactoryID }
     }
 
+    /// 取得当前订单中有可用五金的工厂单集合。
     private var availableHardwareFactoryOrders: Set<String> {
         Set(
             model.orderFittings
@@ -1983,6 +2338,9 @@ struct OrderDashboardListView: View {
         .frame(maxHeight: .infinity)
     }
 
+    /// 按统一列布局构造订单表格表头。
+    /// - Parameters:
+    ///   - layout: 订单表格各列的计算宽度。
     private func orderTableHeader(layout: OrderDashboardTableLayout) -> some View {
         HStack(spacing: 0) {
             LazyVGrid(columns: layout.columns, spacing: 0) {
@@ -2016,10 +2374,15 @@ struct OrderDashboardListView: View {
                 style: .continuous
             )
         )
-        // Do not let the table's flexible height proposal stretch the header.
+        // 不要让表格的弹性高度建议值拉伸表头。
         .fixedSize(horizontal: true, vertical: true)
     }
 
+    /// 显示订单数据、进度及操作，并绑定行选择与详情入口。
+    /// - Parameters:
+    ///   - item: 订单看板记录。
+    ///   - isLastRow: 是否为最后一行，用于控制分隔样式。
+    ///   - layout: 订单表格各列的计算宽度。
     private func orderRow(
         _ item: OrderDashboardItem,
         isLastRow: Bool = false,
@@ -2142,7 +2505,7 @@ struct OrderDashboardListView: View {
                 .frame(width: layout.dataWidth, alignment: .leading)
                 .padding(.vertical, 11)
 
-                // Keep action buttons outside the row-level gesture recognizers.
+                // 将操作按钮放在行级手势识别区域之外。
                 tableCell(width: orderDashboardOperationColumnWidth) {
                     HStack(spacing: 8) {
                         Button("详情") {
@@ -2176,7 +2539,6 @@ struct OrderDashboardListView: View {
                     selectedFactoryIDs: $selectedFactoryIDs,
                     onQueryStock: { showFactoryStock = true; model.checkSelectedOrderStock() },
                     onOpenProduction: {
-                        model.loadProductionPreview(orderID: item.orderId, factoryOrders: selectedFactoryIDs.sorted())
                         showProductionSheet = true
                     },
                     onOpenOutbound: {
@@ -2198,6 +2560,9 @@ struct OrderDashboardListView: View {
         }
     }
 
+    /// 同步所选订单身份并请求数据库详情。
+    /// - Parameters:
+    ///   - item: 订单看板记录。
     private func prepareSelectedOrder(_ item: OrderDashboardItem) {
         selectedFactoryID = nil
         selectedFactoryIDs = []
@@ -2206,6 +2571,9 @@ struct OrderDashboardListView: View {
         model.loadOrderDetailFromDatabase(item)
     }
 
+    /// 切换订单展开状态并准备对应详情。
+    /// - Parameters:
+    ///   - item: 订单看板记录。
     private func toggleExpanded(_ item: OrderDashboardItem) {
         let next = orderDashboardExpandedID(current: expandedOrderID, tapped: item.orderId)
         expandedOrderID = next
@@ -2213,11 +2581,16 @@ struct OrderDashboardListView: View {
         prepareSelectedOrder(item)
     }
 
+    /// 选择订单并打开订单详情面板。
+    /// - Parameters:
+    ///   - item: 订单看板记录。
     private func openOrderDetail(_ item: OrderDashboardItem) {
         prepareSelectedOrder(item)
         detailOrder = item
     }
 
+    /// 响应跨页面定位请求，在当前列表找到订单后打开详情。
+    /// 无参数。
     private func openRequestedOrderIfAvailable() {
         let orderID = model.requestedOrderCenterOrderID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !orderID.isEmpty,
@@ -2230,18 +2603,29 @@ struct OrderDashboardListView: View {
         expandedOrderID = nil
     }
 
+    /// 构造指定宽度的订单表格标题单元格。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - width: 单元格或容器宽度，单位为逻辑点。
     private func tableHeader(_ title: String, width: CGFloat) -> some View {
         Text(title)
             .frame(minWidth: width, idealWidth: width, maxWidth: width, alignment: .center)
             .offset(x: (orderDashboardDataHeaderTitles.contains(title) ? orderDashboardDataHeaderOffset : 0) - 5)
     }
 
+    /// 为订单表格内容应用统一宽度和对齐方式。
+    /// - Parameters:
+    ///   - width: 单元格或容器宽度，单位为逻辑点。
+    ///   - content: 生成卡片或容器内部视图的闭包。
     private func tableCell<Content: View>(width: CGFloat, @ViewBuilder content: () -> Content) -> some View {
         content()
             .frame(minWidth: width, idealWidth: width, maxWidth: width, alignment: .center)
             .multilineTextAlignment(.center)
     }
 
+    /// 将订单状态映射为状态徽章类型。
+    /// - Parameters:
+    ///   - status: 业务状态文字或状态代码。
     private func statusKind(_ status: String) -> AppStatusBadge.Kind {
         switch status {
         case "已优化", "已生产", "部分生产", "部分出货", "部分生产，部分出货", "已出货": return .info
@@ -2276,6 +2660,11 @@ struct OrderDashboardMetricsView: View {
         .onAppear { model.startOrderDashboard() }
     }
 
+    /// 构造订单摘要的标题、数值和颜色组合。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - value: 需要显示的数值或状态文字。
+    ///   - color: 界面使用的强调颜色。
     private func metric(_ title: String, _ value: String, _ color: Color) -> some View {
         AppSurfaceCard(padding: 12) {
             VStack(alignment: .leading, spacing: 5) {
@@ -2367,6 +2756,10 @@ struct OrderDashboardDetailPage: View {
         }
     }
 
+    /// 按材料类别绘制详情行及适用的厚度提示。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - rows: 订单材料预览列表。
     @ViewBuilder
     private func materialRow(title: String, rows: [OrderMaterialPreview]) -> some View {
         if !rows.isEmpty {
@@ -2439,6 +2832,10 @@ struct OrderDashboardDetailPage: View {
         }
     }
 
+    /// 按工厂单显示五金明细分组。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - rows: 工厂单五金预览列表。
     private func hardwareFactorySection(title: String, rows: [OrderFittingPreview]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
@@ -2466,6 +2863,12 @@ struct OrderDashboardDetailPage: View {
         }
     }
 
+    /// 构造材料详情卡片，可附带 Panel 图片悬停入口。
+    /// - Parameters:
+    ///   - name: 来源材料或五金的名称。
+    ///   - subtitle: 卡片副标题或规格说明。
+    ///   - value: 需要显示的数值或状态文字。
+    ///   - panelMaterial: 可选的 Panel 材料，用于图片悬停预览。
     private func orderDetailCard(
         name: String,
         subtitle: String,
@@ -2510,6 +2913,8 @@ private struct OrderInstallationDraft: Identifiable {
     var installer: String
 }
 
+/// 创建安装安排存储日期使用的固定格式转换器。
+/// 无参数。
 private func orderInstallationDateFormatter() -> DateFormatter {
     let formatter = DateFormatter()
     formatter.calendar = Calendar(identifier: .gregorian)
@@ -2519,14 +2924,23 @@ private func orderInstallationDateFormatter() -> DateFormatter {
     return formatter
 }
 
+/// 把已保存的安装日期转换为草稿日期，解析失败时使用当前日期。
+/// - Parameters:
+///   - value: 待解析或显示的业务日期时间字符串。
 private func orderInstallationDraftDate(_ value: String) -> Date {
     orderInstallationDateFormatter().date(from: value) ?? Date()
 }
 
+/// 将安装草稿日期转换为存储用年月日字符串。
+/// - Parameters:
+///   - value: 待格式化的日期时间。
 private func orderInstallationDraftValue(_ value: Date) -> String {
     orderInstallationDateFormatter().string(from: value)
 }
 
+/// 格式化安装日期按钮的中文显示文本。
+/// - Parameters:
+///   - value: 待格式化的日期时间。
 private func orderInstallationPickerDisplayDate(_ value: Date) -> String {
     let formatter = DateFormatter()
     formatter.calendar = Calendar(identifier: .gregorian)
@@ -2536,6 +2950,9 @@ private func orderInstallationPickerDisplayDate(_ value: Date) -> String {
     return formatter.string(from: value)
 }
 
+/// 从已有订单安装记录提取去重的安装人员建议。
+/// - Parameters:
+///   - orders: 订单看板记录列表。
 private func orderInstallationInstallerSuggestions(from orders: [OrderDashboardItem]) -> [String] {
     let installers = orders.flatMap { item in
         item.plannedInstallationDays + item.actualInstallationDays
@@ -2581,6 +2998,10 @@ private struct OrderAnnotationsEditor: View {
     @State private var saveSucceeded = false
     @Environment(\.dismiss) private var dismiss
 
+    /// 以当前订单备注及安装记录初始化独立编辑草稿。
+    /// - Parameters:
+    ///   - model: 共享的 App 状态及业务命令入口。
+    ///   - order: 订单看板记录。
     init(model: AppModel, order: OrderDashboardItem) {
         self.model = model
         self.order = order
@@ -2656,12 +3077,16 @@ private struct OrderAnnotationsEditor: View {
         }
         .task(id: saveSucceeded) {
             guard saveSucceeded else { return }
-            // Keep success visible briefly before returning to the order center.
+            // 返回订单中心前短暂保留成功提示。
             do { try await Task.sleep(for: .seconds(0.9)) } catch { return }
             dismiss()
         }
     }
 
+    /// 显示可增删的安装日期与人员草稿列表。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - rows: 可编辑安装日期和人员草稿列表的双向绑定。
     @ViewBuilder
     private func installationRows(
         title: String,
@@ -2720,8 +3145,7 @@ private struct OrderAnnotationsEditor: View {
                                         }
                                     }
                                 ),
-                                // Present beside the date button; the taller order sheet keeps the
-                                // complete calendar visible instead of clipping it below the form.
+                                // 在日期按钮旁显示日历；较高的订单面板容纳完整日历，避免日历在表单下方被裁切。
                                 arrowEdge: .trailing
                             ) {
                                 AppGlassDatePickerCalendar(selection: $day.date, compact: true)
@@ -2756,7 +3180,7 @@ private struct OrderAnnotationsEditor: View {
                             .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppPalette.separator))
                             .frame(maxWidth: .infinity)
                             Button {
-                                // Capture identity before mutation: $day indexes the original array.
+                                // 修改前先取得身份：$day 的索引仍指向原数组。
                                 let removedID = day.id
                                 if datePickerRowID == removedID {
                                     datePickerRowID = nil
@@ -2777,6 +3201,8 @@ private struct OrderAnnotationsEditor: View {
         .padding(.vertical, 4)
     }
 
+    /// 提交备注和安装草稿，仅保留最早一条实际安装记录，并显示保存结果。
+    /// 无参数。
     private func save() {
         let planned = plannedDays.map {
             OrderInstallationDay(
@@ -2991,6 +3417,12 @@ struct OrderDashboardDetailCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// 使用统一列宽绘制工厂单表头或数据行。
+    /// - Parameters:
+    ///   - isHeader: 是否绘制表头行。
+    ///   - factory: 工厂单预览。
+    ///   - dashboardFactory: 看板中的工厂单状态；表头时可为空。
+    ///   - selected: 当前行是否选中。
     @ViewBuilder
     private func factoryTableRow(
         isHeader: Bool,
@@ -3013,17 +3445,17 @@ struct OrderDashboardDetailCard: View {
                 .frame(width: orderDashboardFactorySelectionColumnWidth, alignment: .center)
             factoryCell(isHeader ? "工厂单" : factoryOrder, width: orderDashboardFactoryColumnWidths[0])
             factoryCell(isHeader ? "名称" : factoryName, width: orderDashboardFactoryColumnWidths[1])
-            factoryCell(isHeader ? "拆单" : "已拆单", width: orderDashboardFactoryColumnWidths[2], status: !isHeader)
-            factoryCell(isHeader ? "优化" : optimization, width: orderDashboardFactoryColumnWidths[3], status: !isHeader && optimization == "已优化")
+            factoryCell(isHeader ? "拆单" : "已拆单", width: orderDashboardFactoryColumnWidths[2], status: isHeader ? nil : true)
+            factoryCell(isHeader ? "优化" : optimization, width: orderDashboardFactoryColumnWidths[3], status: isHeader ? nil : optimization == "已优化")
             factoryCell(
                 isHeader ? "生产" : (dashboardFactory?.produced == true ? "已生产" : "未生产"),
                 width: orderDashboardFactoryColumnWidths[4],
-                status: !isHeader && dashboardFactory?.produced == true
+                status: isHeader ? nil : dashboardFactory?.produced == true
             )
             factoryCell(
                 isHeader ? "出库" : orderDashboardOutboundDisplay(status: outbound, documentNumber: outboundDocument),
                 width: orderDashboardFactoryColumnWidths[5],
-                status: !isHeader && outbound == "已出库"
+                status: isHeader ? nil : outbound == "已出库"
             )
         }
         .font(isHeader ? .caption.weight(.semibold) : .caption)
@@ -3033,12 +3465,39 @@ struct OrderDashboardDetailCard: View {
         .contentShape(Rectangle())
     }
 
-    private func factoryCell(_ text: String, width: CGFloat? = nil, status: Bool = false) -> some View {
-        HStack(spacing: 5) {
-            if status { Circle().fill(AppPalette.success).frame(width: 7, height: 7) }
-            Text(text).lineLimit(1).truncationMode(.tail)
+    /// 显示工厂单文本或居中的状态徽章。
+    /// - Parameters:
+    ///   - text: 待解析或显示的文本。
+    ///   - width: 单元格或容器宽度，单位为逻辑点。
+    ///   - status: 业务状态文字或状态代码。
+    private func factoryCell(_ text: String, width: CGFloat, status: Bool? = nil) -> some View {
+        Group {
+            if let completed = status {
+                HStack(spacing: 6) {
+                    Image(systemName: completed ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(completed ? AppPalette.success : Color(red: 0.48, green: 0.52, blue: 0.58))
+                        .accessibilityHidden(true)
+                    Text(text)
+                        .font(.caption)
+                        .foregroundColor(completed
+                            ? Color(red: 0.13, green: 0.43, blue: 0.28)
+                            : Color(red: 0.57, green: 0.60, blue: 0.65))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .padding(.horizontal, 8)
+                .frame(height: 24)
+                .background(completed ? AppPalette.success.opacity(0.10) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .padding(.horizontal, 4)
+                .help(text)
+            } else {
+                Text(text).lineLimit(1).truncationMode(.tail)
+            }
         }
-        .frame(minWidth: width ?? 0, maxWidth: width ?? .infinity, alignment: .center)
+        // 将整个徽章居中对齐到与表头一致的固定列轴线上。
+        .frame(width: width, alignment: .center)
         .multilineTextAlignment(.center)
     }
 
@@ -3053,6 +3512,9 @@ struct ProductionSheet: View {
     @State private var operationState: SheetOperationState = .idle
     @State private var operationMessage = ""
     @State private var retryAllowed = false
+    @State private var previewReady = false
+    @State private var previewLoading = false
+    @State private var previewFailed = false
 
     private enum SheetOperationState {
         case idle
@@ -3063,10 +3525,12 @@ struct ProductionSheet: View {
         case uncertain
     }
 
+    /// 判断生产面板是否正在准备或执行库存操作。
     private var isProcessing: Bool {
         operationState == .preparing || operationState == .running
     }
 
+    /// 统计本次生产消耗数量大于零的材料项目。
     private var selectedQuantityCount: Int {
         model.productionMaterials.filter { (Double($0.quantity) ?? 0) > 0 }.count
     }
@@ -3090,7 +3554,7 @@ struct ProductionSheet: View {
                 productionOperationBanner
             }
             if model.productionMaterials.isEmpty {
-                ContentUnavailableView("没有可生产的订单材料", systemImage: "shippingbox", description: Text("请确认工厂单已优化，且订单材料已经写入数据库。"))
+                ContentUnavailableView("没有订单材料", systemImage: "shippingbox", description: Text("无需新增领料时，可仅确认所选工厂单生产完成。"))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 Text("填写本次实际消耗数量（不是每个工厂单分别填写；同色板材一次合并扣减）")
@@ -3134,7 +3598,7 @@ struct ProductionSheet: View {
                                 .frame(width: 88)
                                 .disabled(
                                     material.remainingQuantity <= 0
-                                    || isProcessing
+                                    || isProcessing || operationState == .success
                                 )
                             }
                             .opacity(material.remainingQuantity <= 0 ? 0.55 : 1)
@@ -3146,19 +3610,35 @@ struct ProductionSheet: View {
                 }
                 .frame(maxHeight: .infinity)
             }
+            if previewReady && selectedQuantityCount == 0 && operationState == .idle {
+                Text("本次数量为 0：仅记录所选工厂单生产完成，不扣减板材和封边。")
+                    .font(.caption).foregroundColor(.secondary)
+            }
             HStack {
                 Spacer()
                 Button(operationState == .success ? "完成" : "关闭") { onClose() }
                     .buttonStyle(.glass)
                     .disabled(isProcessing)
+                if previewFailed && operationState == .idle {
+                    Button("重新读取材料") { loadPreview() }
+                        .disabled(previewLoading || model.orderRunning)
+                        .accessibilityIdentifier("production.reloadPreview")
+                }
                 if operationState == .failure && retryAllowed {
                     Button("重试") { submitProduction() }
                         .buttonStyle(.glassProminent)
-                        .disabled(isProcessing)
+                        .disabled(!canSubmit)
                 } else if operationState == .idle {
-                    Button("确认生产并扣减材料") { submitProduction() }
-                        .buttonStyle(.glassProminent)
-                        .disabled(selectedQuantityCount == 0 || model.productionMaterials.isEmpty)
+                    if selectedQuantityCount == 0 {
+                        Button("仅确认生产，不扣减材料") { submitProduction() }
+                            .buttonStyle(.glassProminent)
+                            .disabled(!canSubmit)
+                            .accessibilityIdentifier("production.confirmWithoutMaterials")
+                    } else {
+                        Button("确认生产并扣减材料") { submitProduction() }
+                            .buttonStyle(.glassProminent)
+                            .disabled(!canSubmit)
+                    }
                 }
             }
         }
@@ -3166,8 +3646,27 @@ struct ProductionSheet: View {
         .onAppear {
             guard !didLoad else { return }
             didLoad = true
-            model.loadProductionPreview(orderID: orderID, factoryOrders: factoryOrders)
+            loadPreview()
         }
+    }
+
+    /// 弹窗统一读取预览，失败或忙碌后允许用户重试；成功回调才启用确认。
+    private func loadPreview() {
+        guard !previewLoading else { return }
+        previewReady = false
+        previewFailed = false
+        previewLoading = true
+        model.loadProductionPreview(orderID: orderID, factoryOrders: factoryOrders) { ready in
+            previewLoading = false
+            previewReady = ready
+            previewFailed = !ready
+        }
+    }
+
+    /// 预览成功且输入合法后允许提交，包括明确的全零消耗。
+    private var canSubmit: Bool {
+        previewReady && !previewLoading && !isProcessing && !model.orderRunning
+            && productionDraftHasValidQuantities(model.productionMaterials)
     }
 
     private var productionOperationBanner: some View {
@@ -3182,15 +3681,15 @@ struct ProductionSheet: View {
         case .running:
             color = AppPalette.accent
             icon = "shippingbox"
-            title = "正在执行生产出库"
+            title = selectedQuantityCount == 0 ? "正在保存生产记录" : "正在执行生产出库"
         case .success:
             color = AppPalette.success
             icon = "checkmark.circle.fill"
-            title = "生产出库成功"
+            title = selectedQuantityCount == 0 ? "生产已完成" : "生产出库成功"
         case .failure:
             color = AppPalette.danger
             icon = "xmark.octagon.fill"
-            title = "生产出库失败"
+            title = selectedQuantityCount == 0 ? "生产未完成" : "生产出库失败"
         case .uncertain:
             color = AppPalette.warning
             icon = "questionmark.circle.fill"
@@ -3219,8 +3718,21 @@ struct ProductionSheet: View {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
+    /// 先准备生产请求，再提交实际消耗并根据结果更新面板。
+    /// 无参数。
     private func submitProduction() {
-        guard !isProcessing else { return }
+        guard canSubmit else { return }
+        if selectedQuantityCount == 0 {
+            operationState = .running
+            operationMessage = "正在保存生产记录……"
+            retryAllowed = false
+            model.confirmProductionWithoutMaterials(orderID: orderID, factoryOrders: factoryOrders, materials: model.productionMaterials) { result in
+                operationState = result.state == .success ? .success : .failure
+                operationMessage = result.message
+                retryAllowed = result.retryAllowed
+            }
+            return
+        }
         operationState = .preparing
         operationMessage = "正在校验本次材料数量，尚未操作库存系统……"
         retryAllowed = false
@@ -3265,6 +3777,7 @@ struct OrderShipmentConfirmationSheet: View {
     let onCancel: () -> Void
     let onConfirm: () -> Void
 
+    /// 筛选所选工厂单中未忽略且数量为正的五金。
     private var fittings: [OrderFittingPreview] {
         model.orderFittings.filter { factoryOrders.contains($0.factoryOrder) && !$0.ignored && $0.quantity > 0 }
     }
@@ -3347,10 +3860,13 @@ struct OutboundScopeSheet: View {
     @State private var isLoadingSavedScope = false
     @State private var didLoadSavedScope = false
 
+    /// 判断当前订单是否属于 CUT TO SIZE 来料加工。
     private var incomingProcessing: Bool { orderType == "cutToSize" }
+    /// 判断当前出库范围选择是否表示无需出库。
     private var noOutboundDecision: Bool {
         requirement == "customer_supplied" || requirement == "remainder" || requirement == "not_required"
     }
+    /// 判断当前范围是否有工厂单五金可供选择。
     private var hardwareAvailable: Bool { !hardwareFactoryOrders.isEmpty }
 
     var body: some View {
@@ -3428,6 +3944,8 @@ struct OutboundScopeSheet: View {
         }
     }
 
+    /// 为当前订单和工厂单载入已保存的出库范围草稿。
+    /// 无参数。
     private func loadSavedScopeIfNeeded() {
         guard !didLoadSavedScope else { return }
         didLoadSavedScope = true
@@ -3454,6 +3972,11 @@ struct OutboundScopeSheet: View {
         }
     }
 
+    /// 构造出库范围选项按钮并显示选择和禁用状态。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - value: 此出库范围选项对应的保存值。
+    ///   - disabled: 是否禁用此选项。
     private func scopeSegment(_ title: String, value: String, disabled: Bool = false) -> some View {
         Button {
             if !disabled { scopeType = value }
@@ -3477,6 +4000,7 @@ struct FolderManualHandlingSheet: View {
     @State private var referenceText = ""
     @State private var outboundDocument = ""
 
+    /// 把用户填写的参考订单拆分为有效订单号列表。
     private var references: [String] {
         referenceText.components(separatedBy: CharacterSet(charactersIn: "、,，;； \n"))
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
@@ -3530,13 +4054,19 @@ struct PendingCenterSheet: View {
     @State private var showActionConfirmation = false
     @State private var manualHandlingGroup: ServerFolderChangeGroup?
 
+    /// 弹出确认对话框，仅在用户确认后执行动作。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - action: 用户确认或点击按钮后执行的动作。
     private func confirm(_ title: String, action: @escaping () -> Void) {
         confirmationTitle = title
         pendingAction = action
         showActionConfirmation = true
     }
 
+    /// 读取模型当前生成的待处理队列。
     private var items: [PendingCenterItem] { model.pendingCenterItems }
+    /// 按当前筛选条件取得待处理队列的可见项目。
     private var visibleItems: [PendingCenterItem] {
         items.filter {
             (category == "全部" || $0.status == category) &&
@@ -3544,10 +4074,13 @@ struct PendingCenterSheet: View {
         }
     }
 
+    /// 从当前记录中取得所选身份对应的项目。
     private var selectedItem: PendingCenterItem? {
         visibleItems.first { $0.id == selectedID } ?? visibleItems.first
     }
 
+    /// 使待处理项选择与当前可见队列保持一致。
+    /// 无参数。
     private func reconcileSelection() {
         guard !visibleItems.contains(where: { $0.id == selectedID }) else { return }
         selectedID = visibleItems.first?.id
@@ -3555,7 +4088,10 @@ struct PendingCenterSheet: View {
         model.selectedServerFolderPaths.removeAll()
     }
 
-    /// Always derive the action target from the visible selection.
+    /// 始终从当前可见选择推导操作目标。
+    /// 按当前可见选择定位待处理项并打开对应预览或处理入口。
+    /// - Parameters:
+    ///   - item: 待处理队列项。
     private func preview(_ item: PendingCenterItem) {
         guard !model.orderRunning, !item.folderPath.isEmpty else { return }
         model.selectedAimesReviewIDs.removeAll()
@@ -3571,12 +4107,26 @@ struct PendingCenterSheet: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("待处理中心")
                         .font(.title2.weight(.semibold))
-                    Text("查看问题、补充资料并核对预览；确认后才写入订单。")
+                    Text("外部修复后重新检查；核对通过后自动移除提示。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
                 Spacer()
                 AppStatusBadge(text: "\(items.count) 项", kind: .warning)
+            }
+            HStack(spacing: 10) {
+                Button("重新扫描 Server") { model.scanDashboardServer(presentIfNeeded: false) }
+                Button("同步 AIMES 并检查") { model.syncDashboardAimes(force: true) }
+                Spacer()
+            }
+            .disabled(model.orderRunning || model.inventoryRunning)
+            ForEach(model.pendingSourceFailures.keys.sorted(), id: \.self) { source in
+                Text("\(source) 状态尚未确认：\(model.pendingSourceFailures[source] ?? "")")
+                    .font(.caption).foregroundColor(AppPalette.warning).fixedSize(horizontal: false, vertical: true)
+            }
+            if !model.pendingCheckStatus.isEmpty {
+                Text(model.pendingCheckStatus).font(.caption).foregroundColor(.secondary)
+                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             }
             HStack(alignment: .top, spacing: 14) {
                 VStack(alignment: .leading, spacing: 10) {
@@ -3584,7 +4134,7 @@ struct PendingCenterSheet: View {
                         TextField("搜索订单、问题或路径", text: $searchText)
                             .textFieldStyle(.roundedBorder)
                         Picker("类型", selection: $category) {
-                            ForEach(["全部", "待处理", "处理失败", "待人工确认", "需人工处理"], id: \.self) { type in
+                            ForEach(["全部", "待处理", "待核对", "处理失败", "待人工确认", "需人工处理"], id: \.self) { type in
                                 Text("\(type) · \(type == "全部" ? items.count : items.filter { $0.status == type }.count)").tag(type)
                             }
                         }
@@ -3688,15 +4238,19 @@ struct PendingCenterSheet: View {
         }
     }
 
-    // Keep a dismissal action available even when the queue or filter is empty.
+    // 即使队列或筛选结果为空，也保留关闭入口。
     private var postponeButton: some View {
         Button("稍后处理") { model.showPendingCenterPrompt = false }
             .buttonStyle(.glass)
             .keyboardShortcut(.cancelAction)
     }
 
+    /// 根据待处理项类型生成详情标题。
+    /// - Parameters:
+    ///   - item: 待处理队列项。
     private func detailTitle(_ item: PendingCenterItem) -> String {
         switch item.status {
+        case "待核对": return "历史出库记录还需要核对"
         case "处理失败": return "本次处理未完成"
         case "待人工确认": return "核对来源并确认归属"
         case "需人工处理": return "补充材料与商品映射"
@@ -3704,11 +4258,15 @@ struct PendingCenterSheet: View {
         }
     }
 
+    /// 根据待处理项来源和问题类型生成处理说明。
+    /// - Parameters:
+    ///   - item: 待处理队列项。
     private func detailExplanation(_ item: PendingCenterItem) -> String {
         if item.serverGroup?.independentManual == true {
             return "这是独立人工处理文件夹。补单依据最近同步的 AIMES 工厂单和已出库事实识别；请在外部完成出库后登记。"
         }
         switch item.status {
+        case "待核对": return "先点击“核对并恢复本地记录”。若仍无法核对，可打开库存系统检查对应单据；在外部修复后再次点击核对，全部一致后提示会自动移除。此操作不会再次扣库存。"
         case "处理失败": return "请根据下方原因检查文件或连接，再重新读取。预览准备好后才能确认写入。"
         case "待人工确认": return "请核对原始信息和建议值，再确认具体操作；缺少的资料需要先补齐。"
         case "需人工处理": return "完成映射后会自动继续读取原订单并准备只读预览。"
@@ -3716,6 +4274,9 @@ struct PendingCenterSheet: View {
         }
     }
 
+    /// 构造待处理中心队列行及其状态标识。
+    /// - Parameters:
+    ///   - item: 待处理队列项。
     private func queueRow(_ item: PendingCenterItem) -> some View {
         Button {
             selectedID = item.id
@@ -3741,6 +4302,9 @@ struct PendingCenterSheet: View {
         }.buttonStyle(.plain)
     }
 
+    /// 按 Server、问题和 AIMES 类型显示所选待处理项详情。
+    /// - Parameters:
+    ///   - item: 待处理队列项。
     @ViewBuilder
     private func pendingItemDetails(_ item: PendingCenterItem) -> some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -3757,6 +4321,7 @@ struct PendingCenterSheet: View {
                                                     let timeSuffix = change.eventTime.isEmpty ? "" : " · \(changeTimeLabel(change))"
                                                     Text("\(changeTypeName(change.changeType))：\(displayPathName(change.path))\(timeSuffix)")
                                                         .font(.caption)
+                                                    if change.handlingMode == "layout_review" { Text(change.message).font(.caption).foregroundColor(.orange) }
                                                     Text(change.path)
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
@@ -3764,7 +4329,7 @@ struct PendingCenterSheet: View {
                             }
                         }
                     }
-                    if group.manualOnly || group.requiresManualReview {
+                    if !group.changes.contains(where: { $0.handlingMode == "layout_review" }) && (group.manualOnly || group.requiresManualReview || group.changes.contains(where: { $0.handlingMode == "aicnc" })) {
                         VStack(alignment: .leading, spacing: 10) {
                             if group.manualOnly {
                                 Text("按此文件夹独立登记。请先在库存系统完成出库；参考订单可留空，登记不会改变原订单。完成后三天独立观察 XML。")
@@ -3806,6 +4371,9 @@ struct PendingCenterSheet: View {
         }
     }
 
+    /// 显示当前问题来源、原因及对应处理入口。
+    /// - Parameters:
+    ///   - issue: 待判断或处理的当前业务问题。
     @ViewBuilder
     private func issueDetails(_ issue: CurrentIssue) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -3813,7 +4381,7 @@ struct PendingCenterSheet: View {
                 Image(systemName: issue.kind == "factory_ownership" ? "person.crop.circle.badge.questionmark" : "exclamationmark.triangle.fill")
                     .foregroundColor(issue.kind == "factory_ownership" ? AppPalette.warning : AppPalette.danger)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(issue.kind == "factory_ownership" ? "订单归属问题" : (issue.kind == "server_missing_report" ? "报表检查" : (currentIssueRequiresInventoryMapping(issue) ? "出库前需要材料映射" : (issue.kind == "hardware_integrity" ? "本地五金记录待核对" : "资料待核对"))))
+                    Text(issue.kind == "aicnc_legacy_retired" ? "旧版监控已结束" : issue.kind == "inventory_recovery" ? "库存操作待核对" : issue.kind == "factory_ownership" ? "订单归属问题" : (issue.kind == "server_missing_report" ? "报表检查" : (currentIssueRequiresInventoryMapping(issue) ? "出库前需要材料映射" : (issue.kind == "hardware_integrity" ? "本地五金记录待核对" : "资料待核对"))))
                         .font(.subheadline.weight(.semibold))
                     Text([issue.orderId.isEmpty ? "" : "订单：\(issue.orderId)",
                           issue.factoryOrder.isEmpty ? "" : "工厂单：\(issue.factoryOrder)"].filter { !$0.isEmpty }.joined(separator: "；"))
@@ -3832,7 +4400,21 @@ struct PendingCenterSheet: View {
                     Button("打开所在文件夹") { model.openDashboardLocation(issue.path) }
                         .buttonStyle(.link)
                 }
-                if issue.kind == "factory_ownership" {
+                if issue.kind == "aicnc_legacy_retired" {
+                    Button("知道了") { model.dismissLegacyMonitorReminder() }
+                        .disabled(model.orderRunning)
+                } else if issue.kind == "inventory_recovery" {
+                    Button("核对并恢复本地记录") {
+                        confirm("核对外部单据并补齐本地记录？不会再次扣库存。") {
+                            model.recoverPendingInventory(issue)
+                        }
+                    }
+                    .buttonStyle(.glassProminent)
+                    .disabled(model.orderRunning || model.inventoryRunning)
+                    Button("打开库存系统") { model.openInventoryChrome() }
+                        .buttonStyle(.glass)
+                        .disabled(model.orderRunning || model.inventoryRunning)
+                } else if issue.kind == "factory_ownership" {
                     TextField("确认订单号，如 PP0037", text: Binding(
                         get: { orderIDs[issue.id] ?? "" },
                         set: { orderIDs[issue.id] = $0 }
@@ -3853,9 +4435,14 @@ struct PendingCenterSheet: View {
                         .buttonStyle(.glassProminent)
                         .disabled(model.orderRunning)
                 } else if issue.kind == "server_missing_report" {
-                    Button("确认已补齐报表") { confirm("确认报表问题已处理？") { model.resolveCurrentIssue(issue, orderID: "") } }
+                    Button("重新检查报表") { model.recheckPendingIssue(issue) }
                         .buttonStyle(.glass)
                         .disabled(model.orderRunning)
+                }
+                if issue.kind != "aicnc_legacy_retired" && issue.kind != "inventory_recovery" && issue.kind != "factory_ownership" && issue.kind != "server_missing_report" {
+                    Button("重新检查") { model.recheckPendingIssue(issue) }
+                        .buttonStyle(.glass)
+                        .disabled(model.orderRunning || model.inventoryRunning)
                 }
             }
         }
@@ -3864,6 +4451,9 @@ struct PendingCenterSheet: View {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
+    /// 显示 AIMES 工厂单归属问题及人工确认操作。
+    /// - Parameters:
+    ///   - item: AIMES 人工确认记录。
     @ViewBuilder
     private func aimesDetails(_ item: AimesReviewItem) -> some View {
         HStack(alignment: .top, spacing: 8) {
@@ -3895,6 +4485,9 @@ struct PendingCenterSheet: View {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
+    /// 显示 AIMES 销售单格式异常与处理说明。
+    /// - Parameters:
+    ///   - item: AIMES 人工确认记录。
     @ViewBuilder
     private func aimesFormatWarningDetails(_ item: AimesReviewItem) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -3950,6 +4543,9 @@ struct PendingCenterSheet: View {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
+    /// 将文件变化类型转换为中文标签。
+    /// - Parameters:
+    ///   - type: 文件或业务变化的类型代码。
     private func changeTypeName(_ type: String) -> String {
         switch type {
         case "added": return "新增"
@@ -3960,6 +4556,9 @@ struct PendingCenterSheet: View {
         }
     }
 
+    /// 为新增、修改、删除等变化选择图标。
+    /// - Parameters:
+    ///   - type: 文件或业务变化的类型代码。
     private func changeIcon(_ type: String) -> String {
         switch type {
         case "added": return "plus.circle.fill"
@@ -3970,6 +4569,9 @@ struct PendingCenterSheet: View {
         }
     }
 
+    /// 为文件或材料变化类型选择强调色。
+    /// - Parameters:
+    ///   - type: 文件或业务变化的类型代码。
     private func changeColor(_ type: String) -> Color {
         switch type {
         case "added": return AppPalette.success
@@ -3980,6 +4582,9 @@ struct PendingCenterSheet: View {
         }
     }
 
+    /// 将变化时间转换为详情中的可读标签。
+    /// - Parameters:
+    ///   - change: 待显示的 Server 文件变化。
     private func changeTimeLabel(_ change: ServerChangePreview) -> String {
         switch change.changeType {
         case "added": return "创建时间：\(appDisplayTimestamp(change.eventTime))"
@@ -4090,6 +4695,11 @@ struct OrderCostSheet: View {
         .background(LiquidGlassPreviewBackdrop())
     }
 
+    /// 构造订单成本汇总卡片并标识缺失信息。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - value: 需要显示的数值或状态文字。
+    ///   - warning: 是否显示警告样式。
     private func costCard(_ title: String, value: String, warning: Bool) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title).font(.caption).foregroundColor(.secondary)
@@ -4117,6 +4727,9 @@ struct OrderCostSheet: View {
         .padding(.vertical, 7)
     }
 
+    /// 显示成本项目的数量、单价、金额和缺失提示。
+    /// - Parameters:
+    ///   - row: 成本项目。
     private func costLine(_ row: OrderCostLine) -> some View {
         HStack(spacing: 8) {
             Text(row.category)
@@ -4149,6 +4762,7 @@ struct OrderCostSheet: View {
         .padding(.vertical, 7)
     }
 
+    /// 按成本来源类别构造汇总金额与缺失状态。
     private var orderCostSourceTotals: [OrderCostFactoryTotal] {
         [
             sourceTotal(
@@ -4164,6 +4778,11 @@ struct OrderCostSheet: View {
         ]
     }
 
+    /// 按来源类别汇总成本金额并判断是否有缺失单价。
+    /// - Parameters:
+    ///   - id: 记录或请求的唯一标识。
+    ///   - title: 界面或操作记录的标题。
+    ///   - categories: 计入此成本汇总的来源类别。
     private func sourceTotal(
         id: String,
         title: String,
@@ -4398,7 +5017,7 @@ struct ServerChangesSheet: View {
                                 }
                                 .buttonStyle(.plain)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                if group.manualOnly || group.requiresManualReview {
+                                if !group.changes.contains(where: { $0.handlingMode == "layout_review" }) && (group.manualOnly || group.requiresManualReview || group.changes.contains(where: { $0.handlingMode == "aicnc" })) {
                                     HStack(spacing: 8) {
                                         Spacer(minLength: 0)
                                         ServerFolderIgnoreButton(model: model, group: group)
@@ -4443,6 +5062,9 @@ struct ServerChangesSheet: View {
         }
     }
 
+    /// 为新增、修改、删除等变化选择图标。
+    /// - Parameters:
+    ///   - type: 文件或业务变化的类型代码。
     private func changeIcon(_ type: String) -> String {
         switch type {
         case "added": return "plus.circle.fill"
@@ -4451,6 +5073,9 @@ struct ServerChangesSheet: View {
         }
     }
 
+    /// 为文件或材料变化类型选择强调色。
+    /// - Parameters:
+    ///   - type: 文件或业务变化的类型代码。
     private func changeColor(_ type: String) -> Color {
         switch type {
         case "added": return AppPalette.success
@@ -4487,11 +5112,18 @@ struct HardwareSourceSelectionSheet: View {
         }.padding(22).frame(width: 820, height: 620)
     }
 
+    /// 用精简数字格式显示材料或五金数量。
+    /// - Parameters:
+    ///   - value: 待格式化的材料或五金数量。
     private func formatQuantity(_ value: Double) -> String {
         value.rounded() == value ? String(format: "%.0f", value) : String(format: "%.2f", value)
     }
 
-    // The full card is one button, including its rows and padded empty space.
+    // 整张卡片都是按钮，包括内容行和留白区域。
+    /// 把五金来源报表及其项目绘制为整张可点击的选择卡片。
+    /// - Parameters:
+    ///   - candidate: 待选择的五金来源报表及项目。
+    ///   - factoryOrder: 目标工厂单号。
     private func sourceCard(_ candidate: HardwareSourceCandidate, factoryOrder: String) -> some View {
         let selected = model.hardwareSourceChoices[factoryOrder] == candidate.id
         let folder = displayPathName(displayParentPath(displayParentPath(candidate.path)))
@@ -4557,11 +5189,14 @@ struct ServerWriteConfirmationSheet: View {
     @State private var skippedHardwareOrderIDs: Set<String> = []
     @State private var showWriteConfirmation = false
     @State private var collapsedFactoryIDs: Set<String> = []
+    /// 在任务空闲、预览有效且所有校验通过时允许确认 Server 写入。
     private var canConfirmWrite: Bool {
         !model.orderRunning && !model.inventoryRunning && !orders.isEmpty &&
         !model.serverWriteConfirmationFinished && !model.serverWritePreviewNeedsRefresh && activeHardwareRequirements.isEmpty && invalidOrderValidations.isEmpty
     }
+    /// 读取当前 Server 确认预览中的订单列表。
     private var orders: [ServerWriteOrderPreview] { model.serverWritePreview?.orders ?? [] }
+    /// 排除已选择跳过五金的订单，得到仍需处理的 SKU 映射要求。
     private var activeHardwareRequirements: [ServerHardwareMappingRequirement] {
         model.serverHardwareMappingRequirements.filter { requirement in
             requirement.orderIDs.isEmpty || requirement.orderIDs.contains {
@@ -4569,6 +5204,7 @@ struct ServerWriteConfirmationSheet: View {
             }
         }
     }
+    /// 取得尚未通过正常校验的 Server 订单预览。
     private var invalidOrderValidations: [ServerWriteOrderPreview] {
         orders.filter { $0.validationStatus != "正常" }
     }
@@ -4786,10 +5422,16 @@ struct ServerWriteConfirmationSheet: View {
         }
     }
 
+    /// 用精简数字格式显示材料或五金数量。
+    /// - Parameters:
+    ///   - value: 待格式化的材料或五金数量。
     private func formatQuantity(_ value: Double) -> String {
         value.rounded() == value ? String(Int(value)) : String(format: "%.2f", value)
     }
 
+    /// 显示 Server 订单材料和工厂单变化的确认卡片。
+    /// - Parameters:
+    ///   - order: Server 订单写入预览。
     @ViewBuilder
     private func orderPreviewCard(_ order: ServerWriteOrderPreview) -> some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -4938,6 +5580,9 @@ struct ServerWriteConfirmationSheet: View {
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
+    /// 显示 CUT TO SIZE 订单是否纳入五金写入的选项。
+    /// - Parameters:
+    ///   - order: Server 订单写入预览。
     @ViewBuilder
     private func cutToSizeHardwareChoice(for order: ServerWriteOrderPreview) -> some View {
         let orderID = order.orderID.uppercased()
@@ -5012,6 +5657,9 @@ struct ServerWriteConfirmationSheet: View {
         .padding(.horizontal, 12).padding(.vertical, 9)
     }
 
+    /// 显示材料规格、旧数量、新数量和变化差额。
+    /// - Parameters:
+    ///   - material: Server 材料数量变化。
     private func materialChangeRow(_ material: ServerWriteMaterialChange) -> some View {
         let specification = [material.color, material.thickness, material.edge]
             .filter { !$0.isEmpty }
@@ -5037,6 +5685,9 @@ struct ServerWriteConfirmationSheet: View {
         .padding(.horizontal, 12).padding(.vertical, 11)
     }
 
+    /// 显示工厂单五金的身份及数量变化。
+    /// - Parameters:
+    ///   - hardware: 待显示的五金数量变化。
     private func hardwareChangeRow(_ hardware: ServerWriteHardwareChange) -> some View {
         HStack(spacing: 10) {
             Text(hardware.factoryOrder).font(.caption.weight(.semibold)).frame(width: 110, alignment: .leading)
@@ -5063,6 +5714,8 @@ struct ServerWriteConfirmationSheet: View {
         .padding(.vertical, 5)
     }
 
+    /// 构造五金变化明细的统一表头。
+    /// 无参数。
     private func hardwareChangeHeaderRow() -> some View {
         HStack(spacing: 10) {
             Text("工厂单号").frame(width: 110, alignment: .leading)
@@ -5076,6 +5729,9 @@ struct ServerWriteConfirmationSheet: View {
         .foregroundColor(.secondary)
     }
 
+    /// 显示待写入材料的规格、数量、单位及来源。
+    /// - Parameters:
+    ///   - material: Server 待写入材料。
     private func materialPreviewRow(_ material: ServerWriteMaterialPreview) -> some View {
         let isEdge = material.materialType.caseInsensitiveCompare("edge") == .orderedSame
         let descriptors = [material.color, material.thickness]
@@ -5110,6 +5766,9 @@ struct ServerWriteConfirmationSheet: View {
     }
 }
 
+/// 将五金单位转换为适合界面显示的文字。
+/// - Parameters:
+///   - unit: 材料或五金计量单位。
 func serverHardwareUnitText(_ unit: String) -> String {
     let value = unit.trimmingCharacters(in: .whitespacesAndNewlines)
     return value.isEmpty ? "—" : value
@@ -5185,6 +5844,9 @@ struct FactoryStockComparisonSheet: View {
         .background(AppPalette.subtleSurface)
     }
 
+    /// 显示库存商品的需求、可用量和缺料状态。
+    /// - Parameters:
+    ///   - row: 实时库存预览。
     private func stockRow(_ row: OrderStockPreview) -> some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
@@ -5207,7 +5869,7 @@ struct FactoryStockComparisonSheet: View {
 }
 
 
-/// Settings entry for reviewing and restoring historical AIMES decisions.
+/// 设置中用于查看和恢复 AIMES 历史人工决定的入口。
 struct AimesHistorySheet: View {
     @ObservedObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
@@ -5216,6 +5878,10 @@ struct AimesHistorySheet: View {
     @State private var pendingAction: (() -> Void)?
     @State private var showActionConfirmation = false
 
+    /// 弹出确认对话框，仅在用户确认后执行动作。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - action: 用户确认或点击按钮后执行的动作。
     private func confirm(_ title: String, action: @escaping () -> Void) {
         confirmationTitle = title
         pendingAction = action
@@ -5301,6 +5967,12 @@ struct AimesHistorySheet: View {
         }
     }
 
+    /// 显示历史人工决定，并提供恢复操作按钮。
+    /// - Parameters:
+    ///   - item: AIMES 人工确认记录。
+    ///   - title: 界面或操作记录的标题。
+    ///   - action: 用户确认或点击按钮后执行的动作。
+    ///   - actionTitle: 生成操作按钮标题的闭包。
     private func aimesHistoryRow(
         _ item: AimesReviewItem,
         title: String,
@@ -5328,7 +6000,7 @@ struct AimesHistorySheet: View {
 
 }
 
-// Drafts live only in this sheet until the user saves the whole edit.
+// 在用户整体保存之前，草稿仅存在于此面板。
 struct ManualHardwareFactory: Decodable, Identifiable {
     var id: String { factoryOrder }
     let factoryOrder: String
@@ -5351,6 +6023,9 @@ struct ManualHardwareSnapshot: Decodable {
     let items: [ManualHardwareRecord]
     let version: String
 
+    /// 将 JSON 对象按蛇形字段名规则解码为人工五金快照。
+    /// - Parameters:
+    ///   - object: 后端返回的 JSON 结果对象。
     static func decode(_ object: [String: Any]) -> Self? {
         guard let data = try? JSONSerialization.data(withJSONObject: object) else { return nil }
         let decoder = JSONDecoder()
@@ -5377,6 +6052,7 @@ struct ManualHardwareDraft: Identifiable {
 struct ManualHardwareSheet: View {
     @ObservedObject var model: AppModel
     let orderID: String
+    private let barHeight: CGFloat = 50
     @Environment(\.dismiss) private var dismiss
     @State private var snapshot: ManualHardwareSnapshot?
     @State private var additions: [ManualHardwareDraft] = []
@@ -5385,21 +6061,26 @@ struct ManualHardwareSheet: View {
     @State private var query = ""
     @State private var products: [ManualHardwareProduct] = []
     @State private var productCode = ""
+    @State private var productPage = 0
     @State private var quantity = 1
     @State private var notice = ""
     @State private var searchNotice = ""
     @State private var showDiscard = false
     @State private var showReload = false
     @State private var needsReload = false
+    /// 判断人工五金是否还有未保存的新增或删除草稿。
     private var dirty: Bool { !additions.isEmpty || !deletions.isEmpty }
+    /// 判断订单或库存后台是否正在执行操作。
     private var busy: Bool { model.orderRunning || model.inventoryRunning }
+    /// 从快照筛选仍允许编辑人工五金的工厂单。
     private var editableFactories: [ManualHardwareFactory] { snapshot?.factories.filter(\.editable) ?? [] }
+    /// 按当前 SKU 取得商品搜索结果中的选中项。
     private var selectedProduct: ManualHardwareProduct? { products.first { $0.code == productCode } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Text("人工五金").font(.title2).fontWeight(.semibold)
                     Text("订单 \(orderID)").foregroundStyle(.secondary)
                 }
@@ -5407,11 +6088,19 @@ struct ManualHardwareSheet: View {
                 if busy { ProgressView().controlSize(.small) }
                 Button { close() } label: { Image(systemName: "xmark") }
                     .buttonStyle(.borderless).help("关闭").disabled(busy)
-            }.padding(20)
+            }
+            .padding(.horizontal, 20)
+            .frame(height: barHeight)
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    if let snapshot {
+            if let snapshot {
+                if !editableFactories.isEmpty {
+                    addForm
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 14)
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
                         if snapshot.items.isEmpty && additions.isEmpty {
                             Text("本订单尚未添加人工五金").foregroundStyle(.secondary).padding(.vertical, 12)
                         }
@@ -5420,7 +6109,7 @@ struct ManualHardwareSheet: View {
                         }) { factory in
                             factoryGroup(factory, snapshot: snapshot)
                         }
-                        // Retain visibility of legacy facts even if their factory no longer exists.
+                        // 即使工厂单已不存在，也保留历史事实的可见性。
                         let orphaned = snapshot.items.filter { item in !snapshot.factories.contains { $0.id == item.factoryOrder } }
                         if !orphaned.isEmpty {
                             Text("以下记录的工厂单已不存在，暂不能修改").foregroundStyle(.orange)
@@ -5431,24 +6120,31 @@ struct ManualHardwareSheet: View {
                         if editableFactories.isEmpty {
                             Text("本订单没有可编辑的工厂单；已出库或失效工厂单的人工五金仅供查看。")
                                 .foregroundStyle(.secondary)
-                        } else { addForm }
-                    } else if !busy {
-                        HStack {
-                            Text("未能载入人工五金。").foregroundStyle(.secondary)
-                            Button("重试") { load() }.disabled(busy)
                         }
+                    }.padding(.horizontal, 20)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // 间距位于滚动区之外，让滚动条与列表可视区域等高。
+                .padding(.top, 14)
+                .padding(.bottom, 8)
+            } else {
+                if !busy {
+                    HStack {
+                        Text("未能载入人工五金。").foregroundStyle(.secondary)
+                        Button("重试") { load() }.disabled(busy)
+                    }.padding(20)
+                }
+                Spacer()
+            }
+            if !notice.isEmpty {
+                HStack(alignment: .top) {
+                    Text(notice).foregroundStyle(.red).textSelection(.enabled)
+                    if needsReload && snapshot != nil {
+                        Button("重新载入") {
+                            if dirty { showReload = true } else { load() }
+                        }.disabled(busy)
                     }
-                    if !notice.isEmpty {
-                        HStack(alignment: .top) {
-                            Text(notice).foregroundStyle(.red).textSelection(.enabled)
-                            if needsReload && snapshot != nil {
-                                Button("重新载入") {
-                                    if dirty { showReload = true } else { load() }
-                                }.disabled(busy)
-                            }
-                        }
-                    }
-                }.padding(20)
+                }.padding(.horizontal, 20).padding(.bottom, 10)
             }
             Divider()
             HStack {
@@ -5460,7 +6156,9 @@ struct ManualHardwareSheet: View {
                 Button("保存更改") { save() }
                     .buttonStyle(.glassProminent).appActionButton(minWidth: 112)
                     .disabled(!dirty || busy || snapshot == nil)
-            }.padding(20)
+            }
+            .padding(.horizontal, 20)
+            .frame(height: barHeight)
         }
         .frame(width: 820, height: 620)
         .background(AppPalette.background)
@@ -5476,6 +6174,10 @@ struct ManualHardwareSheet: View {
         }
     }
 
+    /// 显示工厂单已有人工五金及本次新增、删除草稿。
+    /// - Parameters:
+    ///   - factory: 人工五金工厂单。
+    ///   - snapshot: 包含版本与已有人工五金事实的快照。
     private func factoryGroup(_ factory: ManualHardwareFactory, snapshot: ManualHardwareSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -5491,13 +6193,14 @@ struct ManualHardwareSheet: View {
                 Text("五金名称").frame(maxWidth: .infinity, alignment: .leading)
                 Text("规格").frame(width: 125, alignment: .leading)
                 Text("数量 / 单位").frame(width: 90, alignment: .leading)
-                Text("操作").frame(width: 44, alignment: .trailing)
+                Text(factory.editable ? "操作" : "").frame(width: 44, alignment: .trailing)
             }.font(.callout).foregroundStyle(.secondary).padding(.horizontal, 14).padding(.vertical, 10)
             ForEach(snapshot.items.filter { $0.factoryOrder == factory.id }) { item in
                 Divider()
                 hardwareRow(code: item.productCode, name: item.name, spec: item.spec,
                             amount: "\(item.quantity.formatted()) \(item.unit)",
-                            pending: deletions.contains(item.id), action: deletions.contains(item.id) ? "撤销" : "删除") {
+                            pending: deletions.contains(item.id),
+                            action: factory.editable ? (deletions.contains(item.id) ? "撤销" : "删除") : nil) {
                     if deletions.contains(item.id) { deletions.remove(item.id) } else { deletions.insert(item.id) }
                 }.disabled(busy || !factory.editable)
             }
@@ -5514,21 +6217,34 @@ struct ManualHardwareSheet: View {
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppPalette.separator))
     }
 
+    /// 绘制人工五金规格、数量及删除或撤销入口。
+    /// - Parameters:
+    ///   - code: 商品或五金代码。
+    ///   - name: 来源材料或五金的名称。
+    ///   - spec: 五金商品规格文字。
+    ///   - amount: 已格式化的数量与单位文字。
+    ///   - pending: 此五金行是否待删除。
+    ///   - action: 操作按钮文案；nil 时仅显示信息并保留列宽对齐。
+    ///   - perform: 点击五金操作按钮时执行的动作。
     private func hardwareRow(code: String, name: String, spec: String, amount: String,
-                             pending: Bool, action: String, perform: @escaping () -> Void) -> some View {
+                             pending: Bool, action: String?, perform: @escaping () -> Void) -> some View {
         HStack {
             Text(code).frame(width: 70, alignment: .leading)
             Text(name).frame(maxWidth: .infinity, alignment: .leading)
             Text(spec).frame(width: 125, alignment: .leading)
             Text(amount).frame(width: 90, alignment: .leading)
-            Button(action, action: perform).foregroundStyle(pending ? Color.accentColor : Color.red)
-                .buttonStyle(.borderless).frame(width: 44, alignment: .trailing)
+            if let action {
+                Button(action, action: perform).foregroundStyle(pending ? Color.accentColor : Color.red)
+                    .buttonStyle(.borderless).frame(width: 44, alignment: .trailing)
+            } else {
+                Color.clear.frame(width: 44, height: 1).accessibilityHidden(true)
+            }
         }
         .strikethrough(pending).opacity(pending ? 0.55 : 1).padding(14)
     }
 
     private var addForm: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             Label("新增人工五金", systemImage: "plus").font(.headline)
             HStack {
                 Text("工厂单 *").frame(width: 90, alignment: .leading)
@@ -5546,40 +6262,52 @@ struct ManualHardwareSheet: View {
                 TextField("输入 SKU 或五金名称", text: $query).textFieldStyle(.roundedBorder)
                     .onSubmit { search() }
                     .onKeyPress(.return) { search(); return .handled }
-                    .onChange(of: query) { _, _ in products = []; productCode = ""; searchNotice = "" }
+                    .onChange(of: query) { _, _ in products = []; productCode = ""; productPage = 0; searchNotice = "" }
                 Button("搜索") { search() }.disabled(busy || query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             if !searchNotice.isEmpty { Text(searchNotice).font(.caption).foregroundStyle(.secondary).padding(.leading, 98) }
             if !products.isEmpty {
                 VStack(spacing: 0) {
-                    HStack {
-                        Text("SKU").frame(width: 70, alignment: .leading)
-                        Text("五金名称").frame(maxWidth: .infinity, alignment: .leading)
-                        Text("规格").frame(width: 90, alignment: .leading)
-                        Text("单位").frame(width: 60, alignment: .leading)
-                    }.font(.callout).foregroundStyle(.secondary).padding(.leading, 38).padding(10)
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(products) { product in
-                                Divider()
-                                Button { productCode = product.code } label: {
-                                    HStack {
-                                        Image(systemName: productCode == product.code ? "largecircle.fill.circle" : "circle")
-                                            .foregroundStyle(productCode == product.code ? Color.accentColor : Color.secondary)
-                                            .frame(width: 24)
-                                        Text(product.code).frame(width: 70, alignment: .leading)
-                                        Text(product.name).frame(maxWidth: .infinity, alignment: .leading)
-                                        Text(product.spec).frame(width: 90, alignment: .leading)
-                                        Text(product.unit).frame(width: 60, alignment: .leading)
-                                    }.padding(10).contentShape(Rectangle())
-                                }.buttonStyle(.plain)
+                    HStack(spacing: 8) {
+                        Color.clear.frame(width: 24, height: 1)
+                        Text("SKU").frame(width: 70)
+                        Text("五金名称").frame(maxWidth: .infinity)
+                        Text("规格").frame(width: 188)
+                        Text("单位").frame(width: 60)
+                    }.font(.callout).foregroundStyle(.secondary).padding(10)
+                    // 每页完整展示一项，长规格自然换行，上方表单不引入滚动区。
+                    ForEach(Array(products.dropFirst(productPage).prefix(1))) { product in
+                        Divider()
+                        Button { productCode = product.code } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: productCode == product.code ? "largecircle.fill.circle" : "circle")
+                                    .foregroundStyle(productCode == product.code ? Color.accentColor : Color.secondary)
+                                    .frame(width: 24)
+                                Text(product.code).frame(width: 70)
+                                Text(product.name).frame(maxWidth: .infinity)
+                                Text(product.spec).frame(width: 188)
+                                Text(product.unit).frame(width: 60)
                             }
-                        }
-                    }.frame(height: min(CGFloat(products.count) * 44, 180))
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(10).contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                    }
+                    if products.count > 1 {
+                        Divider()
+                        HStack {
+                            Button("上一项") { productPage -= 1 }.disabled(productPage == 0)
+                            Text("\(productPage + 1) / \(products.count)").monospacedDigit().foregroundStyle(.secondary)
+                            Button("下一项") { productPage += 1 }.disabled(productPage + 1 >= products.count)
+                            Spacer()
+                            if let selectedProduct {
+                                Text("已选：\(selectedProduct.code)").foregroundStyle(.secondary)
+                            }
+                        }.font(.callout).padding(8)
+                    }
                 }
                 .background(AppPalette.surface).clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppPalette.separator))
-                .padding(.leading, 98)
             }
             HStack {
                 Text("数量 *").frame(width: 90, alignment: .leading)
@@ -5594,13 +6322,17 @@ struct ManualHardwareSheet: View {
                 }.buttonStyle(.glassProminent).appActionButton(minWidth: 120)
                     .disabled(busy || selectedProduct == nil || quantity <= 0 || !editableFactories.contains { $0.id == factoryOrder })
             }
-        }.padding(16)
+        }
+        // 数量行包含 44 点按钮布局框，减小底部边距以平衡上下视觉留白。
+        .padding(EdgeInsets(top: 16, leading: 16, bottom: 8, trailing: 16))
         .background(AppPalette.surface)
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppPalette.separator))
         .disabled(busy)
     }
 
+    /// 读取人工五金快照，成功后清空草稿并选择唯一可编辑工厂单。
+    /// 无参数。
     private func load() {
         guard !busy else { return }
         notice = ""
@@ -5610,16 +6342,18 @@ struct ManualHardwareSheet: View {
                 return
             }
             snapshot = loaded; additions = []; deletions = []; needsReload = false
-            products = []; productCode = ""; searchNotice = ""
+            products = []; productCode = ""; productPage = 0; searchNotice = ""
             factoryOrder = loaded.factories.filter(\.editable).count == 1 ? (loaded.factories.first(where: \.editable)?.id ?? "") : ""
         }
     }
 
+    /// 按当前 SKU 或名称搜索人工五金，丢弃过时查询的返回结果。
+    /// 无参数。
     private func search() {
         guard !busy else { return }
         let requested = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !requested.isEmpty else { return }
-        notice = ""; products = []; productCode = ""
+        notice = ""; products = []; productCode = ""; productPage = 0
         model.searchManualHardware(requested) { object in
             guard requested == query.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
             guard let object, let rows = object["products"],
@@ -5633,6 +6367,8 @@ struct ManualHardwareSheet: View {
         }
     }
 
+    /// 提交带版本号的人工五金增删草稿，成功后关闭，冲突时提示重新载入。
+    /// 无参数。
     private func save() {
         guard let snapshot, dirty, !busy else { return }
         let payload: [String: Any] = [
@@ -5648,6 +6384,8 @@ struct ManualHardwareSheet: View {
         }
     }
 
+    /// 存在未保存五金草稿时请求放弃确认，否则直接关闭面板。
+    /// 无参数。
     private func close() {
         if dirty { showDiscard = true } else { dismiss() }
     }
@@ -5671,5 +6409,192 @@ private struct ServerFolderIgnoreButton: View {
             } message: {
                 Text("忽略后不再扫描此文件夹，也不因报表或 XML 变化重新提醒。此操作不登记出库，也不表示已人工处理。")
             }
+    }
+}
+
+/// 新版优化一次确认：工厂单用途、跨订单材料分配和五金版本在同一份预览中核对。
+struct AicncConfirmationSheet: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var factories: [[String: Any]] = []
+    @State private var amounts: [String: String] = [:]
+    @State private var confirmWrite = false
+    @State private var confirmIgnore = false
+
+    private var materials: [[String: Any]] { model.aicncPreview["materials"] as? [[String: Any]] ?? [] }
+    private var busy: Bool { model.orderRunning || model.inventoryRunning }
+    private var resuming: Bool { model.aicncPreview["resuming"] as? Bool ?? false }
+    private var groups: [String] {
+        Array(Set(factories.compactMap { factory -> String? in
+            let order = factory["order_id"] as? String ?? ""
+            let purpose = factory["purpose"] as? String ?? ""
+            return order.isEmpty || purpose.isEmpty ? nil : order + "|" + purpose
+        })).sorted()
+    }
+    private func number(_ value: Any?) -> Double { (value as? NSNumber)?.doubleValue ?? 0 }
+    private func format(_ value: Double) -> String { String(format: "%g", value) }
+    private func key(_ group: String, _ code: String) -> String { group + "|" + code }
+    private func label(_ group: String) -> String {
+        let parts = group.components(separatedBy: "|")
+        return parts[0] + (parts.last == "rework" ? " · 返工追加" : " · 正常优化")
+    }
+    private func field(_ index: Int, _ name: String) -> Binding<String> {
+        Binding(get: { factories[index][name] as? String ?? "" }, set: { value in
+            factories[index][name] = name == "order_id" ? value.uppercased().trimmingCharacters(in: .whitespaces) : value
+            if name == "purpose" || name == "order_id" { amounts = [:]; fillSingleGroup() }
+        })
+    }
+    private func fillSingleGroup() {
+        if groups.count == 1, let group = groups.first {
+            for material in materials {
+                amounts[key(group, material["product_code"] as? String ?? "")] = format(number(material["quantity"]))
+            }
+        }
+    }
+    private var valid: Bool {
+        guard !factories.isEmpty, factories.allSatisfy({
+            !(($0["order_id"] as? String ?? "").isEmpty) && ["normal", "rework"].contains($0["purpose"] as? String ?? "") &&
+            ["same", "absent", "shipped", "keep", "replace"].contains($0["hardware_choice"] as? String ?? "")
+        }) else { return false }
+        return materials.allSatisfy { material in
+            let code = material["product_code"] as? String ?? ""
+            var sum = 0.0
+            for group in groups {
+                guard let value = Double(amounts[key(group, code)] ?? "0"), value.isFinite, value >= 0, value.rounded() == value else { return false }
+                sum += value
+            }
+            return abs(sum - number(material["quantity"])) < 0.000001
+        }
+    }
+    private var payload: [String: Any] {
+        var data = model.aicncPreview
+        data["factories"] = factories
+        data["allocations"] = groups.flatMap { group -> [[String: Any]] in
+            let parts = group.components(separatedBy: "|")
+            return materials.map { material in
+                let code = material["product_code"] as? String ?? ""
+                return ["order_id": parts[0], "purpose": parts[1], "product_code": code,
+                        "quantity": Double(amounts[key(group, code)] ?? "0") ?? 0]
+            }
+        }
+        return data
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("确认本次优化").font(.title2.bold())
+            Text(model.aicncPreview["optimization_id"] as? String ?? "").font(.headline)
+            Text(resuming ? "此优化已有确认记录。继续处理将先核对已提交的出库单，使用原确认方案。" : "请确认每个工厂单的用途。混单或同时包含正常生产与返工时，分别分配板材和封边。")
+                .foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    ForEach(factories.indices, id: \.self) { index in factoryRow(index) }
+                    Divider()
+                    Text("板材与封边分配").font(.headline)
+                    Text("正常优化：追加订单材料。返工追加：补开出库单，并同步增加材料总量与已消耗量，保留原订单和工厂单状态。")
+                        .font(.callout).foregroundColor(.secondary)
+                    ForEach(materials.indices, id: \.self) { index in materialRow(materials[index]) }
+                }.padding(.trailing, 8)
+            }
+            if !model.aicncNotice.isEmpty { Text(model.aicncNotice).font(.callout).textSelection(.enabled) }
+            HStack {
+                Button("忽略此优化") { confirmIgnore = true }.disabled(busy || resuming)
+                Spacer()
+                if busy { ProgressView().controlSize(.small) }
+                Button("稍后处理") { dismiss() }.disabled(busy)
+                Button(resuming ? "继续核对并处理" : "确认并处理") { confirmWrite = true }
+                    .buttonStyle(.borderedProminent).disabled(busy || !valid)
+            }
+        }
+        .padding(24)
+        .onAppear {
+            factories = model.aicncPreview["factories"] as? [[String: Any]] ?? []
+            for row in model.aicncPreview["allocations"] as? [[String: Any]] ?? [] {
+                let group = (row["order_id"] as? String ?? "") + "|" + (row["purpose"] as? String ?? "")
+                amounts[key(group, row["product_code"] as? String ?? "")] = format(number(row["quantity"]))
+            }
+            if amounts.isEmpty { fillSingleGroup() }
+        }
+        .alert("确认处理本次优化？", isPresented: $confirmWrite) {
+            Button("取消", role: .cancel) {}
+            Button("确认处理") { model.confirmAicnc(payload) }
+        } message: {
+            Text(groups.contains(where: { $0.hasSuffix("|rework") }) ? "将按上方分配追加材料，并为返工部分在库存系统补开出库单、登记等量消耗。处理后不再读取此优化文件夹的变化。" : "将追加本次分配的材料，按选择保留或替换五金，并同步正常优化工厂单的状态。处理后不再读取此优化文件夹的变化。")
+        }
+        .alert("忽略本次优化？", isPresented: $confirmIgnore) {
+            Button("取消", role: .cancel) {}
+            Button("确认忽略") { model.ignoreAicnc() }
+        } message: { Text("不追加任何材料，也不再检查此优化文件夹。该订单下的其他优化仍会正常发现。") }
+    }
+
+    private func factoryRow(_ index: Int) -> some View {
+        let factory = factories[index]
+        let choice = factory["hardware_choice"] as? String ?? ""
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("\(factory["factory_order"] as? String ?? "")  ·  \(factory["factory_name"] as? String ?? "")").font(.headline)
+            HStack {
+                TextField("订单号", text: field(index, "order_id")).frame(width: 140)
+                    .disabled(resuming || !(factory["known_order_id"] as? String ?? "").isEmpty)
+                Text("当前：\(factory["stage"] as? String ?? "待确认")").foregroundColor(.secondary)
+                Spacer()
+                Picker("本次用途", selection: field(index, "purpose")) {
+                    Text("请选择").tag("")
+                    Text("正常优化").tag("normal")
+                    Text("返工追加（已生产）").tag("rework")
+                }.frame(width: 290).disabled(busy || resuming)
+            }
+            if ["same", "absent", "shipped"].contains(choice) {
+                Text(choice == "shipped" ? "工厂单已出货，不读取五金。" : choice == "same" ? "五金与已有内容一致。" : "此次无该工厂单五金，沿用已有记录。")
+                    .font(.caption).foregroundColor(.secondary)
+            } else {
+                Picker("五金处理", selection: field(index, "hardware_choice")) {
+                    Text("请选择").tag("")
+                    Text("保留原五金").tag("keep")
+                    if factory["hardware_error"] == nil { Text("使用新五金替换").tag("replace") }
+                }.disabled(busy || resuming)
+                if let error = factory["hardware_error"] as? String {
+                    Text(error).font(.caption).foregroundColor(.orange)
+                    Button("处理五金商品映射") {
+                        model.showAicncConfirmation = false
+                        model.requestInventoryMapping(folderPath: model.aicncPreview["source_folder"] as? String ?? "", message: error)
+                    }.disabled(busy || resuming)
+                }
+                DisclosureGroup("查看已有与本次五金") {
+                    hardwareRows("已有", factory["existing_hardware"] as? [[String: Any]] ?? [])
+                    hardwareRows("本次", factory["hardware"] as? [[String: Any]] ?? [])
+                }.font(.caption)
+            }
+        }.padding(12).background(AppPalette.subtleSurface).cornerRadius(8)
+    }
+
+    private func hardwareRows(_ title: String, _ rows: [[String: Any]]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).bold()
+            if rows.isEmpty { Text("无") }
+            ForEach(rows.indices, id: \.self) { index in
+                Text("\(rows[index]["product_code"] as? String ?? "")  \(rows[index]["name"] as? String ?? "") × \(format(number(rows[index]["quantity"])))")
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func materialRow(_ material: [String: Any]) -> some View {
+        let code = material["product_code"] as? String ?? ""
+        let total = number(material["quantity"])
+        let assigned = groups.reduce(0.0) { $0 + (Double(amounts[key($1, code)] ?? "0") ?? 0) }
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("\(material["raw_name"] as? String ?? code) · \(code) · \(format(total)) \(material["unit"] as? String ?? "")").font(.headline)
+            if material["material_type"] as? String == "edge" {
+                Text("报表合计 \(format(number(material["raw_quantity"]))) 米；沿用整米登记规则。").font(.caption).foregroundColor(.secondary)
+            }
+            ForEach(groups, id: \.self) { group in
+                HStack {
+                    Text(label(group)).frame(width: 260, alignment: .leading)
+                    TextField("0", text: Binding(get: { amounts[key(group, code)] ?? "" }, set: { amounts[key(group, code)] = $0 }))
+                        .textFieldStyle(.roundedBorder).frame(width: 100).disabled(busy || resuming)
+                }
+            }
+            Text("已分配 \(format(assigned)) / \(format(total))")
+                .font(.caption).foregroundColor(abs(assigned - total) < 0.000001 ? .secondary : .orange)
+        }.padding(.vertical, 6)
     }
 }

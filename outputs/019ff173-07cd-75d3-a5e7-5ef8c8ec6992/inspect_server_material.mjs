@@ -1,3 +1,4 @@
+// 读取 Server 材料工作簿并输出结构检查及预览。参数：无；使用文件内固定的 Server 来源和输出目录。
 import fs from "node:fs/promises";
 import { FileBlob, SpreadsheetFile } from "@oai/artifact-tool";
 

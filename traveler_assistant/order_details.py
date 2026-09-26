@@ -1,4 +1,4 @@
-"""Read-only order detail projections for the desktop dashboard and future web API."""
+"""组装桌面看板及后续网页接口使用的订单详情，入口会确保数据库结构可用。"""
 
 from __future__ import annotations
 
@@ -10,6 +10,10 @@ from .database import connect_database, ensure_schema
 
 
 def order_detail(config: Config, order_id: str) -> dict:
+    """汇总订单、安装安排、工厂单、材料、五金及出库记录等详情。
+
+    参数：config 提供数据库配置；order_id 为查询订单号。读取前会确保所需表结构存在。
+    """
     ensure_schema(config.workflow_database)
     connection = connect_database(config.workflow_database)
     connection.row_factory = sqlite3.Row
@@ -98,7 +102,7 @@ def order_detail(config: Config, order_id: str) -> dict:
         issues = connection.execute(
             """
             select issue_key, kind, factory_order, path, message, status, last_seen
-            from active_issues where order_id=? and status='open' order by last_seen desc
+            from pending_issues where order_id=? and status='open' order by last_seen desc
             """, (order_id.upper(),)
         ).fetchall()
         return {

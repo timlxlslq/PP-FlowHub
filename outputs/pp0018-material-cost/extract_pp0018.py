@@ -14,10 +14,18 @@ OUTPUT_JSON = Path("outputs/pp0018-material-cost/material_data.json")
 
 
 def text(value) -> str:
+    """将单元格值转为去除首尾空白的文本，空值返回空串。
+
+    参数：value：待转换的单元格值或厚度。
+    """
     return "" if value is None else str(value).strip()
 
 
 def parse_quantity(value) -> float:
+    """解析数字或加号连接的数量，空值或非法表达式返回零。
+
+    参数：value：待转换的单元格值或厚度。
+    """
     if value in (None, ""):
         return 0.0
     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -35,12 +43,20 @@ def parse_quantity(value) -> float:
 
 
 def normalize_name(value: str) -> str:
+    """压缩材料名称中的连续空白。
+
+    参数：value：待转换的单元格值或厚度。
+    """
     value = re.sub(r"\s+", " ", text(value)).strip()
     value = value.replace("--", "--")
     return value
 
 
 def material_rows(path: Path, sheet_name: str) -> list[dict]:
+    """只读提取指定工作表板材区域的名称、规格、数量和备注。
+
+    参数：path：待读取或写入的文件路径；sheet_name：包含材料区域的工作表名称。
+    """
     wb = load_workbook(path, data_only=True, read_only=True)
     if sheet_name not in wb.sheetnames:
         wb.close()
@@ -83,6 +99,10 @@ def material_rows(path: Path, sheet_name: str) -> list[dict]:
 
 
 def room_name(path: Path) -> str:
+    """从 Traveler 的 D6 单元格读取并规范化房间名称。
+
+    参数：path：待读取或写入的文件路径。
+    """
     wb = load_workbook(path, data_only=True, read_only=True)
     ws = wb["WorkOrderTraveler"]
     value = text(ws["D6"].value)
@@ -91,6 +111,10 @@ def room_name(path: Path) -> str:
 
 
 def load_prices() -> dict[str, dict]:
+    """从固定商品目录读取商品代码、单位及预计采购价。
+
+    参数：无；读取 CATALOG_PATH 指定的商品目录。
+    """
     wb = load_workbook(CATALOG_PATH, data_only=True, read_only=True)
     ws = wb[wb.sheetnames[0]]
     rows = list(ws.iter_rows(values_only=True))
@@ -113,12 +137,16 @@ def load_prices() -> dict[str, dict]:
 
 
 def mapped_price(material_name: str, raw_remark: str, prices: dict[str, dict]) -> dict:
+    """按已确认材料映射查找价格，无法确认时返回未知价格标记。
+
+    参数：material_name：Traveler 原始材料名称；raw_remark：用于补充封边颜色的备注；prices：按商品代码索引的价格资料。
+    """
     name = normalize_name(material_name).replace("\t", "")
     remark = normalize_name(raw_remark)
     canonical = name
     if name.lower() == "edge banding" and remark:
         canonical = f"Edge banding--{remark}"
-    # These codes follow the project's existing material matching rules.
+    # 这些代码沿用项目现有的材料匹配规则。
     fixed = {
         "18mm--plywood": "M0004",
         "14.5mm--plywood": "M0003",
@@ -160,9 +188,13 @@ def mapped_price(material_name: str, raw_remark: str, prices: dict[str, dict]) -
 
 
 def main() -> None:
+    """汇总各房间 Traveler 材料与价格，写出成本分析 JSON。
+
+    参数：无；使用脚本配置和命令行选项。
+    """
     prices = load_prices()
     files = sorted(SOURCE_DIR.glob("Work Order Traveler(*.xlsx"))
-    # Workbook glob is intentionally narrowed below to avoid hidden/system files.
+    # 下方进一步限定工作簿文件名，以排除隐藏文件和系统文件。
     files = sorted(path for path in SOURCE_DIR.glob("*.xlsx") if path.name.lower().startswith("work order traveler("))
     raw_by_room: dict[str, list[dict]] = defaultdict(list)
     source_counts: dict[str, set[str]] = defaultdict(set)
@@ -171,14 +203,13 @@ def main() -> None:
     for path in files:
         label = room_name(path)
         short_file = path.stem.removeprefix("Work Order Traveler(").removesuffix(")")
-        # The user-defined reporting unit is one Traveler file per room. Keep
-        # the file identity in the room key so same-named files remain separate.
+        # 用户指定每个 Traveler 文件作为一个房间统计；房间键保留文件身份，
+        # 避免同名房间的文件被合并。
         room = f"{label}（{short_file}）"
         picking = material_rows(path, "Pickinglist")
         cutting = material_rows(path, "Cuttinglist")
-        # Use Pickinglist quantities when present. For blank material rows, use
-        # the corresponding Cuttinglist material row; this covers older and
-        # update Traveler files where only one of the two sheets is populated.
+        # 优先使用 Pickinglist 数量，空白材料行回退到对应 Cuttinglist 行；
+        # 兼顾旧版和更新版 Traveler 中仅填写其中一个工作表的情况。
         cutting_by_key: dict[tuple[str, str], list[dict]] = defaultdict(list)
         for row in cutting:
             cutting_by_key[(normalize_name(row["name"]).replace("\t", ""), row["spec"])].append(row)
@@ -209,8 +240,8 @@ def main() -> None:
             key = (normalize_name(row["name"]).replace("\t", ""), row["spec"])
             if key in used_cutting_keys:
                 continue
-            # Add cutting-only rows, including the update kitchen file's
-            # color-specific panel row that is blank in Pickinglist.
+            # 补入仅在 Cuttinglist 出现的材料，包括更新版厨房文件中
+            # Pickinglist 留空的指定颜色板材。
             if row["quantity"] > 0 and not any(
                 normalize_name(item["name"]).replace("\t", "") == key[0]
                 and item["quantity"] > 0
@@ -225,8 +256,8 @@ def main() -> None:
             raw_by_room[room].append(item)
             source_counts[(room, normalize_name(item["name"]).replace("\t", ""), item["spec"])].add(path.name)
 
-    # Infer a generic edge-band color only when a room has exactly one
-    # positive colored panel; this is an explicit, reviewable inference.
+    # 仅当房间恰有一种正数量的彩色板材时推定通用封边颜色，
+    # 并保留明确、可供复核的推定标记。
     room_panel_colors: dict[str, set[str]] = defaultdict(set)
     for room, items in raw_by_room.items():
         for item in items:

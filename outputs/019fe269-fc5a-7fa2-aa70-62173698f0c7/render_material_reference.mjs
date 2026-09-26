@@ -1,3 +1,4 @@
+// 检查材料参考表并渲染预览。参数：命令行 inputPath 为输入工作簿，outputDir 为输出目录。
 import fs from "node:fs/promises";
 import { FileBlob, SpreadsheetFile } from "@oai/artifact-tool";
 

@@ -12,6 +12,8 @@ EXCLUDED_PARTS = {".git", ".venv", "build", "node_modules", "vendor", "__pycache
 
 
 class CredentialSafetyTests(unittest.TestCase):
+    # 验证仓库中不包含符合检测规则的疑似明文凭据。
+    # self：当前测试用例或测试替身实例。
     def test_repository_contains_no_likely_credentials(self):
         patterns = {
             "AIMES account-like identifier": re.compile(r"\bG\d{6}\b"),
@@ -42,6 +44,8 @@ class CredentialSafetyTests(unittest.TestCase):
                         findings.append(f"{path.relative_to(PROJECT_ROOT)}:{line}: {label}")
         self.assertEqual(findings, [], "Possible credentials found:\n" + "\n".join(findings))
 
+    # 验证敏感本地文件受到 Git 忽略规则保护。
+    # self：当前测试用例或测试替身实例。
     def test_sensitive_local_files_are_gitignored(self):
         gitignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
         for entry in (".env", "settings.json", "secrets.json", "credentials.json"):

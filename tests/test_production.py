@@ -18,6 +18,8 @@ from traveler_assistant.production import (
 
 
 class ProductionTransactionTests(unittest.TestCase):
+    # 验证 App 材料身份保留 SKU 关联，并识别冲突的 SKU。
+    # self：当前测试用例或测试替身实例。
     def test_app_material_identity_and_conflicting_sku(self):
         self.assertEqual(production_material_code({"key": "M0019"}), "M0019")
         self.assertEqual(production_material_code({"product_code": "M0019"}), "M0019")
@@ -26,6 +28,8 @@ class ProductionTransactionTests(unittest.TestCase):
             with self.assertRaises(RuleError):
                 production_material_code(row)
 
+    # 写入生产预览所需的饰面板和封边商品样本。
+    # connection：隔离测试数据库连接。
     @staticmethod
     def _seed_products(connection):
         connection.executemany(
@@ -42,6 +46,8 @@ class ProductionTransactionTests(unittest.TestCase):
             ],
         )
 
+    # 验证生产预览合并同一订单重复的材料记录。
+    # self：当前测试用例或测试替身实例。
     def test_production_preview_aggregates_duplicate_order_material_rows(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Config(state_dir=Path(directory) / "state")
@@ -77,6 +83,8 @@ class ProductionTransactionTests(unittest.TestCase):
             self.assertEqual(preview["materials"][0]["total_quantity"], 18)
             self.assertEqual(preview["materials"][0]["remaining_quantity"], 18)
 
+    # 验证生产预览扣除已记入旧库存记录的材料消耗。
+    # self：当前测试用例或测试替身实例。
     def test_production_preview_deducts_legacy_inventory_materials(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Config(state_dir=Path(directory) / "state")
@@ -187,6 +195,8 @@ class ProductionTransactionTests(unittest.TestCase):
             self.assertEqual(remaining["panel"], 1)
             self.assertEqual(remaining["edge"], 56)
 
+    # 验证外部库存操作成功前，生产准备只读取而不写入业务事实。
+    # self：当前测试用例或测试替身实例。
     def test_prepare_production_is_read_only_until_inventory_succeeds(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Config(state_dir=Path(directory) / "state")
@@ -238,6 +248,8 @@ class ProductionTransactionTests(unittest.TestCase):
             self.assertEqual(draft["status"], "draft")
             self.assertEqual(draft["materials"][0]["quantity"], 2)
 
+    # 验证生产完成事实可与关联本地变更在同一事务提交。
+    # self：当前测试用例或测试替身实例。
     def test_completed_production_can_share_the_local_commit(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "workflow.sqlite3"

@@ -1,4 +1,4 @@
-"""Persist user-approved hardware sources only with confirmed business writes."""
+"""仅在确认业务写入时持久保存用户批准的五金来源。"""
 import hashlib
 import json
 import sqlite3
@@ -7,10 +7,12 @@ from pathlib import Path
 
 
 def decision_revision(value):
+    """计算来源决策 value 的稳定内容指纹；空值返回空字符串。"""
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest() if value else ''
 
 
 def load_source_decisions(config):
+    """读取已确认的五金来源；config 提供共享连接或数据库路径，独立打开时使用只读连接。"""
     connection = config.workflow_connection
     owns = connection is None
     if connection is None:
@@ -28,6 +30,10 @@ def load_source_decisions(config):
 
 
 def commit_source_decisions(connection, payload, factories, skipped_orders):
+    """校验预览基准后保存符合范围的来源决策，过期预览报错。
+
+    参数：connection 为事务连接；payload 为确认预览；factories 为可写工厂单；skipped_orders 为跳过订单。
+    """
     from .core import RuleError
     proposals = payload.get('hardware_source_decisions', {})
     bases = payload.get('hardware_source_decision_bases', {})
@@ -51,16 +57,16 @@ def commit_source_decisions(connection, payload, factories, skipped_orders):
 
 
 def with_source_decisions(function):
-    """Apply confirmed source locks to legacy sync/Traveler entry points too."""
+    """为同步或 Traveler 入口应用已确认的来源锁定；function 为被包装的入口函数。"""
     from functools import wraps
     @wraps(function)
     def run(config, *args, **kwargs):
+        """复用或创建来源读取上下文；config 为配置，args、kwargs 原样传给入口。"""
         from .report_read_context import current_report_context, report_read_session
         if current_report_context() is not None:
             return function(config, *args, **kwargs)
         with report_read_session() as context:
-            # These entry points may create material/Traveler files during the
-            # operation; only read-only Server previews cache directory lists.
+            # 这些入口可能生成材料或 Traveler 文件；目录列表复用只用于只读 Server 预览。
             context.reuse_reports = False
             context.locked_decisions = load_source_decisions(config)
             return function(config, *args, **kwargs)
@@ -68,7 +74,10 @@ def with_source_decisions(function):
 
 
 def preview_manual_handling(config, order_id, factory_order):
-    """Read-only proposal binding the decision to current facts and report bytes."""
+    """只读生成绑定当前事实及报表字节版本的人工处理预览。
+
+    参数：config 为配置；order_id 为归属订单号；factory_order 为工厂单号。
+    """
     from .core import RuleError
     order, factory = order_id.strip().upper(), factory_order.strip().upper()
     with sqlite3.connect(f'file:{config.workflow_database}?mode=ro', uri=True) as connection:
@@ -98,7 +107,10 @@ def preview_manual_handling(config, order_id, factory_order):
 
 
 def confirm_manual_handling(config, order_id, factory_order, token):
-    """Atomic, explicit manual disposition; never claims shipment or deletes manual rows."""
+    """原子确认自动五金改为人工处理，不声明已出货，也不删除人工五金行。
+
+    参数：config 为配置；order_id 为订单号；factory_order 为工厂单号；token 为预览确认版本。
+    """
     from .core import RuleError
     from .order_index import OrderIndexStore
     from .hardware_facts import replace_factory_hardware
@@ -119,7 +131,7 @@ def confirm_manual_handling(config, order_id, factory_order, token):
                                  (factory, json.dumps(decision, ensure_ascii=False, sort_keys=True)))
         store.connection.execute('update hardware_source_versions set order_id=? where factory_order=?',
                                  (proposal['order_id'], factory))
-        # Index fingerprints describe the exact files confirmed above.
+        # 索引指纹必须对应上面实际确认的文件版本。
         for path, fingerprint in proposal['report_versions'].items():
             indexed_path = path
             saved = store.connection.execute('select factory_order from source_files where path=?', (indexed_path,)).fetchone()

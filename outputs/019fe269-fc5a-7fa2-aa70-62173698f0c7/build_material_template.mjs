@@ -1,3 +1,4 @@
+// 清空样例材料、设置汇总公式并导出模板及预览。参数：命令行 sourcePath 为原工作簿，outputPath 为模板路径，previewPath 为预览图片路径。
 import fs from "node:fs/promises";
 import path from "node:path";
 import { FileBlob, SpreadsheetFile } from "@oai/artifact-tool";

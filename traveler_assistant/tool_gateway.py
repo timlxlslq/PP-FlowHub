@@ -1,9 +1,7 @@
-"""Typed command boundary between intent routing and business operations.
+"""意图路由与业务操作之间的类型化命令边界。
 
-The gateway is intentionally inside the application rather than an external
-MCP service.  It is the last common checkpoint before a command can generate
-a Traveler or write central facts, so it must not trust an Agent-provided
-approval decision or preview as authorization.
+网关位于应用内部，不是外部 MCP 服务。它是生成 Traveler 或写入中央事实前
+的共同检查点，不能把 Agent 提供的批准结论或预览当成用户授权。
 """
 
 from __future__ import annotations
@@ -29,9 +27,8 @@ WRITE_ACTIONS = {"generate_traveler", "update_traveler", "add_manual_hardware"}
 
 
 def _order_folder(config: Config, order_id: str) -> Path:
-    # PP orders live in Optimized Orders, while CS orders live in its sibling
-    # CUT TO SIZE directory. The production-files page already follows this
-    # split; assistant commands must resolve the same business source.
+    """定位唯一的订单目录；config 提供来源根目录，order_id 为标准化订单号。"""
+    # PP 订单位于 Optimized Orders，CS 订单位于同级 CUT TO SIZE；与生产文件页面保持一致。
     configured_root = (
         config.source_root.parent / "CUT TO SIZE"
         if order_id.upper().startswith("CS")
@@ -50,12 +47,11 @@ def _order_folder(config: Config, order_id: str) -> Path:
 
 
 def execute_local_command(config: Config, command: LocalCommand, approved: bool = False) -> dict:
-    """Validate and execute one typed command through the shared workflow.
+    """校验并分发结构化命令；读取动作直接执行，写入动作要求调用方已取得批准。
 
-    Read-only actions execute immediately.  Write actions first return an
-    ``approval_required`` preview; only a later call with ``approved=True``
-    performs the write.  The manual-hardware path writes central SQLite facts
-    and deliberately does not require an existing Traveler.
+    参数：config 为业务配置；command 为动作及参数；approved 表示是否已获批准。
+    未批准的写入返回 approval_required 预览；人工五金写入中央 SQLite，
+    不要求事先存在 Traveler。
     """
     if command.action == "add_manual_hardware":
         arguments = command.arguments

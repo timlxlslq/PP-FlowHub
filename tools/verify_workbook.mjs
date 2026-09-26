@@ -1,3 +1,4 @@
+// 检查工作簿结构与公式错误，并为各工作表输出预览。参数：命令行 inputPath 为输入工作簿，outputDir 为预览输出目录。
 import fs from "node:fs/promises";
 import path from "node:path";
 import { FileBlob, SpreadsheetFile } from "@oai/artifact-tool";

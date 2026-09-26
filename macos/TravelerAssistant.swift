@@ -1,10 +1,6 @@
-// Main application model and process bridge.
-//
-// SwiftUI owns presentation state and user interaction.  Python owns the
-// deterministic business rules, database work, and external-system edges.
-// Keep this file focused on starting commands, consuming JSON/progress, and
-// translating results into visible App state; do not duplicate Excel or
-// SQLite business rules here.
+// 主应用模型及进程桥接。
+// SwiftUI 负责展示状态与用户交互；Python 负责确定性业务规则、数据库操作和外部系统边界。
+// 此文件只负责启动命令、消费 JSON 与进度并更新可见 App 状态，不重复实现 Excel 或 SQLite 业务规则。
 import SwiftUI
 import AppKit
 import Security
@@ -15,6 +11,10 @@ extension Notification.Name {
 
 private let inventoryInactivityTimeoutSeconds: TimeInterval = 150
 
+/// 将后端错误转换为业务提示，并附上订单、路径和已返回单据等诊断信息。
+/// - Parameters:
+///   - error: 后端返回的结构化错误及来源信息。
+///   - operation: 用于错误提示或日志显示的业务操作名称。
 func diagnosticMessage(_ error: [String: Any], operation: String) -> String {
     let raw = error["message"] as? String ?? "本地处理未完成"
     var details = [businessFriendlyMessage(raw, operation: operation)]
@@ -28,6 +28,10 @@ func diagnosticMessage(_ error: [String: Any], operation: String) -> String {
     return details.joined(separator: "\n")
 }
 
+/// 识别常见系统错误并生成中文操作建议，保留适合展示的详情。
+/// - Parameters:
+///   - raw: 尚未转换为业务提示的原始错误文本。
+///   - operation: 用于错误提示或日志显示的业务操作名称。
 func businessFriendlyMessage(_ raw: String, operation: String) -> String {
     let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     let fallback = "\(operation)未完成。请重试；如果仍然失败，请检查相关文件、网络和登录状态后再操作。"
@@ -79,6 +83,9 @@ func businessFriendlyMessage(_ raw: String, operation: String) -> String {
     return hasChinese ? text : fallback + "\n详情：\(text)"
 }
 
+/// 从报表或文件路径推导库存映射对应的来源文件夹。
+/// - Parameters:
+///   - path: 待解析或打开的文件、文件夹路径。
 func inventoryMappingSourceFolderPath(_ path: String) -> String {
     let url = URL(fileURLWithPath: path).standardizedFileURL
     let components = url.pathComponents
@@ -90,6 +97,11 @@ func inventoryMappingSourceFolderPath(_ path: String) -> String {
     return url.pathExtension.isEmpty ? url.path : url.deletingLastPathComponent().path
 }
 
+/// 优先采用明确失败状态，否则从原始错误生成业务提示。
+/// - Parameters:
+///   - failureStatus: 失败时优先展示的业务状态。
+///   - rawError: 状态为空时使用的原始错误信息。
+///   - operation: 用于错误提示或日志显示的业务操作名称。
 func dashboardFailureMessage(_ failureStatus: String, rawError: String, operation: String) -> String {
     let status = failureStatus.trimmingCharacters(in: .whitespacesAndNewlines)
     return status.isEmpty ? businessFriendlyMessage(rawError, operation: operation) : status
@@ -129,6 +141,15 @@ struct ProductionMaterialDraft: Identifiable {
     var quantity: String
 }
 
+/// 验证草稿数量为有限非负数；空草稿可明确确认生产，错误输入不能被当作零消耗。
+func productionDraftHasValidQuantities(_ materials: [ProductionMaterialDraft]) -> Bool {
+    materials.allSatisfy { material in
+        guard let quantity = Double(material.quantity) else { return false }
+        return quantity.isFinite && quantity >= 0
+    }
+}
+
+/// 将生产材料类别转换为界面显示名称；material 为生产材料消耗草稿。
 func productionMaterialTypeDisplayName(_ material: ProductionMaterialDraft) -> String {
     switch material.materialType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
     case "plywood": return "Plywood"
@@ -138,6 +159,9 @@ func productionMaterialTypeDisplayName(_ material: ProductionMaterialDraft) -> S
     }
 }
 
+/// 按材料类别组合厚度、颜色或原始名称。
+/// - Parameters:
+///   - material: 生产材料消耗草稿。
 func productionMaterialName(_ material: ProductionMaterialDraft) -> String {
     let type = material.materialType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     if type == "plywood" {
@@ -161,6 +185,9 @@ func productionMaterialName(_ material: ProductionMaterialDraft) -> String {
     return material.label
 }
 
+/// 为 Plywood、Panel、封边及其他材料分配显示顺序。
+/// - Parameters:
+///   - material: 生产材料消耗草稿。
 private func productionMaterialTypeRank(_ material: ProductionMaterialDraft) -> Int {
     switch material.materialType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
     case "plywood": return 0
@@ -170,6 +197,9 @@ private func productionMaterialTypeRank(_ material: ProductionMaterialDraft) -> 
     }
 }
 
+/// 为常用 Plywood 厚度 18、14.5、5.4 毫米分配优先级。
+/// - Parameters:
+///   - material: 生产材料消耗草稿。
 private func productionMaterialPlywoodRank(_ material: ProductionMaterialDraft) -> Int {
     let thickness = Double(material.thickness) ?? .greatestFiniteMagnitude
     if abs(thickness - 18) < 0.01 { return 0 }
@@ -178,6 +208,9 @@ private func productionMaterialPlywoodRank(_ material: ProductionMaterialDraft) 
     return 3
 }
 
+/// 按类别、厚度、颜色和名称稳定排列生产材料草稿。
+/// - Parameters:
+///   - materials: 生产材料消耗草稿列表。
 func sortedProductionMaterialDrafts(_ materials: [ProductionMaterialDraft]) -> [ProductionMaterialDraft] {
     materials.sorted { left, right in
         let leftType = productionMaterialTypeRank(left)
@@ -228,6 +261,10 @@ struct OrderInstallationDay: Identifiable, Equatable {
     let date: String
     let installer: String
 
+    /// 保存安装日期和人员，并以两者组合生成记录身份。
+    /// - Parameters:
+    ///   - date: 安装日期，使用年月日字符串。
+    ///   - installer: 对应安装日期的人员名称。
     init(date: String, installer: String) {
         self.id = "\(date)|\(installer)"
         self.date = date
@@ -261,6 +298,9 @@ struct OrderDashboardItem: Identifiable {
     let factories: [OrderDashboardFactory]
 }
 
+/// 从后端结果中读取订单数组，缺失时返回空值。
+/// - Parameters:
+///   - object: 后端返回的 JSON 结果对象。
 func dashboardOrderRows(from object: [String: Any]) -> [[String: Any]]? {
     object["orders"] as? [[String: Any]]
 }
@@ -279,6 +319,20 @@ struct ServerChangePreview: Identifiable, Equatable {
     let referenceOrderIDs: [String]
     let eventTime: String
 
+    /// 建立含来源、变化类型和人工处理信息的 Server 变化预览。
+    /// - Parameters:
+    ///   - id: 记录或请求的唯一标识。
+    ///   - changeType: 变化类型，例如新增、修改或删除。
+    ///   - kind: 材料或变化记录的类别。
+    ///   - orderId: 目标业务订单号。
+    ///   - sourceFolder: 订单或报表的来源文件夹。
+    ///   - path: 待解析或打开的文件、文件夹路径。
+    ///   - oldPath: 文件变化前的路径。
+    ///   - message: 需要解析、记录或显示的业务消息。
+    ///   - manualOnly: 是否仅允许人工处理来源。
+    ///   - handlingMode: 临时文件夹的处理模式。
+    ///   - referenceOrderIDs: 与临时来源关联的参考订单号。
+    ///   - eventTime: Server 变化的业务时间。
     init(
         id: String,
         changeType: String,
@@ -320,6 +374,10 @@ struct ServerWriteMaterialPreview: Identifiable {
     let edge: String
     let sourcePath: String
 
+    /// 解析材料写入预览行；类别和颜色均缺失时忽略该行。
+    /// - Parameters:
+    ///   - row: 后端返回的原始数据行。
+    ///   - index: 来源行的位置，用于构造或补充记录身份。
     init?(row: [String: Any], index: Int) {
         let materialID = (row["material_id"] as? NSNumber)?.intValue ?? index
         let materialType = row["material_type"] as? String ?? ""
@@ -348,6 +406,10 @@ struct ServerWriteHardwarePreview: Identifiable {
     let quantity: Double
     let unit: String
 
+    /// 解析五金写入预览行；代码和名称均缺失时忽略该行。
+    /// - Parameters:
+    ///   - row: 后端返回的原始数据行。
+    ///   - index: 来源行的位置，用于构造或补充记录身份。
     init?(row: [String: Any], index: Int) {
         let code = row["product_code"] as? String ?? ""
         let name = row["name"] as? String ?? ""
@@ -374,6 +436,18 @@ struct ServerWriteMaterialChange: Identifiable {
     let newQuantity: Double
     let delta: Double
 
+    /// 建立材料规格及新旧数量变化记录。
+    /// - Parameters:
+    ///   - id: 记录或请求的唯一标识。
+    ///   - changeType: 变化类型，例如新增、修改或删除。
+    ///   - materialType: 材料类别代码。
+    ///   - color: 材料颜色名称。
+    ///   - thickness: 材料厚度，按毫米表示。
+    ///   - edge: 封边规格或属性。
+    ///   - unit: 材料或五金计量单位。
+    ///   - oldQuantity: 原有已确认数量。
+    ///   - newQuantity: 本次预览中的新数量。
+    ///   - delta: 新数量相对旧数量的差额。
     init(
         id: String,
         changeType: String,
@@ -398,6 +472,10 @@ struct ServerWriteMaterialChange: Identifiable {
         self.delta = delta
     }
 
+    /// 解析材料数量变化行；缺少材料类别时失败。
+    /// - Parameters:
+    ///   - row: 后端返回的原始数据行。
+    ///   - index: 来源行的位置，用于构造或补充记录身份。
     init?(row: [String: Any], index: Int) {
         let type = row["material_type"] as? String ?? ""
         guard !type.isEmpty else { return nil }
@@ -413,6 +491,9 @@ struct ServerWriteMaterialChange: Identifiable {
         self.delta = (row["delta"] as? NSNumber)?.doubleValue ?? 0
     }
 
+    /// 按材料类别、颜色、厚度、封边和单位合并数量变化。
+    /// - Parameters:
+    ///   - changes: Server 材料数量变化列表。
     static func aggregated(_ changes: [ServerWriteMaterialChange]) -> [ServerWriteMaterialChange] {
         var indexByKey: [String: Int] = [:]
         var result: [ServerWriteMaterialChange] = []
@@ -455,6 +536,10 @@ struct ServerWriteHardwareChange: Identifiable {
     let newQuantity: Double
     let delta: Double
 
+    /// 解析工厂单五金数量变化，拒绝缺少工厂单或名称的行。
+    /// - Parameters:
+    ///   - row: 后端返回的原始数据行。
+    ///   - index: 来源行的位置，用于构造或补充记录身份。
     init?(row: [String: Any], index: Int) {
         let factory = row["factory_order"] as? String ?? ""
         let name = row["name"] as? String ?? ""
@@ -473,7 +558,7 @@ struct ServerWriteHardwareChange: Identifiable {
     }
 }
 
-// Preserve source fields so the selection preview can align names, codes and quantities.
+// 保留原始来源字段，让选择预览能对齐名称、代码和数量。
 struct HardwareSourceItem {
     let name: String
     let code: String
@@ -481,6 +566,9 @@ struct HardwareSourceItem {
     let quantity: Double
     let unit: String
 
+    /// 读取并保留五金来源中的原始名称、代码、规格和数量。
+    /// - Parameters:
+    ///   - value: 后端返回的五金来源原始字段。
     init(_ value: [String: Any]) {
         name = value["name"] as? String ?? ""
         code = value["code"] as? String ?? ""
@@ -495,6 +583,9 @@ struct HardwareSourceCandidate: Identifiable {
     let path: String
     let label: String
     let items: [HardwareSourceItem]
+    /// 解析可供选择的五金报表候选；缺少身份或路径时失败。
+    /// - Parameters:
+    ///   - value: 后端返回的五金来源原始字段。
     init?(_ value: [String: Any]) {
         guard let id = value["id"] as? String, let path = value["path"] as? String else { return nil }
         self.id = id
@@ -507,6 +598,9 @@ struct HardwareSourceCandidate: Identifiable {
 struct HardwareSourceConflict: Identifiable {
     let id: String
     let candidates: [HardwareSourceCandidate]
+    /// 解析同一工厂单的五金来源冲突及其候选报表。
+    /// - Parameters:
+    ///   - value: 后端返回的五金来源原始字段。
     init?(_ value: [String: Any]) {
         guard let factory = value["factory_order"] as? String else { return nil }
         id = factory
@@ -524,6 +618,9 @@ struct ServerHardwareMappingRequirement: Identifiable {
     let quantity: Double
     let message: String
 
+    /// 解析待指定 SKU 的五金项目，并保留来源与数量。
+    /// - Parameters:
+    ///   - row: 后端返回的原始数据行。
     init?(row: [String: Any]) {
         let name = row["name"] as? String ?? ""
         guard !name.isEmpty else { return nil }
@@ -552,6 +649,9 @@ struct ServerWriteFactoryPreview: Identifiable {
     let changeType: String
     let hardwareChanges: [ServerWriteHardwareChange]
 
+    /// 解析工厂单五金预览及原有五金变化；缺少工厂单号时失败。
+    /// - Parameters:
+    ///   - row: 后端返回的原始数据行。
     init?(row: [String: Any]) {
         let number = row["factory_order"] as? String ?? ""
         guard !number.isEmpty else { return nil }
@@ -587,11 +687,25 @@ struct ServerWriteOrderPreview: Identifiable {
     let excludedFactories: [ServerWriteFactoryPreview]
     let hardwareChanges: [ServerWriteHardwareChange]
 
+    /// 只保留本次预览涉及的、已有五金事实的工厂单变化。
     var existingHardwareChanges: [ServerWriteHardwareChange] {
         let existingFactories = Set(factories.filter(\.hasExistingHardware).map(\.factoryOrder))
         return hardwareChanges.filter { existingFactories.contains($0.factoryOrder) }
     }
 
+    /// 建立订单材料、工厂单及五金变化的写入预览。
+    /// - Parameters:
+    ///   - id: 记录或请求的唯一标识。
+    ///   - orderID: 目标业务订单号。
+    ///   - orderType: 订单类型，如自有订单或 CUT TO SIZE。
+    ///   - sourceFolder: 订单或报表的来源文件夹。
+    ///   - validationStatus: 订单校验状态。
+    ///   - validationMessage: 订单校验的详细提示。
+    ///   - materials: Server 待写入材料列表。
+    ///   - materialChanges: 订单材料数量变化明细。
+    ///   - factories: Server 工厂单写入预览列表。
+    ///   - excludedFactories: 不纳入本次写入的工厂单预览。
+    ///   - hardwareChanges: 工厂单五金变化明细。
     init(
         id: String,
         orderID: String,
@@ -618,6 +732,9 @@ struct ServerWriteOrderPreview: Identifiable {
         self.hardwareChanges = hardwareChanges
     }
 
+    /// 解析订单预览并汇总同规格材料变化；缺少订单号时失败。
+    /// - Parameters:
+    ///   - row: 后端返回的原始数据行。
     init?(row: [String: Any]) {
         let orderID = row["order_id"] as? String ?? ""
         guard !orderID.isEmpty else { return nil }
@@ -650,6 +767,7 @@ struct ServerWritePreview {
     let orders: [ServerWriteOrderPreview]
     let hardwareMappingRequirements: [ServerHardwareMappingRequirement]
 
+    /// 检查预览可否仅确认无变化：来源有效、无映射缺失且无待写入变化。
     var canAcknowledgeNoChanges: Bool {
         payload["can_acknowledge_no_changes"] as? Bool == true &&
         !orders.isEmpty && !sourceFolders.isEmpty && hardwareMappingRequirements.isEmpty &&
@@ -657,6 +775,13 @@ struct ServerWritePreview {
             $0.factories.isEmpty && $0.hardwareChanges.isEmpty }
     }
 
+    /// 保存 Server 原始确认载荷、来源范围及材料和订单预览。
+    /// - Parameters:
+    ///   - payload: 向后端提交或保留的结构化请求内容。
+    ///   - sourceFolders: 预览涉及的来源文件夹列表。
+    ///   - materials: Server 待写入材料列表。
+    ///   - orders: Server 订单写入预览列表。
+    ///   - hardwareMappingRequirements: 仍需指定 SKU 的五金项目。
     init(payload: [String: Any], sourceFolders: [String], materials: [ServerWriteMaterialPreview], orders: [ServerWriteOrderPreview], hardwareMappingRequirements: [ServerHardwareMappingRequirement] = []) {
         self.payload = payload
         self.sourceFolders = sourceFolders
@@ -665,6 +790,9 @@ struct ServerWritePreview {
         self.hardwareMappingRequirements = hardwareMappingRequirements
     }
 
+    /// 校验后端 Server 确认载荷并解析订单预览，结构不完整时失败。
+    /// - Parameters:
+    ///   - object: 后端返回的 JSON 结果对象。
     init?(object: [String: Any]) {
         guard let payload = object["server_write_preview"] as? [String: Any],
               payload["write_records"] is [String: Any] else { return nil }
@@ -690,14 +818,17 @@ struct ServerFolderChangeGroup: Identifiable {
     let changes: [ServerChangePreview]
     let manualOnly: Bool
 
+    /// 判断此来源分组是否为独立补单或外部人工处理模式。
     var independentManual: Bool {
         changes.contains { ["supplemental", "external_manual"].contains($0.handlingMode) }
     }
 
+    /// 读取当前文件夹变化携带的参考订单号。
     var referenceOrderIDs: [String] { changes.first?.referenceOrderIDs ?? [] }
 
+    /// 检查文件夹是否存在报表缺失、需要人工核对的变化。
     var requiresManualReview: Bool {
-        changes.contains { $0.changeType == "missing_report" }
+        changes.contains { $0.changeType == "missing_report" || $0.handlingMode == "layout_review" }
     }
 }
 
@@ -715,15 +846,24 @@ struct PendingCenterItem: Identifiable {
     let aimesFormatWarnings: [AimesReviewItem]
 }
 
-// Display-only path parsing must never query SMB/file attributes on the UI thread.
+// 仅用于显示的路径解析不得在 UI 线程查询 SMB 或文件属性。
+/// 仅解析路径字符串中的末级名称，不访问磁盘或 SMB。
+/// - Parameters:
+///   - path: 待解析或打开的文件、文件夹路径。
 func displayPathName(_ path: String) -> String {
     (path as NSString).lastPathComponent
 }
 
+/// 仅解析路径字符串中的父目录，不读取文件属性。
+/// - Parameters:
+///   - path: 待解析或打开的文件、文件夹路径。
 func displayParentPath(_ path: String) -> String {
     (path as NSString).deletingLastPathComponent
 }
 
+/// 按来源文件夹归组 Server 变化，并整理订单和人工处理标志。
+/// - Parameters:
+///   - changes: Server 文件变化预览列表。
 func serverFolderChangeGroups(_ changes: [ServerChangePreview]) -> [ServerFolderChangeGroup] {
     let grouped = Dictionary(grouping: changes) { change in
         change.sourceFolder.isEmpty ? displayParentPath(change.path) : change.sourceFolder
@@ -743,6 +883,12 @@ func serverFolderChangeGroups(_ changes: [ServerChangePreview]) -> [ServerFolder
     .sorted { lhs, rhs in lhs.folderPath.localizedStandardCompare(rhs.folderPath) == .orderedAscending }
 }
 
+/// 合并 Server 变化、当前问题和 AIMES 待确认项，生成待处理队列。
+/// - Parameters:
+///   - serverChanges: Server 文件扫描发现的待处理变化。
+///   - currentIssues: 尚未解决的当前业务问题。
+///   - aimesReviews: AIMES 工厂单待确认记录。
+///   - aimesFormatWarnings: AIMES 销售单格式异常记录。
 func buildPendingCenterItems(
     serverChanges: [ServerChangePreview],
     currentIssues: [CurrentIssue],
@@ -754,6 +900,10 @@ func buildPendingCenterItems(
     var attachedAimesIDs = Set<String>()
     var result: [PendingCenterItem] = []
 
+    /// 通过路径相等或子目录关系判断问题是否属于文件夹分组。
+    /// - Parameters:
+    ///   - issue: 待判断或处理的当前业务问题。
+    ///   - group: 按来源文件夹归组的 Server 变化。
     func belongs(_ issue: CurrentIssue, to group: ServerFolderChangeGroup) -> Bool {
         guard !issue.path.isEmpty else { return false }
         return issue.path == group.folderPath || issue.path.hasPrefix(group.folderPath + "/")
@@ -808,8 +958,8 @@ func buildPendingCenterItems(
         result.append(PendingCenterItem(
             id: "issue:\(issue.id)",
             title: issue.factoryOrder.isEmpty ? (issue.orderId.isEmpty ? "当前问题" : issue.orderId) : issue.factoryOrder,
-            subtitle: issue.kind == "factory_ownership" ? "订单归属问题" : (issue.kind == "server_missing_report" ? "报表检查" : (currentIssueRequiresInventoryMapping(issue) || issue.message.contains("未映射材料") ? "出库前需要材料映射" : "订单处理问题")),
-            status: issue.kind == "factory_ownership" || issue.kind == "server_missing_report" ? "待人工确认" : (currentIssueRequiresInventoryMapping(issue) || issue.message.contains("未映射材料") ? "需人工处理" : "处理失败"),
+            subtitle: issue.kind == "inventory_recovery" ? "历史出库操作待核对" : issue.kind == "factory_ownership" ? "订单归属问题" : (issue.kind == "server_missing_report" ? "报表检查" : (currentIssueRequiresInventoryMapping(issue) || issue.message.contains("未映射材料") ? "出库前需要材料映射" : "订单处理问题")),
+            status: issue.kind == "inventory_recovery" ? "待核对" : issue.kind == "factory_ownership" || issue.kind == "server_missing_report" ? "待人工确认" : (currentIssueRequiresInventoryMapping(issue) || issue.message.contains("未映射材料") ? "需人工处理" : "处理失败"),
             folderPath: location,
             folderName: folderName,
             orderId: issue.orderId,
@@ -878,6 +1028,10 @@ struct AimesReviewItem: Identifiable, Equatable {
     let sourcePath: String
 }
 
+/// 从指定 JSON 字段解析有效的 AIMES 待确认记录。
+/// - Parameters:
+///   - object: 后端返回的 JSON 结果对象。
+///   - key: 待解析 AIMES 列表的 JSON 字段名。
 func aimesReviewItems(_ object: [String: Any], key: String) -> [AimesReviewItem] {
     (object[key] as? [[String: Any]] ?? []).compactMap { row in
         guard let ignoreKey = row["ignore_key"] as? String, !ignoreKey.isEmpty else { return nil }
@@ -895,6 +1049,9 @@ func aimesReviewItems(_ object: [String: Any], key: String) -> [AimesReviewItem]
     }
 }
 
+/// 将带工厂单身份的 AIMES 警告转换为可展示的待确认项。
+/// - Parameters:
+///   - warnings: 后端返回的 AIMES 警告记录。
 func aimesReviewItemsFromWarnings(_ warnings: [[String: Any]]) -> [AimesReviewItem] {
     warnings.compactMap { row in
         let ignoreKey = row["ignore_key"] as? String ?? ""
@@ -919,6 +1076,16 @@ struct DashboardAimesStatusUpdate: Equatable {
     let failureAlert: String
 }
 
+/// 根据同步结果、变化和问题数量生成 AIMES 状态与失败提醒。
+/// - Parameters:
+///   - attempted: 本次是否尝试访问 AIMES。
+///   - succeeded: 本次 AIMES 访问是否成功。
+///   - skippedToday: 是否因当天已同步而跳过访问。
+///   - changed: 同步是否发现变化。
+///   - count: 参与当前统计的记录总数。
+///   - issueCount: 需要人工处理的问题数量。
+///   - warningCount: AIMES 返回的警告数量。
+///   - error: AIMES 访问失败的原始错误文本。
 func dashboardAimesStatusUpdate(
     attempted: Bool,
     succeeded: Bool,
@@ -972,6 +1139,11 @@ func dashboardAimesStatusUpdate(
     )
 }
 
+/// 将后端变化转换为本次会话活动，保留状态、路径和操作详情。
+/// - Parameters:
+///   - object: 后端返回的 JSON 结果对象。
+///   - includeChanges: 是否同时解析或应用变化活动。
+///   - sessionStartedAt: 本次 App 会话起点，用于排除早期历史活动。
 func dashboardActivitySteps(
     _ object: [String: Any],
     includeChanges: Bool = true,
@@ -1032,6 +1204,9 @@ func dashboardActivitySteps(
     }
 }
 
+/// 将后端 Server 变化行解析为界面预览模型。
+/// - Parameters:
+///   - rows: 后端返回的原始数据行列表。
 func serverChangePreviews(_ rows: [[String: Any]]) -> [ServerChangePreview] {
     rows.compactMap { row in
         guard let id = row["id"] as? String, let path = row["path"] as? String else { return nil }
@@ -1055,6 +1230,10 @@ func serverChangePreviews(_ rows: [[String: Any]]) -> [ServerChangePreview] {
     }
 }
 
+/// 从待处理变化中移除指定文件夹对应的记录。
+/// - Parameters:
+///   - changes: Server 文件变化预览列表。
+///   - folderPath: 目标来源文件夹路径。
 func serverChangesExcludingFolder(
     _ changes: [ServerChangePreview],
     folderPath: String
@@ -1062,6 +1241,10 @@ func serverChangesExcludingFolder(
     return serverChangesExcludingFolders(changes, folderPaths: [folderPath])
 }
 
+/// 根据规范化的文件夹路径过滤已处理的 Server 变化。
+/// - Parameters:
+///   - changes: Server 文件变化预览列表。
+///   - folderPaths: 待排除的来源文件夹路径列表。
 func serverChangesExcludingFolders(
     _ changes: [ServerChangePreview],
     folderPaths: [String]
@@ -1081,6 +1264,9 @@ func serverChangesExcludingFolders(
     }
 }
 
+/// 将 Server 变化类型转换为中文名称。
+/// - Parameters:
+///   - type: 文件或业务变化的类型代码。
 func serverChangeTypeName(_ type: String) -> String {
     switch type {
     case "added": return "新增"
@@ -1097,6 +1283,9 @@ struct OrderPreviewIssue: Equatable {
     let message: String
 }
 
+/// 解析订单预览的校验问题，供界面显示和定位。
+/// - Parameters:
+///   - object: 后端返回的 JSON 结果对象。
 func orderPreviewIssues(_ object: [String: Any]) -> [OrderPreviewIssue] {
     (object["errors"] as? [[String: Any]] ?? []).map {
         OrderPreviewIssue(
@@ -1116,6 +1305,14 @@ struct OrderMaterialPreview: Identifiable {
     let productCode: String
     let brand: String
 
+    /// 保存材料类别、规格、数量及规范 SKU 展示信息。
+    /// - Parameters:
+    ///   - kind: 材料或变化记录的类别。
+    ///   - thickness: 材料厚度，按毫米表示。
+    ///   - color: 材料颜色名称。
+    ///   - quantity: 材料或五金数量。
+    ///   - productCode: 库存商品的规范 SKU 代码。
+    ///   - brand: 材料品牌名称。
     init(
         kind: String,
         thickness: Double,
@@ -1133,6 +1330,9 @@ struct OrderMaterialPreview: Identifiable {
     }
 }
 
+/// 按材料类别组合厚度和颜色形成显示名称。
+/// - Parameters:
+///   - row: 订单材料预览。
 func orderMaterialDisplayName(_ row: OrderMaterialPreview) -> String {
     let thickness = row.thickness
     if row.kind == "panel" {
@@ -1144,6 +1344,9 @@ func orderMaterialDisplayName(_ row: OrderMaterialPreview) -> String {
     return "Plywood"
 }
 
+/// 按材料类别及业务厚度顺序排列订单材料。
+/// - Parameters:
+///   - rows: 订单材料预览列表。
 func orderedMaterialRows(_ rows: [OrderMaterialPreview]) -> [OrderMaterialPreview] {
     rows.sorted {
         let leftRank: Int
@@ -1175,6 +1378,10 @@ func orderedMaterialRows(_ rows: [OrderMaterialPreview]) -> [OrderMaterialPrevie
     }
 }
 
+/// 让封边颜色跟随 Panel 顺序，其他颜色按名称排序。
+/// - Parameters:
+///   - colors: 待排列的颜色名称列表。
+///   - panels: 用于确定封边颜色顺序的 Panel 材料列表。
 func orderedEdgeColors(_ colors: [String], matching panels: [OrderMaterialPreview]) -> [String] {
     var order: [String] = []
     for panel in panels where panel.kind == "panel" {
@@ -1188,6 +1395,9 @@ func orderedEdgeColors(_ colors: [String], matching panels: [OrderMaterialPrevie
     return order + remaining
 }
 
+/// 找出同时包含门板与背板厚度的 Panel 颜色，供界面提示区分。
+/// - Parameters:
+///   - rows: 订单材料预览列表。
 func panelColorsNeedingThicknessWarning(_ rows: [OrderMaterialPreview]) -> Set<String> {
     let panels = rows.filter { $0.kind == "panel" && !$0.color.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     let grouped = Dictionary(grouping: panels) {
@@ -1264,6 +1474,9 @@ struct InventoryTraveler: Identifiable {
     let documentNumber: String
 }
 
+/// 按订单文件夹分组 Traveler，并按最新修改时间排列文件和分组。
+/// - Parameters:
+///   - travelers: 待分组的 Traveler 文件记录。
 func groupInventoryTravelersByNewest(_ travelers: [InventoryTraveler]) -> [(String, [InventoryTraveler])] {
     Dictionary(grouping: travelers, by: \.ppFolder)
         .map { folder, files in
@@ -1292,6 +1505,9 @@ struct InventoryPreviewRow: Identifiable {
     let section: String
 }
 
+/// 按 Plywood、Panel、封边、五金和其他类别分配预览排序权重。
+/// - Parameters:
+///   - row: 库存出库预览。
 func inventoryPreviewCategoryRank(_ row: InventoryPreviewRow) -> Int {
     let name = row.travelerName.trimmingCharacters(in: .whitespacesAndNewlines)
     if row.section == "五金" { return 3 }
@@ -1301,6 +1517,9 @@ func inventoryPreviewCategoryRank(_ row: InventoryPreviewRow) -> Int {
     return 4
 }
 
+/// 从材料名识别常用 Plywood 厚度并返回显示优先级。
+/// - Parameters:
+///   - row: 库存出库预览。
 func inventoryPreviewPlywoodRank(_ row: InventoryPreviewRow) -> Int {
     let name = row.travelerName.lowercased()
     if name.hasPrefix("18mm") { return 0 }
@@ -1309,6 +1528,9 @@ func inventoryPreviewPlywoodRank(_ row: InventoryPreviewRow) -> Int {
     return 3
 }
 
+/// 按材料类别、Plywood 厚度、来源名称及 SKU 排列库存预览。
+/// - Parameters:
+///   - rows: 库存出库预览列表。
 func sortedInventoryPreviewRows(_ rows: [InventoryPreviewRow]) -> [InventoryPreviewRow] {
     rows.sorted {
         let leftCategory = inventoryPreviewCategoryRank($0)
@@ -1360,6 +1582,19 @@ struct InventoryStep: Identifiable, Equatable {
     let duration: TimeInterval?
     let sourceKey: String?
 
+    /// 建立含时间、状态、路径与可选耗时的操作步骤。
+    /// - Parameters:
+    ///   - id: 记录或请求的唯一标识。
+    ///   - time: 消息或步骤的显示时间。
+    ///   - title: 界面或操作记录的标题。
+    ///   - detail: 操作或消息的详细说明。
+    ///   - state: 运行、成功、警告或失败等展示状态。
+    ///   - paths: 本次处理的文件路径列表。
+    ///   - operationDetails: 操作执行过程的说明列表。
+    ///   - contextDetails: 消息关联的业务上下文说明。
+    ///   - startedAt: 记录或操作的开始时间。
+    ///   - duration: 操作耗时，单位为秒。
+    ///   - sourceKey: 后端活动的稳定身份，用于跨刷新去重。
     init(
         id: UUID = UUID(),
         time: String,
@@ -1387,11 +1622,17 @@ struct InventoryStep: Identifiable, Equatable {
     }
 }
 
+/// 将非负耗时格式化为保留两位小数的秒数。
+/// - Parameters:
+///   - duration: 操作耗时，单位为秒。
 func operationDurationText(_ duration: TimeInterval) -> String {
     let rounded = max(0, duration).rounded(toPlaces: 2)
     return String(format: "%.2f 秒", rounded)
 }
 
+/// 识别可能已在外部成功或响应不确定的错误，提示先核对单据。
+/// - Parameters:
+///   - message: 需要解析、记录或显示的业务消息。
 func inventoryFailureNeedsVerification(_ message: String) -> Bool {
     let markers = [
         "请先按单号核对",
@@ -1412,6 +1653,11 @@ struct DashboardOperationDuration: Equatable, Identifiable {
     let label: String
     let duration: TimeInterval
 
+    /// 建立阶段耗时并限制为非负值；未指定身份时自动生成。
+    /// - Parameters:
+    ///   - id: 记录或请求的唯一标识。
+    ///   - label: 阶段、项目或信息行的显示名称。
+    ///   - duration: 操作耗时，单位为秒。
     init(id: String? = nil, label: String, duration: TimeInterval) {
         self.label = label
         self.duration = max(0, duration)
@@ -1419,6 +1665,9 @@ struct DashboardOperationDuration: Equatable, Identifiable {
     }
 }
 
+/// 解析独立业务阶段耗时，排除尝试和总计行以免重复累计。
+/// - Parameters:
+///   - stages: 后端返回的阶段名称与耗时记录。
 func dashboardFlatOperationDurations(_ stages: [[String: Any]]) -> [DashboardOperationDuration] {
     stages.compactMap { stage -> DashboardOperationDuration? in
         guard let label = stage["label"] as? String, !label.isEmpty else { return nil }
@@ -1435,20 +1684,28 @@ private struct DashboardOperationStart {
 }
 
 private extension Double {
+    /// 将当前浮点数四舍五入到指定小数位数。
+    /// - Parameters:
+    ///   - places: 保留的小数位数。
     func rounded(toPlaces places: Int) -> Double {
         let factor = pow(10.0, Double(places))
         return (self * factor).rounded() / factor
     }
 }
 
+/// 将日期格式化为看板使用的时分秒。
+/// - Parameters:
+///   - date: 待显示、选择或计算的日期时间。
 func dashboardClockTime(_ date: Date = Date()) -> String {
     date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).second(.twoDigits))
 }
 
+/// 去除库存日志的计时和来源前缀，生成简洁的进行中提示。
+/// - Parameters:
+///   - message: 需要解析、记录或显示的业务消息。
 func dashboardInventoryProgressText(_ message: String) -> String {
     var text = message.trimmingCharacters(in: .whitespacesAndNewlines)
-    // Backend progress events include an elapsed-time prefix. It is useful
-    // in the operation log but too noisy for the one-line dashboard banner.
+    // 后端进度事件带有耗时前缀；日志需要保留，但单行看板提示不展示这些冗余信息。
     if text.hasPrefix("[+"), let closing = text.firstIndex(of: "]") {
         let afterClosing = text.index(after: closing)
         text = String(text[afterClosing...]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1466,12 +1723,17 @@ func dashboardInventoryProgressText(_ message: String) -> String {
     return "正在\(text)"
 }
 
-/// Format persisted ISO timestamps only at the presentation boundary.
-/// Storage, sorting, and comparisons continue to use the original value.
+/// 仅在展示边界格式化已持久化的 ISO 时间戳；存储、排序和比较仍使用原始值。
+/// 仅在显示边界将 ISO 时间中的 T 替换为空格。
+/// - Parameters:
+///   - value: 待解析或显示的业务日期时间字符串。
 func appDisplayTimestamp(_ value: String) -> String {
     value.replacingOccurrences(of: "T", with: " ")
 }
 
+/// 依次解析常见 ISO 时间戳和业务日期格式。
+/// - Parameters:
+///   - value: 待解析或显示的业务日期时间字符串。
 func dashboardBusinessDate(_ value: String) -> Date? {
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return nil }
@@ -1490,11 +1752,20 @@ func dashboardBusinessDate(_ value: String) -> Date? {
     return nil
 }
 
+/// 判断业务时间是否与参考日期处于同一自然月。
+/// - Parameters:
+///   - value: 待解析或显示的业务日期时间字符串。
+///   - reference: 用于比较自然月份的参考日期。
+///   - calendar: 用于日期计算的日历。
 func dashboardTimestamp(_ value: String, isInSameMonthAs reference: Date, calendar: Calendar = .current) -> Bool {
     guard let date = dashboardBusinessDate(value) else { return false }
     return calendar.isDate(date, equalTo: reference, toGranularity: .month)
 }
 
+/// 保留步骤身份和时间，仅更新最后一个运行中步骤的详情。
+/// - Parameters:
+///   - steps: 操作步骤列表。
+///   - detail: 操作或消息的详细说明。
 func updatingLatestRunningStep(_ steps: [InventoryStep], detail: String) -> [InventoryStep]? {
     guard let index = steps.lastIndex(where: { $0.state == "running" }) else { return nil }
     var updated = steps
@@ -1514,6 +1785,10 @@ func updatingLatestRunningStep(_ steps: [InventoryStep], detail: String) -> [Inv
     return updated
 }
 
+/// 结束前一个运行中步骤，并追加新的后台进度步骤。
+/// - Parameters:
+///   - steps: 操作步骤列表。
+///   - message: 需要解析、记录或显示的业务消息。
 func appendingInventoryProgressStep(_ steps: [InventoryStep], message: String) -> [InventoryStep] {
     var updated = steps
     if let index = updated.lastIndex(where: { $0.state == "running" }) {
@@ -1543,10 +1818,18 @@ func appendingInventoryProgressStep(_ steps: [InventoryStep], message: String) -
     return updated
 }
 
+/// 判断当前订单是否具备更新已有 Traveler 的必要路径和身份。
+/// - Parameters:
+///   - existingTravelerPath: 已找到的 Traveler 文件路径。
+///   - selectedOrderPath: 当前选中的订单来源路径。
+///   - selectedOrderId: 当前选中的订单号。
 func orderUpdateActionReady(existingTravelerPath: String, selectedOrderPath: String, selectedOrderId: String) -> Bool {
     !existingTravelerPath.isEmpty && !selectedOrderPath.isEmpty && !selectedOrderId.isEmpty
 }
 
+/// 检查已有 Traveler 路径非空且文件存在。
+/// - Parameters:
+///   - existingTravelerPath: 已找到的 Traveler 文件路径。
 func orderTravelerOpenActionReady(existingTravelerPath: String) -> Bool {
     let path = existingTravelerPath.trimmingCharacters(in: .whitespacesAndNewlines)
     return !path.isEmpty && FileManager.default.fileExists(atPath: path)
@@ -1559,6 +1842,13 @@ struct TodoItem: Identifiable, Codable, Equatable {
     var deadline: Date?
     var completedAt: Date?
 
+    /// 建立待办的内容、创建时间、截止时间和完成状态。
+    /// - Parameters:
+    ///   - id: 记录或请求的唯一标识。
+    ///   - content: 待办的任务内容。
+    ///   - startedAt: 记录或操作的开始时间。
+    ///   - deadline: 待办截止时间；为空表示不设截止时间。
+    ///   - completedAt: 完成时间；未完成时为空。
     init(
         id: UUID = UUID(),
         content: String,
@@ -1590,10 +1880,17 @@ private final class ResidentOrderServiceClient {
     private var started = false
     private let onProgress: (String) -> Void
 
+    /// 保存常驻订单服务的进度日志回调。
+    /// - Parameters:
+    ///   - onProgress: 接收后台标准错误进度文本的回调。
     init(onProgress: @escaping (String) -> Void) {
         self.onProgress = onProgress
     }
 
+    /// 在锁保护下启动常驻订单进程并连接标准输入、输出和进度流。
+    /// - Parameters:
+    ///   - command: 后端可执行入口的文件地址。
+    ///   - environment: 传给后端进程的环境变量。
     func start(command: URL, environment: [String: String]) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -1614,13 +1911,19 @@ private final class ResidentOrderServiceClient {
         started = true
     }
 
-    func request(id: String, arguments: [String], inputData: Data?) throws -> Data {
+    /// 通过常驻订单服务发送一条 JSON 请求，阻塞读取一行响应。
+    /// - Parameters:
+    ///   - id: 记录或请求的唯一标识。
+    ///   - arguments: 传给后端命令的参数数组。
+    ///   - inputData: 请求附带的输入字节；为空时省略。
+    ///   - operationLogEnabled: 是否在本次后台请求中启用操作日志。
+    func request(id: String, arguments: [String], inputData: Data?, operationLogEnabled: Bool) throws -> Data {
         lock.lock()
         defer { lock.unlock() }
         guard started, process.isRunning else {
             throw NSError(domain: "PPFlowHub.OrderService", code: 1, userInfo: [NSLocalizedDescriptionKey: "订单后台服务未运行"])
         }
-        var request: [String: Any] = ["id": id, "arguments": arguments]
+        var request: [String: Any] = ["id": id, "arguments": arguments, "operation_log_enabled": operationLogEnabled]
         if let inputData {
             request["input_base64"] = inputData.base64EncodedString()
         }
@@ -1634,10 +1937,9 @@ private final class ResidentOrderServiceClient {
                 outputBuffer.removeSubrange(...newline)
                 return Data(line)
             }
-            // ``readData(ofLength:)`` calls ``synchronizeFile`` internally on
-            // this macOS FileHandle implementation and can raise
-            // NSFileHandleOperationException for a pipe. ``availableData``
-            // is the pipe-safe blocking read used by the stderr stream too.
+            // 当前 macOS 的 FileHandle 实现中，readData(ofLength:) 内部会调用 synchronizeFile，
+            // 用于管道时可能抛出 NSFileHandleOperationException；availableData 可安全阻塞读取管道，
+            // 标准错误流也使用同一方式。
             let chunk = output.fileHandleForReading.availableData
             if chunk.isEmpty {
                 throw NSError(domain: "PPFlowHub.OrderService", code: 2, userInfo: [NSLocalizedDescriptionKey: "订单后台服务已退出"])
@@ -1646,6 +1948,8 @@ private final class ResidentOrderServiceClient {
         }
     }
 
+    /// 向常驻订单服务发送关闭请求，等待退出并清除进度监听。
+    /// 无参数。
     func stop() {
         lock.lock()
         guard started else {
@@ -1731,22 +2035,31 @@ final class AppModel: ObservableObject {
         var failureMessage: String = ""
         var completedNames: Set<String> = []
     }
+    @Published var pendingCheckStatus = ""
+    @Published var pendingSourceFailures: [String: String] = [:]
     @Published private(set) var pendingMappingResumeStates: [String: PendingMappingResumeState] = [:]
 
+    /// 读取指定待处理项的映射完成进度和失败状态。
+    /// - Parameters:
+    ///   - item: 待处理队列项。
     func pendingMappingResumeState(for item: PendingCenterItem) -> PendingMappingResumeState? {
         pendingMappingResumeStates[item.id]
     }
 
+    /// 生成待处理项的映射恢复状态提示。
+    /// - Parameters:
+    ///   - item: 待处理队列项。
     func pendingMappingResumeMessage(for item: PendingCenterItem) -> String {
         pendingMappingResumeState(for: item)?.failureMessage ?? ""
     }
 
+    /// 读取当前映射恢复上下文对应的完成与剩余状态。
     var activePendingMappingResumeState: PendingMappingResumeState? {
         guard let context = pendingResumeContext else { return nil }
         return pendingMappingResumeStates[context.pendingItemID]
     }
 
-    // Retain the source item independently of changing selection and mapping sheets.
+    // 独立保存原始来源项，不受后续选择或映射面板变化影响。
     private struct PendingResumeContext {
         let id = UUID()
         let pendingItemID: String
@@ -1829,6 +2142,9 @@ final class AppModel: ObservableObject {
     @Published var serverWritePreviewNeedsRefresh = false
     @Published var serverHardwareMappingRequirements: [ServerHardwareMappingRequirement] = []
     @Published var showServerWriteConfirmation = false
+    @Published var aicncPreview: [String: Any] = [:]
+    @Published var showAicncConfirmation = false
+    @Published var aicncNotice = ""
     @Published var serverWriteConfirmationNotice = ""
     @Published var serverWriteConfirmationNoticeIsError = false
     @Published var serverWriteConfirmationFinished = false
@@ -1884,15 +2200,17 @@ final class AppModel: ObservableObject {
     private var pendingOrderDetailItem: OrderDashboardItem?
     private var orderDetailRetryScheduled = false
     private var dashboardStartupStarted = false
-    // The order-center activity list is a view of this AppModel session, not
-    // a replay of historical sync_changes rows from the central database.
+    // 订单中心活动列表呈现当前 AppModel 会话，不回放中央数据库的历史 sync_changes 行。
     private let dashboardSessionStartedAt = Date()
     private var residentOrderService: ResidentOrderServiceClient?
 
+    /// 按用户看到的发生顺序追加本会话活动，并按身份去重。
+    /// - Parameters:
+    ///   - oldValue: 变化前的看板活动列表。
     private func appendNewDashboardActivityToSession(oldValue: [InventoryStep]) {
         let oldIDs = Set(oldValue.map(\.id))
-        // dashboardActivity is newest-first; append the batch oldest-first to
-        // preserve the order in which the user saw backend changes arrive.
+        // dashboardActivity 按新到旧排列；追加批次时按旧到新遍历，
+        // 保留用户看到后端变化到达的顺序。
         for step in dashboardActivity.reversed() where !oldIDs.contains(step.id) {
             guard dashboardSessionActivityIDs.insert(step.id).inserted else { continue }
             let key = step.sourceKey ?? "uuid:\(step.id.uuidString)"
@@ -1914,6 +2232,7 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 合并各来源操作详情和去重后的实时进度文字。
     var dashboardMessageOperationDetails: [String: [String]] {
         var merged = dashboardOperationDetails
         for (source, progress) in dashboardOperationProgress {
@@ -1926,6 +2245,9 @@ final class AppModel: ObservableObject {
         return merged
     }
 
+    /// 按操作来源取得本条消息关联的人工处理文件路径。
+    /// - Parameters:
+    ///   - source: 看板操作来源键，如 aimes、server、inventory 或 sync。
     private func dashboardSessionManualPaths(for source: String) -> [String] {
         switch source {
         case "aimes":
@@ -1939,6 +2261,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 为 AIMES 或 Server 操作生成待处理详情和扫描摘要。
+    /// - Parameters:
+    ///   - source: 看板操作来源键，如 aimes、server、inventory 或 sync。
+    ///   - status: 业务状态文字或状态代码。
     private func dashboardSessionContextDetails(for source: String, status: String? = nil) -> [String] {
         switch source {
         case "aimes":
@@ -1963,12 +2289,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 将新出现的终态结果记录到会话消息，避免同一操作重复记录。
+    /// - Parameters:
+    ///   - source: 看板操作来源键，如 aimes、server、inventory 或 sync。
+    ///   - status: 业务状态文字或状态代码。
+    ///   - time: 消息或步骤的显示时间。
     private func recordDashboardStatus(_ source: String, status: String, time: String) {
         guard ["✅", "⚠️", "❌"].contains(where: { status.hasPrefix($0) }) else {
-            // A later terminal result after an in-progress message is a new
-            // event even when the text repeats an earlier result. The epoch
-            // only changes for beginDashboardOperation, so clear the marker
-            // here for refresh/sync paths that do not begin a new operation.
+            // 进行中消息之后出现的终态属于新事件，即使文字与早先结果重复。
+            // 操作轮次只在 beginDashboardOperation 中变化，因此在此清除标记，
+            // 覆盖未显式启动新操作的刷新或同步路径。
             dashboardLastRecordedStatus.removeValue(forKey: source)
             dashboardLastRecordedStatusEpoch.removeValue(forKey: source)
             return
@@ -2003,6 +2333,13 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// 为首次完成的独立阶段追加消息，排除总计阶段。
+    /// - Parameters:
+    ///   - source: 看板操作来源键，如 aimes、server、inventory 或 sync。
+    ///   - stage: 订单或操作的当前阶段标识。
+    ///   - label: 阶段、项目或信息行的显示名称。
+    ///   - duration: 操作耗时，单位为秒。
+    ///   - time: 消息或步骤的显示时间。
     private func recordDashboardStageCompletion(
         _ source: String,
         stage: String,
@@ -2040,6 +2377,7 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// 将扫描变化、当前问题及 AIMES 异常组合为待处理队列。
     var pendingCenterItems: [PendingCenterItem] {
         buildPendingCenterItems(
             serverChanges: pendingServerChanges,
@@ -2049,62 +2387,80 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// 判断是否存在可查看或撤销的 AIMES 历史人工决定。
     var hasAimesHistory: Bool {
         !ignoredAimesFactories.isEmpty || !assignedAimesFactories.isEmpty
     }
 
+    /// 检查是否已有选中订单和材料预览。
     var orderPreviewReady: Bool {
         !selectedOrderId.isEmpty && !orderMaterials.isEmpty
     }
 
+    /// 在订单空闲且详情已载入、存在正数量材料时允许计算成本。
     var canCalculateOrderCost: Bool {
         !selectedOrderId.isEmpty && !orderRunning && !orderDetailWaiting
             && orderMaterials.contains { $0.quantity > 0 }
     }
 
+    /// 判断订单已选择且后台空闲，是否允许生成 Traveler。
     var orderCanGenerateTraveler: Bool {
         !orderRunning && !selectedOrderId.isEmpty
     }
 
+    /// 检查当前 Traveler 路径是否指向存在的文件。
     var orderTravelerOpenReady: Bool {
         orderTravelerOpenActionReady(existingTravelerPath: orderExistingTravelerPath)
     }
 
+    /// 去掉自有订单来源目录首尾空白。
     var activeOwnedSourceRoot: String {
         sourceRoot.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// 从自有来源根目录推导同级 CUT TO SIZE 目录。
     var activeCutToSizeRoot: String {
         return URL(fileURLWithPath: sourceRoot, isDirectory: true)
             .deletingLastPathComponent()
             .appendingPathComponent("CUT TO SIZE", isDirectory: true).path
     }
 
+    /// 去掉本地订单根目录首尾空白。
     var activeOrderRoot: String {
         orderRoot.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// 去掉服务器备份根目录首尾空白。
     var activeBackupRoot: String {
         backupRoot.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// 取得本机数据库备份目录。
     var databaseBackupRoot: String {
         NSHomeDirectory() + "/Documents/pp-flowhub/data/database-backups"
     }
 
+    /// 载入设置、待办和助手用量，记录启动事件并启动常驻订单服务。
+    /// 无参数。
     init() {
         loadSettings()
         OperationLogWriter.shared.setEnabled(operationLogEnabled)
         OperationLogWriter.shared.record(
             "app.started",
             message: "App 启动",
-            details: ["operation_log_enabled": operationLogEnabled]
+            details: [
+                "operation_log_enabled": operationLogEnabled,
+                "app_version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "未知",
+                "app_build": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "未知",
+            ]
         )
         loadTodoItems()
         loadAssistantUsage()
         startResidentOrderService()
     }
 
+    /// 启动常驻订单服务并连接进度日志，失败时记录诊断事件。
+    /// 无参数。
     private func startResidentOrderService() {
         guard residentOrderService == nil else { return }
         let service = ResidentOrderServiceClient { [weak self] chunk in
@@ -2126,6 +2482,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 读取备份状态，在当天缺少成功备份时显示提醒。
+    /// 无参数。
     func checkBackupReminder() {
         runOrder(["backup-status"]) { object in
             if object["requires_user_attention"] as? Bool == true {
@@ -2135,6 +2493,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 空闲时调用数据库备份命令，并更新备份结果与提醒。
+    /// 无参数。
     func performBackup() {
         guard !orderRunning else {
             backupStatus = "⚠️ 当前正在扫描或同步，请等待任务完成后再备份。"
@@ -2153,16 +2513,20 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 取得 App 非敏感设置 JSON 文件的位置。
     private var settingsURL: URL {
         URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent("Documents/pp-flowhub/data/settings.json")
     }
 
+    /// 取得本地待办 JSON 文件的位置。
     var todoDataURL: URL {
         URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent("Documents/pp-flowhub/data/todo-items.json")
     }
 
+    /// 从本地 JSON 读取待办及日期，解析失败时保留错误提示。
+    /// 无参数。
     func loadTodoItems() {
         guard FileManager.default.fileExists(atPath: todoDataURL.path) else {
             todoItems = []
@@ -2178,6 +2542,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 校验非空待办内容，添加记录并保存本地待办文件。
+    /// - Parameters:
+    ///   - content: 待办的任务内容。
+    ///   - deadline: 待办截止时间；为空表示不设截止时间。
     func addTodo(content: String, deadline: Date?) {
         logUserAction("点击添加待办", details: ["deadline_present": deadline != nil])
         let value = content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2189,6 +2557,11 @@ final class AppModel: ObservableObject {
         saveTodoItems()
     }
 
+    /// 按待办身份更新内容和截止日期，并保存到本地文件。
+    /// - Parameters:
+    ///   - item: 待办记录。
+    ///   - content: 待办的任务内容。
+    ///   - deadline: 待办截止时间；为空表示不设截止时间。
     func updateTodo(_ item: TodoItem, content: String, deadline: Date?) {
         logUserAction("点击保存待办编辑", details: ["deadline_present": deadline != nil])
         let value = content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2201,6 +2574,9 @@ final class AppModel: ObservableObject {
         saveTodoItems()
     }
 
+    /// 切换待办完成时间并持久化列表。
+    /// - Parameters:
+    ///   - item: 待办记录。
     func toggleTodoCompletion(_ item: TodoItem) {
         logUserAction("点击切换待办完成状态")
         guard let index = todoItems.firstIndex(where: { $0.id == item.id }) else { return }
@@ -2208,12 +2584,17 @@ final class AppModel: ObservableObject {
         saveTodoItems()
     }
 
+    /// 按身份删除待办并保存列表。
+    /// - Parameters:
+    ///   - item: 待办记录。
     func deleteTodo(_ item: TodoItem) {
         logUserAction("点击删除待办")
         todoItems.removeAll { $0.id == item.id }
         saveTodoItems()
     }
 
+    /// 将待办及 ISO 日期原子写入本地 JSON 文件。
+    /// 无参数。
     private func saveTodoItems() {
         do {
             try FileManager.default.createDirectory(
@@ -2243,6 +2624,8 @@ final class AppModel: ObservableObject {
         return formatter
     }()
 
+    /// 读取已保存配置并应用到模型，返回读取是否成功。
+    /// 无参数。
     @discardableResult
     func loadSettings() -> Bool {
         guard let data = try? Data(contentsOf: settingsURL),
@@ -2263,6 +2646,8 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    /// 保存 App 路径、日期和日志开关等非敏感配置。
+    /// 无参数。
     func saveSettings() {
         logUserAction("点击保存设置")
         let values: [String: Any] = [
@@ -2292,11 +2677,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 取得操作日志页面读取的日志文件位置。
     var operationLogURL: URL {
         URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent("Documents/pp-flowhub/data/operation-log.jsonl")
     }
 
+    /// 更新并保存日志开关，同时记录开关变化。
+    /// - Parameters:
+    ///   - enabled: 是否启用操作日志。
     func setOperationLogEnabled(_ enabled: Bool) {
         guard enabled != operationLogEnabled else { return }
         if !enabled {
@@ -2319,10 +2708,14 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 刷新设置页显示的操作日志文件大小。
+    /// 无参数。
     func refreshOperationLogInfo() {
         operationLogSizeText = OperationLogReader.fileSizeText(from: operationLogURL)
     }
 
+    /// 执行近期日志清理并更新设置页结果提示。
+    /// 无参数。
     func trimOperationLog() {
         guard !orderRunning && !inventoryRunning && !assistantRunning else {
             settingsStatus = "⚠️ 当前有任务正在运行，请完成后再清理操作日志。"
@@ -2346,10 +2739,18 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 通过统一日志入口记录用户动作及其附加信息。
+    /// - Parameters:
+    ///   - action: 操作按钮或日志事件的名称。
+    ///   - details: 写入日志的附加结构化信息。
     func logUserAction(_ action: String, details: [String: Any] = [:]) {
         OperationLogWriter.shared.record("user.action", message: action, details: details)
     }
 
+    /// 生成操作标识并记录开始事件，供 App 和后端关联日志。
+    /// - Parameters:
+    ///   - name: 操作的业务名称。
+    ///   - details: 写入日志的附加结构化信息。
     func newOperationID(_ name: String, details: [String: Any] = [:]) -> String {
         let operationID = UUID().uuidString
         OperationLogWriter.shared.record(
@@ -2361,6 +2762,12 @@ final class AppModel: ObservableObject {
         return operationID
     }
 
+    /// 记录操作结束状态及耗时，刷新日志大小显示。
+    /// - Parameters:
+    ///   - operationID: 关联 App 与后端日志的操作标识。
+    ///   - name: 操作的业务名称。
+    ///   - startedAt: 记录或操作的开始时间。
+    ///   - exitStatus: 后端进程退出状态码。
     private func finishOperationLog(
         _ operationID: String,
         name: String,
@@ -2379,6 +2786,9 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// 合并系统环境与当前操作的日志关联变量。
+    /// - Parameters:
+    ///   - operationID: 关联 App 与后端日志的操作标识。
     func environmentForOperation(_ operationID: String) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         for (key, value) in OperationLogWriter.shared.environment(operationID: operationID) {
@@ -2387,6 +2797,8 @@ final class AppModel: ObservableObject {
         return environment
     }
 
+    /// 保存设置并向后端同步业务配置，更新保存结果。
+    /// 无参数。
     func saveAllSettings() {
         logUserAction("点击保存全部配置")
         saveSettings()
@@ -2411,6 +2823,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 将库存系统密码保存到 macOS 钥匙串并清空界面密码。
+    /// 无参数。
     func saveJdyPassword() {
         logUserAction("点击更新库存系统钥匙串密码", details: ["input_present": !jdyPassword.isEmpty])
         let account = jdyUsername.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2462,6 +2876,8 @@ final class AppModel: ObservableObject {
         settingsStatus = "✅ 库存系统密码已保存到本机登录钥匙串，并通过回读验证。"
     }
 
+    /// 将 AIMES 密码保存到 macOS 钥匙串并更新提示。
+    /// 无参数。
     func saveAimesPassword() {
         logUserAction("点击保存 AIMES 密码", details: ["input_present": !aimesPassword.isEmpty])
         let account = aimesUsername.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2483,6 +2899,10 @@ final class AppModel: ObservableObject {
         settingsStatus = "✅ AIMES 密码已保存到 macOS 钥匙串。"
     }
 
+    /// 解析后端订单事实、问题与进度，更新看板并可合并会话活动。
+    /// - Parameters:
+    ///   - object: 后端返回的 JSON 结果对象。
+    ///   - includeChanges: 是否同时解析或应用变化活动。
     private func applyDashboardObject(_ object: [String: Any], includeChanges: Bool = true) {
         applyDashboardOperationTrace(object)
         applyCurrentIssues(from: object)
@@ -2568,7 +2988,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 解析 Server 写入预览或五金来源冲突，打开相应确认界面。
+    /// - Parameters:
+    ///   - object: 后端返回的 JSON 结果对象。
     private func presentServerWritePreview(_ object: [String: Any]) {
+        if let preview = object["aicnc_preview"] as? [String: Any] {
+            aicncPreview = preview
+            aicncNotice = ""
+            showAicncConfirmation = true
+            return
+        }
         if let request = object["hardware_source_selection"] as? [String: Any] {
             presentHardwareSourceSelection(request)
             return
@@ -2589,6 +3018,9 @@ final class AppModel: ObservableObject {
         dashboardSyncStatus = dashboardServerStatus
     }
 
+    /// 保存五金来源选择请求并显示冲突候选。
+    /// - Parameters:
+    ///   - request: 后端返回的五金来源选择请求。
     private func presentHardwareSourceSelection(_ request: [String: Any]) {
         hardwareSourceFolders = request["source_folders"] as? [String] ?? []
         hardwareSourceIncludeHardware = request["include_hardware"] as? Bool ?? true
@@ -2600,18 +3032,22 @@ final class AppModel: ObservableObject {
         dashboardSyncStatus = dashboardServerStatus
     }
 
+    /// 检查五金来源冲突是否已全部选定，允许重新生成预览。
     var canResumeHardwareSourcePreview: Bool {
         !orderRunning && !hardwareSourceConflicts.isEmpty && hardwareSourceConflicts.allSatisfy { conflict in
             conflict.candidates.contains { $0.id == hardwareSourceChoices[conflict.id] }
         }
     }
 
+    /// 提交已选择的五金来源并重新生成 Server 写入预览。
+    /// 无参数。
     func confirmHardwareSourceSelection() {
         guard canResumeHardwareSourcePreview else { return }
         resumeAfterHardwareSourceDismissal = true
         showHardwareSourceSelection = false
     }
 
+    /// 将当前五金来源选择编码为后端命令参数。
     private var hardwareSourceChoiceArguments: [String] {
         guard !hardwareSourceChoices.isEmpty,
               let data = try? JSONSerialization.data(withJSONObject: hardwareSourceChoices, options: [.sortedKeys]),
@@ -2619,6 +3055,8 @@ final class AppModel: ObservableObject {
         return ["--hardware-source-choices", json]
     }
 
+    /// 处理五金来源面板关闭后的预览衔接与状态清理。
+    /// 无参数。
     func hardwareSourceSelectionDidDismiss() {
         guard resumeAfterHardwareSourceDismissal else { return }
         resumeAfterHardwareSourceDismissal = false
@@ -2641,6 +3079,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 从后端当前问题列表更新界面问题状态。
+    /// - Parameters:
+    ///   - object: 后端返回的 JSON 结果对象。
     private func applyCurrentIssues(from object: [String: Any]) {
         guard let rows = object["current_issues"] as? [[String: Any]] else { return }
         currentIssues = rows.compactMap { row in
@@ -2658,6 +3099,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 将后端操作追踪详情写入各来源的看板展示状态。
+    /// - Parameters:
+    ///   - object: 后端返回的 JSON 结果对象。
     private func applyDashboardOperationTrace(_ object: [String: Any]) {
         guard let trace = object["operation_trace"] as? [String: Any] else { return }
         for entry in trace {
@@ -2670,6 +3114,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 更新 AIMES 待确认、忽略和归属列表，并按需打开待处理中心。
+    /// - Parameters:
+    ///   - object: 后端返回的 JSON 结果对象。
+    ///   - presentIfNeeded: 有待处理问题时是否主动打开面板。
     private func applyAimesReviewObject(_ object: [String: Any], presentIfNeeded: Bool = true) {
         pendingAimesReviews = aimesReviewItems(object, key: "aimes_issues")
         ignoredAimesFactories = aimesReviewItems(object, key: "ignored_aimes")
@@ -2688,12 +3136,19 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 待处理队列为空时关闭相关提示和面板。
+    /// 无参数。
     private func closePendingCenterIfEmpty() {
-        if pendingCenterItems.isEmpty && !hasAimesHistory {
+        if pendingCenterItems.isEmpty {
             showPendingCenterPrompt = false
         }
     }
 
+    /// 开始或延续来源操作的计时，初始化进度和去重状态。
+    /// - Parameters:
+    ///   - source: 看板操作来源键，如 aimes、server、inventory 或 sync。
+    ///   - label: 阶段、项目或信息行的显示名称。
+    ///   - continuing: 是否沿用当前操作的计时和进度。
     private func beginDashboardOperation(_ source: String, label: String, continuing: Bool = false) {
         if !continuing {
             dashboardOperationStageDurations[source] = []
@@ -2709,15 +3164,22 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// 暴露各来源操作的单调时钟起点，供消息区独立计算耗时。
     var dashboardOperationStartUptimes: [String: TimeInterval] {
         dashboardOperationStartedAt.mapValues(\.startedAtUptime)
     }
 
+    /// 按单调时钟计算指定来源操作的已运行秒数。
+    /// - Parameters:
+    ///   - source: 看板操作来源键，如 aimes、server、inventory 或 sync。
     func dashboardElapsedTime(_ source: String) -> TimeInterval? {
         guard let start = dashboardOperationStartedAt[source] else { return nil }
         return max(0, ProcessInfo.processInfo.systemUptime - start.startedAtUptime)
     }
 
+    /// 结束来源操作计时，保存实际耗时及适用的后端阶段明细。
+    /// - Parameters:
+    ///   - source: 看板操作来源键，如 aimes、server、inventory 或 sync。
     private func finishDashboardOperation(_ source: String) {
         guard let start = dashboardOperationStartedAt.removeValue(forKey: source) else { return }
         let duration = max(0, ProcessInfo.processInfo.systemUptime - start.startedAtUptime)
@@ -2727,10 +3189,13 @@ final class AppModel: ObservableObject {
         dashboardOperationDurations[source] = stages.reduce(0) { $0 + $1.duration }
     }
 
-    /// Preserve the elapsed time the user experienced while also showing the
-    /// backend's non-overlapping business phases.  Process launch, JSON
-    /// transfer, and UI application are deliberately retained as their own
-    /// residual phase instead of being silently lost from the total.
+    /// 保留用户实际经历的总耗时，同时显示后端互不重叠的业务阶段。
+    /// 进程启动、JSON 传输和 UI 应用保留为独立的剩余阶段，不从总耗时中悄然丢弃。
+    /// 结束来源操作计时，保存实际耗时及适用的后端阶段明细。
+    /// - Parameters:
+    ///   - source: 看板操作来源键，如 aimes、server、inventory 或 sync。
+    ///   - backendSeconds: 后端报告的总耗时，单位为秒。
+    ///   - stages: 后端返回的阶段名称与耗时记录。
     private func finishDashboardOperation(
         _ source: String,
         backendSeconds: Double,
@@ -2757,6 +3222,10 @@ final class AppModel: ObservableObject {
         dashboardOperationDurations[source] = total
     }
 
+    /// 结束来源操作计时，保存实际耗时及适用的后端阶段明细。
+    /// - Parameters:
+    ///   - source: 看板操作来源键，如 aimes、server、inventory 或 sync。
+    ///   - object: 后端返回的 JSON 结果对象。
     private func finishDashboardOperation(_ source: String, using object: [String: Any]) {
         guard let timing = object["operation_timing"] as? [String: Any],
               let seconds = (timing["total_seconds"] as? NSNumber)?.doubleValue else {
@@ -2770,10 +3239,18 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// 移除指定来源的活动计时起点。
+    /// - Parameters:
+    ///   - source: 看板操作来源键，如 aimes、server、inventory 或 sync。
     private func discardDashboardOperationTimer(_ source: String) {
         dashboardOperationStartedAt.removeValue(forKey: source)
     }
 
+    /// 应用后端返回的权威耗时及独立阶段明细。
+    /// - Parameters:
+    ///   - source: 看板操作来源键，如 aimes、server、inventory 或 sync。
+    ///   - seconds: 后端确认的耗时，单位为秒。
+    ///   - stages: 后端返回的阶段名称与耗时记录。
     private func applyAuthoritativeDashboardTiming(
         _ source: String,
         seconds: Double,
@@ -2785,12 +3262,16 @@ final class AppModel: ObservableObject {
         dashboardOperationStageDurations[source] = parsed
     }
 
+    /// 在看板尚未载入时启动本地快照与后续刷新流程。
+    /// 无参数。
     func startOrderDashboard() {
         guard !dashboardStartupStarted else { return }
         dashboardStartupStarted = true
         loadOrderDashboardCache()
     }
 
+    /// 载入订单本地快照，然后衔接每日备份和外部刷新。
+    /// 无参数。
     func loadOrderDashboardCache() {
         beginDashboardOperation("sync", label: "读取本地订单缓存")
         dashboardSyncStatus = "正在读取本地订单缓存…"
@@ -2801,10 +3282,8 @@ final class AppModel: ObservableObject {
         }) { object in
             self.finishDashboardOperation("sync")
             self.applyDashboardObject(object, includeChanges: false)
-            // The cache is only an initial display snapshot.  Do not open the
-            // actionable pending center until the following AIMES/Server
-            // startup refresh has completed; otherwise the sheet opens while
-            // orderRunning is still true and presents stale data as locked UI.
+            // 缓存仅用于初始展示快照。后续 AIMES/Server 启动刷新完成前，不打开可操作的待处理中心；
+            // 否则面板在 orderRunning 仍为真时打开，会把过时数据呈现为锁定界面。
             self.applyAimesReviewObject(object, presentIfNeeded: false)
             self.dashboardSyncStatus = "✅ 本地订单缓存已显示"
             self.runDailyBackupAfterLocalCache {
@@ -2813,6 +3292,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 在出库完成后刷新订单事实；服务忙时登记延迟刷新。
+    /// 无参数。
     func refreshDashboardOrdersAfterOutbound() {
         guard !orderRunning else {
             pendingDashboardOutboundRefresh = true
@@ -2832,6 +3313,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 订单服务空闲后补做待执行的出库后刷新。
+    /// 无参数。
     private func startPendingDashboardOutboundRefreshIfNeeded() {
         guard pendingDashboardOutboundRefresh else { return }
         pendingDashboardOutboundRefresh = false
@@ -2840,6 +3323,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 检查并执行每日数据库备份，结束后继续启动流程。
+    /// - Parameters:
+    ///   - completion: 备份检查结束后继续启动流程的回调。
     private func runDailyBackupAfterLocalCache(completion: @escaping () -> Void) {
         beginDashboardOperation("sync", label: "检查本机数据库备份")
         dashboardSyncStatus = "正在检查本机数据库备份…"
@@ -2879,6 +3365,38 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 重新校验当前问题，失败保留提示；核对成功才使用新的问题清单。
+    func recheckPendingIssue(_ issue: CurrentIssue) {
+        guard !orderRunning, !inventoryRunning else { return }
+        pendingCheckStatus = "正在重新检查…"
+        runOrder(["recheck-issue", "--issue-key", issue.id], onFailure: {
+            self.pendingCheckStatus = "检查未通过：\(self.orderError)"
+        }) { object in
+            self.applyCurrentIssues(from: object)
+            self.pendingCheckStatus = "检查通过，已移除该问题提示"
+        }
+    }
+
+    /// 仅核对外部单据并恢复本地事务，不发起外部出库。
+    func recoverPendingInventory(_ issue: CurrentIssue) {
+        guard !orderRunning, !inventoryRunning, issue.kind == "inventory_recovery" else { return }
+        pendingCheckStatus = "正在核对单据并恢复本地记录…"
+        let operationID = String(issue.id.dropFirst("inventory_recovery:".count))
+        runInventory(["recover-operation", "--operation-id", operationID], onFailure: { reason in
+            self.pendingCheckStatus = "尚未完成核对：\(reason)"
+        }) { object in
+            self.pendingCheckStatus = object["message"] as? String ?? "已核对并恢复本地记录，未再次扣库存"
+            self.runOrder(["list-index"], onFailure: {
+                self.pendingCheckStatus = "恢复已完成，但列表刷新失败，请重新检查：\(self.orderError)"
+            }) { result in
+                self.applyDashboardObject(result, includeChanges: false)
+            }
+        }
+    }
+
+    /// 根据问题类型选择自动解决命令或映射处理入口。
+    /// - Parameters:
+    ///   - issue: 待判断或处理的当前业务问题。
     func autoResolveCurrentIssue(_ issue: CurrentIssue) {
         guard !orderRunning else { return }
         beginDashboardOperation("sync", label: "自动处理当前问题")
@@ -2894,6 +3412,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 将当前问题标记为已处理或指定订单归属，并应用返回状态。
+    /// - Parameters:
+    ///   - issue: 待判断或处理的当前业务问题。
+    ///   - orderID: 目标业务订单号。
     func resolveCurrentIssue(_ issue: CurrentIssue, orderID: String) {
         let trimmed = orderID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard (issue.kind != "factory_ownership" || !trimmed.isEmpty), !orderRunning else { return }
@@ -2912,8 +3434,13 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 调用 AIMES 同步，更新待确认及阶段耗时，并按需继续扫描 Server。
+    /// - Parameters:
+    ///   - force: 是否强制重新访问 AIMES。
+    ///   - scanServerAfter: AIMES 同步后是否继续扫描 Server。
     func syncDashboardAimes(force: Bool, scanServerAfter: Bool = false) {
         guard !orderRunning else { return }
+        pendingCheckStatus = "正在同步 AIMES 并检查…"
         logUserAction(force ? "点击再次获取 AIMES" : "触发 AIMES 后台获取", details: ["force": force])
         beginDashboardOperation("aimes", label: "获取 AIMES")
         dashboardAimesStatus = force ? "正在获取 AIMES…" : "正在检查今日 AIMES 获取记录…"
@@ -2924,6 +3451,8 @@ final class AppModel: ObservableObject {
             self.finishDashboardOperation("aimes")
             let message = businessFriendlyMessage(self.orderError, operation: "获取 AIMES 数据")
             self.aimesFailureAlert = message
+            self.pendingSourceFailures["AIMES"] = message
+            self.pendingCheckStatus = "AIMES 检查失败，状态尚未确认"
             self.dashboardAimesStatus = "⚠️ \(message)"
             self.dashboardSyncStatus = self.dashboardAimesStatus
             if scanServerAfter { self.scanDashboardServer(background: true) }
@@ -2940,6 +3469,19 @@ final class AppModel: ObservableObject {
                 self.finishDashboardOperation("aimes")
             }
             self.applyAimesReviewObject(object, presentIfNeeded: !scanServerAfter)
+            let check = object["aimes"] as? [String: Any] ?? [:]
+            if check["succeeded"] as? Bool == true {
+                self.pendingSourceFailures.removeValue(forKey: "AIMES")
+            } else {
+                self.pendingSourceFailures["AIMES"] = check["error"] as? String ?? "同步未完成"
+            }
+            if check["skipped_today"] as? Bool == true {
+                self.pendingCheckStatus = "今日已成功获取 AIMES，本次使用本地数据；需要最新检查时可手动获取"
+            } else {
+                self.pendingCheckStatus = check["succeeded"] as? Bool == true
+                    ? "AIMES 同步检查完成，已按最新结果更新"
+                    : "AIMES 检查未完成，状态尚未确认：\(check["error"] as? String ?? "请重试")"
+            }
             let attempted = (aimes["attempted"] as? NSNumber)?.boolValue ?? false
             let succeeded = (aimes["succeeded"] as? NSNumber)?.boolValue ?? false
             let skipped = (aimes["skipped_today"] as? NSNumber)?.boolValue ?? false
@@ -2972,6 +3514,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 切换一个 AIMES 待确认项的选择状态。
+    /// - Parameters:
+    ///   - item: AIMES 人工确认记录。
     func toggleAimesReviewSelection(_ item: AimesReviewItem) {
         logUserAction("点击选择 AIMES 待确认记录")
         if selectedAimesReviewIDs.contains(item.id) {
@@ -2982,6 +3527,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 将所选 AIMES 工厂单标记为忽略并刷新待处理列表。
+    /// 无参数。
     func ignoreSelectedAimesFactories() {
         logUserAction("点击忽略选中的 AIMES 工厂单")
         let keys = (pendingAimesReviews + aimesFormatWarnings)
@@ -3008,6 +3555,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 撤销指定 AIMES 工厂单的忽略记录。
+    /// - Parameters:
+    ///   - item: AIMES 人工确认记录。
     func restoreAimesFactory(_ item: AimesReviewItem) {
         logUserAction("点击恢复 AIMES 工厂单提醒", details: ["factory_order_present": !item.factoryOrder.isEmpty])
         beginDashboardOperation("aimes", label: "恢复 AIMES 忽略记录")
@@ -3028,11 +3578,18 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 使用建议订单号执行工厂单人工归属确认。
+    /// - Parameters:
+    ///   - item: AIMES 人工确认记录。
     func assignAimesFactoryToSuggestedOrder(_ item: AimesReviewItem) {
         guard !item.suggestedOrderID.isEmpty else { return }
         assignAimesFactoryToOrder(item, orderID: item.suggestedOrderID)
     }
 
+    /// 保存工厂单的人工订单归属并刷新相关状态。
+    /// - Parameters:
+    ///   - item: AIMES 人工确认记录。
+    ///   - orderID: 目标业务订单号。
     func assignAimesFactoryToOrder(_ item: AimesReviewItem, orderID: String) {
         let trimmedOrderID = orderID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard !trimmedOrderID.isEmpty else { return }
@@ -3065,6 +3622,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 撤销指定工厂单的人工归属决定。
+    /// - Parameters:
+    ///   - item: AIMES 人工确认记录。
     func restoreAimesFactoryAssignment(_ item: AimesReviewItem) {
         logUserAction("点击撤销 AIMES 工厂单归属")
         beginDashboardOperation("aimes", label: "撤销 AIMES 工厂单归属")
@@ -3085,7 +3645,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 扫描 Server 文件变化并更新待处理状态，不确认材料或优化事实。
+    /// - Parameters:
+    ///   - background: 是否按后台扫描方式执行。
+    ///   - presentIfNeeded: 有待处理问题时是否主动打开面板。
     func scanDashboardServer(background: Bool = false, presentIfNeeded: Bool = true) {
+        pendingCheckStatus = "正在重新扫描 Server…"
         logUserAction(background ? "触发后台扫描 Server" : "点击扫描 Server", details: ["background": background])
         beginDashboardOperation("server", label: "扫描 Server")
         dashboardServerStatus = background ? "正在后台扫描 Server 变化…" : "正在扫描 Server 变化…"
@@ -3093,8 +3658,11 @@ final class AppModel: ObservableObject {
             self.finishDashboardOperation("server")
             self.dashboardServerStatus = "⚠️ \(businessFriendlyMessage(self.orderError, operation: "扫描 Server"))"
             self.dashboardSyncStatus = self.dashboardServerStatus
+            self.pendingSourceFailures["Server"] = self.orderError
+            self.pendingCheckStatus = "Server 检查失败，状态尚未确认：\(self.orderError)"
         }) { object in
             self.finishDashboardOperation("server", using: object)
+            self.pendingSourceFailures.removeValue(forKey: "Server")
             let server = object["server"] as? [String: Any] ?? [:]
             self.applyCurrentIssues(from: object)
             self.applyDashboardOperationTrace(object)
@@ -3102,8 +3670,8 @@ final class AppModel: ObservableObject {
             let rows = server["changes"] as? [[String: Any]] ?? []
             self.pendingServerChanges = serverChangePreviews(rows)
             self.selectedServerFolderPaths.removeAll()
-            // Discovery never confirms materials, optimization state, or XML
-            // baselines. Only the explicit material confirmation does that.
+            self.pendingCheckStatus = "Server 扫描完成；报表内容问题请使用对应项目的重新检查或预览入口"
+            // 发现文件不确认材料、优化状态或 XML 基线；只有明确的材料确认才会写入这些事实。
             if self.pendingServerChanges.isEmpty {
                 self.closePendingCenterIfEmpty()
                 self.dashboardServerStatus = "✅ Server 扫描完成，没有待处理变化"
@@ -3116,6 +3684,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 切换待处理 Server 文件夹的选择状态。
+    /// - Parameters:
+    ///   - folderPath: 目标来源文件夹路径。
     func toggleServerFolderSelection(_ folderPath: String) {
         logUserAction("点击选择 Server 文件夹")
         guard let group = serverFolderChangeGroups(pendingServerChanges).first(where: { $0.folderPath == folderPath }),
@@ -3128,11 +3699,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 清空所有已选 Server 文件夹。
+    /// 无参数。
     func clearServerFolderSelection() {
         logUserAction("点击取消全选 Server 文件夹")
         selectedServerFolderPaths.removeAll()
     }
 
+    /// 为所选待处理 Server 文件夹生成可确认的只读预览。
+    /// 无参数。
     func processPendingServerChanges() {
         logUserAction("点击自动处理待处理 Server 变化")
         let selectedFolders = selectedServerFolderPaths.filter { folder in
@@ -3160,12 +3735,50 @@ final class AppModel: ObservableObject {
             self.finishDashboardOperation("server")
             self.dashboardServerStatus = "⚠️ \(businessFriendlyMessage(self.orderError, operation: "预览 Server 变化"))"
             self.dashboardSyncStatus = self.dashboardServerStatus
+            if self.orderError.contains("未完成商品 SKU 处理："), let folder = selectedFolders.first {
+                self.requestInventoryMapping(folderPath: folder, message: self.orderError)
+            }
         }) { object in
             self.finishDashboardOperation("server", using: object)
             self.presentServerWritePreview(object)
         }
     }
 
+    /// 新版优化使用单独确认入口；返工补出库和正常材料分配由后端按最终选择执行。
+    func confirmAicnc(_ payload: [String: Any]) {
+        guard !orderRunning, !inventoryRunning,
+              let input = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        aicncNotice = "正在处理；返工材料将补开库存出库单…"
+        runOrder(["confirm-aicnc", "--confirm-write"], input: input, failureStatus: "优化处理失败", onFailure: {
+            self.aicncNotice = self.orderError
+        }) { object in
+            self.showAicncConfirmation = false
+            self.aicncPreview = [:]
+            self.refreshDashboardAfterServerWrite(processedFolders: [object["source_folder"] as? String ?? ""])
+        }
+    }
+
+    func ignoreAicnc() {
+        guard !orderRunning, !inventoryRunning, let folder = aicncPreview["source_folder"] as? String else { return }
+        runOrder(["ignore-aicnc", "--folder", folder, "--confirm-write"], failureStatus: "忽略优化失败", onFailure: {
+            self.aicncNotice = self.orderError
+        }) { _ in
+            self.showAicncConfirmation = false
+            self.refreshDashboardAfterServerWrite(processedFolders: [folder])
+        }
+    }
+
+    func dismissLegacyMonitorReminder() {
+        runOrder(["dismiss-legacy-monitor"], failureStatus: "关闭提醒失败") { _ in
+            self.currentIssues.removeAll { $0.id == "aicnc_legacy_retired" }
+            self.closePendingCenterIfEmpty()
+        }
+    }
+
+    /// 确认指定订单与工厂单的 Server 写入请求并更新界面。
+    /// - Parameters:
+    ///   - orderID: 目标业务订单号。
+    ///   - factoryOrder: 目标工厂单号。
     func confirmServerWrite(orderID: String, factoryOrder: String) {
         guard let preview = serverWritePreview, !orderRunning else { return }
         let trimmedOrder = orderID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
@@ -3245,6 +3858,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 确认无业务变化的 Server 预览并更新观察基线。
+    /// 无参数。
     func acknowledgeServerPreview() {
         guard let preview = serverWritePreview, preview.canAcknowledgeNoChanges,
               !orderRunning, !inventoryRunning, !serverWritePreviewNeedsRefresh,
@@ -3282,6 +3897,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 提交已核对的 Server 材料和五金预览，应用结果并刷新看板。
+    /// - Parameters:
+    ///   - skipHardwareOrderIDs: 本次确认中跳过五金写入的订单号集合。
     func confirmServerMaterialPreview(skipHardwareOrderIDs: Set<String> = []) {
         guard let preview = serverWritePreview, !orderRunning, !inventoryRunning, !serverWritePreviewNeedsRefresh else { return }
         beginDashboardOperation("server", label: "确认写入 Server 材料")
@@ -3350,6 +3968,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 写入后重新载入订单事实并移除已处理文件夹的待办。
+    /// - Parameters:
+    ///   - processedFolders: 本次已确认处理的来源文件夹。
     func refreshDashboardAfterServerWrite(processedFolders: [String]) {
         guard !orderRunning else { return }
         beginDashboardOperation("sync", label: "刷新 Server 写入后的订单列表")
@@ -3373,17 +3994,27 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 统一应用 Server 索引中的订单事实和 AIMES 待确认状态。
+    /// - Parameters:
+    ///   - object: 后端返回的 JSON 结果对象。
     private func applyServerIndexResult(_ object: [String: Any]) {
         applyDashboardObject(object, includeChanges: true)
         applyAimesReviewObject(object)
     }
 
+    /// 保存用户选择的文件夹，打开是否包含五金的处理选项。
+    /// - Parameters:
+    ///   - folderURL: 用户选择且可能带安全作用域的文件夹地址。
     func prepareSelectedServerFolder(_ folderURL: URL) {
         pendingServerFolderURL = folderURL
         includeHardwareForServerProcessing = true
         showServerProcessingOptions = true
     }
 
+    /// 持有文件访问权限生成指定 Server 文件夹的只读预览。
+    /// - Parameters:
+    ///   - folderURL: 用户选择且可能带安全作用域的文件夹地址。
+    ///   - includeHardware: 是否将工厂单五金纳入预览范围。
     func processSelectedServerFolder(_ folderURL: URL, includeHardware: Bool) {
         logUserAction("点击处理 Server 文件夹", details: ["include_hardware": includeHardware])
         guard !orderRunning else { return }
@@ -3416,7 +4047,7 @@ final class AppModel: ObservableObject {
                     ),
                     at: 0
                 )
-                // Mapping errors can arise only in the in-memory preview, without a pending-center item.
+                // 映射错误可能仅存在于内存预览中，此时没有对应待处理项。
                 if self.orderError.contains("未完成商品 SKU 处理：") {
                     self.requestInventoryMapping(folderPath: folderPath, message: self.orderError, includeHardware: includeHardware)
                 }
@@ -3428,8 +4059,17 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 登记忽略临时文件夹，并从当前待处理列表移除。
+    /// - Parameters:
+    ///   - folderPath: 目标来源文件夹路径。
     func ignoreServerFolder(_ folderPath: String) {
         guard !orderRunning, !inventoryRunning else { return }
+        if serverFolderChangeGroups(pendingServerChanges).first(where: { $0.folderPath == folderPath })?.changes.contains(where: { $0.handlingMode == "aicnc" }) == true {
+            runOrder(["ignore-aicnc", "--folder", folderPath, "--confirm-write"], failureStatus: "忽略优化失败") { _ in
+                self.refreshDashboardAfterServerWrite(processedFolders: [folderPath])
+            }
+            return
+        }
         logUserAction("点击忽略 Server 临时文件夹")
         beginDashboardOperation("server", label: "忽略临时文件夹")
         dashboardServerStatus = "正在保存忽略记录：\(displayPathName(folderPath))…"
@@ -3449,6 +4089,11 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 登记临时文件夹已外部人工处理及参考订单、单据。
+    /// - Parameters:
+    ///   - folderPath: 目标来源文件夹路径。
+    ///   - referenceOrderIDs: 与临时来源关联的参考订单号。
+    ///   - outboundDocument: 已在外部人工处理的出库单据号。
     func markTemporaryFolderManual(_ folderPath: String, referenceOrderIDs: [String], outboundDocument: String) {
         logUserAction("点击登记文件夹已在外部人工出库")
         guard !orderRunning, !inventoryRunning else { return }
@@ -3481,6 +4126,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 读取 Traveler 文件列表和商品目录摘要，保留仍有效的选择。
+    /// 无参数。
     func loadInventory() {
         logUserAction("点击刷新 Traveler 列表")
         beginInventoryOperation("刷新 Traveler 列表")
@@ -3524,6 +4171,11 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 记录受阻来源及恢复上下文，打开剩余 SKU 映射工作区。
+    /// - Parameters:
+    ///   - folderPath: 目标来源文件夹路径。
+    ///   - message: 需要解析、记录或显示的业务消息。
+    ///   - includeHardware: 是否将工厂单五金纳入预览范围。
     func requestInventoryMapping(folderPath: String, message: String = "", includeHardware: Bool = true) {
         let trimmed = folderPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -3561,6 +4213,8 @@ final class AppModel: ObservableObject {
         showInventoryMappingWorkspace = true
     }
 
+    /// 关闭映射工作区并清除本次恢复上下文。
+    /// 无参数。
     func closeInventoryMappingWorkspace() {
         showInventoryMappingWorkspace = false
         pendingInventoryMappingFolder = ""
@@ -3571,6 +4225,9 @@ final class AppModel: ObservableObject {
         inventoryMappingTargetNames = []
     }
 
+    /// 从 SKU 校验提示中提取待映射的材料名称。
+    /// - Parameters:
+    ///   - message: 需要解析、记录或显示的业务消息。
     private func inventoryMappingNames(from message: String) -> [String] {
         guard let markerRange = message.range(of: "处理：") ?? message.range(of: "未映射材料：") else { return [] }
         let remainder = message[markerRange.upperBound...]
@@ -3581,12 +4238,18 @@ final class AppModel: ObservableObject {
             .filter { !$0.isEmpty }
     }
 
-    // Resume only the blocked preview, never the durable sync command.
+    // 只恢复受阻的预览，不重跑持久化同步命令。
+    /// 恢复受阻文件夹的只读预览，不重跑持久化同步。
+    /// 无参数。
     private func rereadPendingSourceFolder() {
         guard pendingResumeContext != nil else { return }
         resumePendingMappingOperationAfterMapping()
     }
 
+    /// 保存映射后预览失败原因，并保留原始上下文供重试。
+    /// - Parameters:
+    ///   - context: 受阻映射操作的原始来源与恢复上下文。
+    ///   - message: 需要解析、记录或显示的业务消息。
     private func failPendingResume(_ context: PendingResumeContext, message: String) {
         pendingMappingResumeStates[context.pendingItemID]?.failureMessage = message
         guard pendingResumeContext?.id == context.id else { return }
@@ -3594,10 +4257,14 @@ final class AppModel: ObservableObject {
         inventoryStatus = "⚠️ \(message)"
         dashboardServerStatus = inventoryStatus
         dashboardSyncStatus = inventoryStatus
-        // Preserve the original pending item and context for another mapping or retry.
+        // 保留原始待处理项和上下文，供继续映射或重试。
     }
 
-    // A completed save stays completed even when its callback arrives after cancellation.
+    // 已完成的保存始终保持完成，即使回调在用户取消后才到达。
+    /// 记录已完成映射，移除剩余目标；即使面板已取消仍保留完成事实。
+    /// - Parameters:
+    ///   - names: 待更新规则的材料名称列表。
+    ///   - context: 受阻映射操作的原始来源与恢复上下文。
     private func recordPendingMappingsSaved(_ names: [String], context: PendingResumeContext?) {
         guard let context else { return }
         pendingMappingResumeStates[context.pendingItemID]?.completedNames.formUnion(names)
@@ -3610,15 +4277,19 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // Present after SwiftUI completes dismissal, not after an arbitrary delay.
+    // 等待 SwiftUI 实际完成关闭后再展示，不依赖任意延迟。
+    /// 在映射面板实际关闭后清理上下文并显示准备好的预览。
+    /// 无参数。
     func inventoryMappingWorkspaceDidDismiss() {
-        // A new request may already have opened another workspace while the old sheet closed.
+        // 旧面板关闭期间，新请求可能已经打开另一个工作区。
         guard !showInventoryMappingWorkspace else { return }
         let preview = pendingResumePreview
         closeInventoryMappingWorkspace()
         if let preview { presentServerWritePreview(preview) }
     }
 
+    /// 剩余映射完成后重新读取原来源，准备只读 Server 预览。
+    /// 无参数。
     private func resumePendingMappingOperationAfterMapping() {
         guard let context = pendingResumeContext else {
             previewSelectedInventory()
@@ -3647,7 +4318,7 @@ final class AppModel: ObservableObject {
         }) { object in
             self.finishDashboardOperation("server")
             guard self.pendingResumeContext?.id == context.id else { return }
-            if object["hardware_source_selection"] is [String: Any] {
+            if object["hardware_source_selection"] is [String: Any] || object["aicnc_preview"] is [String: Any] {
                 self.pendingResumePreview = object
                 self.showInventoryMappingWorkspace = false
                 return
@@ -3657,7 +4328,7 @@ final class AppModel: ObservableObject {
                 self.failPendingResume(context, message: "没有原文件夹的有效 Server 预览；请检查来源文件后重试")
                 return
             }
-            // Do not refresh list-index: its cache-miss path may reconcile durable business facts.
+            // 不要刷新 list-index：其缓存未命中路径可能协调持久业务事实。
             self.pendingMappingResumeStates[context.pendingItemID]?.failureMessage = ""
             self.pendingResumePreview = object
             self.showPendingCenterPrompt = false
@@ -3665,11 +4336,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 空闲时重试当前映射上下文的只读预览。
+    /// 无参数。
     func retryPendingMappingPreview() {
         guard pendingResumeContext != nil, !inventoryRunning else { return }
         resumePendingMappingOperationAfterMapping()
     }
 
+    /// 从 Traveler 列表定位待映射来源并启动对应预检。
+    /// 无参数。
     func activatePendingInventoryMapping() {
         guard !pendingInventoryMappingFolder.isEmpty else { return }
         guard !inventoryRunning else { return }
@@ -3710,6 +4385,8 @@ final class AppModel: ObservableObject {
         previewSelectedInventory()
     }
 
+    /// 通过库存命令打开用于业务操作的 Chrome 会话。
+    /// 无参数。
     func openInventoryChrome() {
         guard !inventoryRunning else { return }
         inventoryChromeStatus = "正在打开库存专用 Chrome…"
@@ -3723,6 +4400,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 更新库存商品目录并显示增删改统计或失败原因。
+    /// 无参数。
     func updateInventoryCatalog() {
         logUserAction("点击更新商品资料")
         beginInventoryOperation("更新商品资料")
@@ -3751,6 +4430,8 @@ final class AppModel: ObservableObject {
         inventoryStatus = "正在在线更新商品资料…"
     }
 
+    /// 退出 App 时关闭由库存工具管理的 Chrome 会话。
+    /// 无参数。
     func closeInventoryChromeOnQuit() {
         guard inventoryChromeOpenedByApp else { return }
         let command = projectRoot.appendingPathComponent("scripts/pp-flowhub")
@@ -3781,6 +4462,8 @@ final class AppModel: ObservableObject {
         inventoryChromeOpenedByApp = false
     }
 
+    /// 读取商品目录状态并更新设置页摘要。
+    /// 无参数。
     func refreshInventoryCatalogStatus() {
         guard !inventoryRunning, inventoryCatalogStatus == "商品资料尚未检查" else { return }
         runInventory(["list-names"], manageRunning: false) { object in
@@ -3791,6 +4474,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 刷新指定订单文件夹的 Traveler 列表和相关状态。
+    /// - Parameters:
+    ///   - folder: 需要刷新的订单文件夹标识。
     func refreshInventoryFolder(_ folder: String) {
         beginInventoryOperation("更新 \(folder) 出库状态")
         addInventoryStep("查询库存系统", "正在按 \(folder) 和工厂单名称查询其他出库单", "running")
@@ -3823,6 +4509,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 重新载入指定文件夹的 Traveler，替换对应列表数据。
+    /// - Parameters:
+    ///   - folder: 需要刷新的订单文件夹标识。
     private func reloadInventoryFolder(_ folder: String) {
         runInventory(["list-names"]) { object in
             let rows = object["travelers"] as? [[String: Any]] ?? []
@@ -3850,6 +4539,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 重置预检状态并逐份检查所选 Traveler 的出库项目。
+    /// 无参数。
     func previewSelectedInventory() {
         if !selectedInventoryOrderID.isEmpty {
             previewOrderInventory(
@@ -3883,6 +4574,13 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// 根据订单数据库事实预检所选工厂单、生产批次或出货项目。
+    /// - Parameters:
+    ///   - orderID: 目标业务订单号。
+    ///   - factoryOrderNames: 所选工厂单的订单名称，用于单据备注筛选。
+    ///   - factoryOrders: 本次处理范围内的工厂单号列表。
+    ///   - productionBatchNumber: 限定生产批次的请求标识；为空时不限定。
+    ///   - shipmentOnly: 是否只处理工厂单出货范围。
     func previewOrderInventory(
         orderID: String,
         factoryOrderNames: [String],
@@ -3924,7 +4622,18 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 读取剩余可分配材料，建立可编辑的本次生产消耗草稿。
+    /// - Parameters:
+    ///   - orderID: 目标业务订单号。
+    ///   - factoryOrders: 本次处理范围内的工厂单号列表。
+    ///   - completion: 接收操作是否成功的回调。
     func loadProductionPreview(orderID: String, factoryOrders: [String], completion: @escaping (Bool) -> Void = { _ in }) {
+        guard !orderRunning else {
+            productionPreviewStatus = "订单操作正在进行，请稍后重新读取材料"
+            completion(false)
+            return
+        }
+        productionMaterials = []
         productionPreviewStatus = "正在读取订单材料剩余数量…"
         var arguments = ["production-preview", "--order-id", orderID, "--factory-orders-json"]
         let encoded = (try? JSONSerialization.data(withJSONObject: factoryOrders)) ?? Data("[]".utf8)
@@ -3962,6 +4671,39 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 本次草稿全零时，仅调用本地订单服务确认工厂单生产完成。
+    /// - Parameters:
+    ///   - orderID: 订单号。
+    ///   - factoryOrders: 本次生产的工厂单号。
+    ///   - materials: 本次实际消耗草稿；必须全部为零，空数组表示无材料。
+    ///   - completion: 返回本地保存结果；失败后先刷新核对，避免不确定时重复提交。
+    func confirmProductionWithoutMaterials(orderID: String, factoryOrders: [String], materials: [ProductionMaterialDraft], completion: @escaping (ProductionOperationResult) -> Void) {
+        guard !factoryOrders.isEmpty, productionDraftHasValidQuantities(materials),
+              materials.allSatisfy({ Double($0.quantity) == 0 }),
+              let data = try? JSONSerialization.data(withJSONObject: factoryOrders),
+              let factories = String(data: data, encoding: .utf8),
+              let materialData = try? JSONSerialization.data(withJSONObject: materials.map { ["key": $0.key, "quantity": 0] as [String: Any] }),
+              let materialJSON = String(data: materialData, encoding: .utf8) else {
+            completion(ProductionOperationResult(state: .failure, message: "仅确认生产要求本次材料数量全部为 0，并已选择工厂单", documentNumbers: [], retryAllowed: true))
+            return
+        }
+        logUserAction("仅确认生产，不扣减材料", details: ["order_id": orderID, "factory_orders": factoryOrders])
+        runOrder(["confirm-production-without-materials", "--order-id", orderID, "--factory-orders-json", factories, "--materials-json", materialJSON, "--confirm-write"], onFailure: {
+            completion(ProductionOperationResult(state: .failure, message: self.orderError + "；请关闭并刷新订单核对生产状态，本次未调用库存系统", documentNumbers: [], retryAllowed: false))
+        }) { _ in
+            let message = "生产已完成；未扣减板材和封边，订单材料记录保持不变；工厂单仍待出货"
+            self.dashboardActivity.insert(InventoryStep(time: dashboardClockTime(), title: "生产完成", detail: "订单 \(orderID) · \(factoryOrders.joined(separator: "、")) · 本次未扣减材料", state: "success"), at: 0)
+            self.refreshDashboardOrdersAfterOutbound()
+            completion(ProductionOperationResult(state: .success, message: message, documentNumbers: [], retryAllowed: false))
+        }
+    }
+
+    /// 提交工厂单和材料数量进行生产准备，返回请求标识或校验错误。
+    /// - Parameters:
+    ///   - orderID: 目标业务订单号。
+    ///   - factoryOrders: 本次处理范围内的工厂单号列表。
+    ///   - materials: 生产材料消耗草稿列表。
+    ///   - completion: 接收生产请求标识和错误文字的回调；失败时标识为空。
     func prepareProduction(
         orderID: String,
         factoryOrders: [String],
@@ -3979,6 +4721,13 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 使用生产请求执行库存材料扣减，区分失败、不确定和成功结果。
+    /// - Parameters:
+    ///   - orderID: 目标业务订单号。
+    ///   - factoryOrders: 本次处理范围内的工厂单号列表。
+    ///   - materials: 生产材料消耗草稿列表。
+    ///   - requestID: 生产准备返回的请求标识，用于关联后续扣减。
+    ///   - completion: 接收生产成功、失败或不确定结果及重试许可的回调。
     func startDirectProduction(
         orderID: String,
         factoryOrders: [String],
@@ -4097,6 +4846,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 执行所选工厂单出货；无可出库五金时只更新出货状态。
+    /// - Parameters:
+    ///   - orderID: 目标业务订单号。
+    ///   - factoryOrders: 本次处理范围内的工厂单号列表。
     func startDirectOrderShipment(orderID: String, factoryOrders: [String]) {
         let normalizedOrderID = orderID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedOrderID.isEmpty, !factoryOrders.isEmpty else { return }
@@ -4177,6 +4930,11 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 读取订单及工厂单已保存的出库范围配置。
+    /// - Parameters:
+    ///   - orderID: 目标业务订单号。
+    ///   - factoryOrders: 本次处理范围内的工厂单号列表。
+    ///   - completion: 接收结果对象的回调；失败时接收空值。
     func loadOutboundScope(
         orderID: String,
         factoryOrders: [String],
@@ -4199,6 +4957,14 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 保存订单材料或工厂单的出库要求与原因。
+    /// - Parameters:
+    ///   - orderID: 目标业务订单号。
+    ///   - scopeType: 出库范围所属类型，例如材料或工厂单。
+    ///   - requirement: 该范围的出库要求。
+    ///   - factoryOrder: 目标工厂单号。
+    ///   - reason: 人工规则或操作的原因说明。
+    ///   - completion: 接收操作是否成功的回调。
     func saveOutboundScope(
         orderID: String,
         scopeType: String,
@@ -4228,6 +4994,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 校验当前预览并执行已确认的库存出库写入。
+    /// 无参数。
     func openAndFillSelectedInventory() {
         logUserAction("点击确认写入库存系统", details: ["confirm_save": true])
         let paths = Array(selectedInventoryPaths).sorted()
@@ -4320,6 +5088,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 将已返回单据号应用到对应 Traveler 的界面状态。
+    /// - Parameters:
+    ///   - path: 待解析或打开的文件、文件夹路径。
+    ///   - documentNumber: 外部系统返回的出库单据号。
     private func markInventoryTravelerSaved(path: String, documentNumber: String) {
         inventoryTravelers = inventoryTravelers.map { item in
             guard item.id == path else { return item }
@@ -4335,6 +5107,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 保存所选材料的忽略状态并刷新库存预览。
+    /// - Parameters:
+    ///   - names: 待更新规则的材料名称列表。
+    ///   - ignored: 是否将目标项目设为忽略。
     func setInventoryItemsIgnored(_ names: [String], ignored: Bool) {
         guard !inventoryRunning, !pendingResumeInFlight else { return }
         let context = pendingResumeContext
@@ -4370,6 +5146,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 重新读取库存人工映射和忽略规则列表。
+    /// 无参数。
     func refreshInventoryMappings() {
         runInventory(["list-mappings"]) { object in
             let manual = object["manual"] as? [String: Any] ?? [:]
@@ -4393,6 +5171,11 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 保存材料名到库存 SKU 的人工映射及显示别名。
+    /// - Parameters:
+    ///   - name: 来源材料或五金的名称。
+    ///   - productCode: 库存商品的规范 SKU 代码。
+    ///   - displayName: 只用于展示的商品别名。
     func saveSettingsManualMapping(name: String, productCode: String, displayName: String) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedCode = productCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
@@ -4410,6 +5193,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 按原名称更新人工映射的名称、SKU 和显示别名。
+    /// - Parameters:
+    ///   - oldName: 修改前用于定位映射规则的名称。
+    ///   - name: 来源材料或五金的名称。
+    ///   - productCode: 库存商品的规范 SKU 代码。
+    ///   - displayName: 只用于展示的商品别名。
     func updateSettingsManualMapping(oldName: String, name: String, productCode: String, displayName: String) {
         let trimmedOldName = oldName.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4429,6 +5218,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 删除指定材料名称的人工 SKU 映射并刷新列表。
+    /// - Parameters:
+    ///   - name: 来源材料或五金的名称。
     func removeSettingsManualMapping(name: String) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { return }
@@ -4439,6 +5231,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 保存材料忽略规则及原因，并衔接映射恢复流程。
+    /// - Parameters:
+    ///   - name: 来源材料或五金的名称。
+    ///   - reason: 人工规则或操作的原因说明。
     func saveInventoryIgnoredMapping(name: String, reason: String) {
         guard !inventoryRunning, !pendingResumeInFlight else { return }
         let context = pendingResumeContext
@@ -4472,6 +5268,11 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 按原名称修改忽略规则的名称和原因。
+    /// - Parameters:
+    ///   - oldName: 修改前用于定位映射规则的名称。
+    ///   - name: 来源材料或五金的名称。
+    ///   - reason: 人工规则或操作的原因说明。
     func updateInventoryIgnoredMapping(oldName: String, name: String, reason: String) {
         let trimmedOldName = oldName.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4494,6 +5295,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 删除指定材料的忽略规则。
+    /// - Parameters:
+    ///   - name: 来源材料或五金的名称。
     func removeInventoryIgnoredMapping(name: String) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { return }
@@ -4504,6 +5308,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 查询库存商品候选并更新映射选择界面。
+    /// - Parameters:
+    ///   - query: 商品 SKU 或名称搜索词。
     func searchInventoryProducts(_ query: String) {
         logUserAction("点击搜索库存商品", details: ["query_present": !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty])
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4531,6 +5338,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 保存 Traveler 材料与 SKU 的对应关系并继续预检。
+    /// - Parameters:
+    ///   - travelerName: Traveler 中的原始材料名称。
+    ///   - productCode: 库存商品的规范 SKU 代码。
     func saveInventoryMapping(travelerName: String, productCode: String) {
         guard !inventoryRunning, !pendingResumeInFlight else { return }
         let context = pendingResumeContext
@@ -4558,6 +5369,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 保存 Server 五金 SKU 映射并重新生成确认预览。
+    /// - Parameters:
+    ///   - name: 来源材料或五金的名称。
+    ///   - productCode: 库存商品的规范 SKU 代码。
     func saveServerHardwareMapping(name: String, productCode: String) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedCode = productCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
@@ -4571,6 +5386,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 保存 Server 五金忽略规则并重新生成确认预览。
+    /// - Parameters:
+    ///   - name: 来源材料或五金的名称。
+    ///   - reason: 人工规则或操作的原因说明。
     func saveServerHardwareIgnoredMapping(name: String, reason: String) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty, !orderRunning, !inventoryRunning else { return }
@@ -4584,6 +5403,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 按当前来源和五金选择重新生成 Server 预览，避免沿用旧映射结果。
+    /// - Parameters:
+    ///   - successNotice: 重新预览成功后显示的提示。
     func refreshServerHardwarePreview(successNotice: String = "✅ 五金预览已更新，请核对后确认写入") {
         guard let preview = serverWritePreview, !orderRunning else { return }
         serverWritePreviewNeedsRefresh = true
@@ -4615,6 +5437,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 将已映射、忽略、排除和缺失项目合并为预览行，并记录校验错误。
+    /// - Parameters:
+    ///   - object: 后端返回的 JSON 结果对象。
+    ///   - accumulated: 前面步骤已累积的库存预览行。
     @discardableResult
     private func consumeInventoryPreviewObject(
         _ object: [String: Any],
@@ -4691,6 +5517,10 @@ final class AppModel: ObservableObject {
         return next
     }
 
+    /// 排序并应用库存预览，更新通过或异常摘要。
+    /// - Parameters:
+    ///   - object: 后端返回的 JSON 结果对象。
+    ///   - accumulated: 前面步骤已累积的库存预览行。
     private func applyInventoryPreviewObject(
         _ object: [String: Any],
         accumulated: [InventoryPreviewRow]
@@ -4703,6 +5533,12 @@ final class AppModel: ObservableObject {
             : "订单出库数据预检未通过，请先处理 \(inventoryErrors.count) 项异常"
     }
 
+    /// 串行预检下一份 Traveler，累积材料行直至全部完成。
+    /// - Parameters:
+    ///   - paths: 本次处理的文件路径列表。
+    ///   - index: 当前待预检文件在路径列表中的位置。
+    ///   - selectedDocumentRemarks: 预检时限定的出库单据备注集合。
+    ///   - accumulated: 前面步骤已累积的库存预览行。
     private func previewNext(
         _ paths: [String],
         index: Int,
@@ -4741,6 +5577,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 异步调用库存 CLI，消费进度并处理无进展超时、异常和 JSON 结果。
+    /// - Parameters:
+    ///   - arguments: 传给后端命令的参数数组。
+    ///   - manageRunning: 是否由此调用设置运行标志并阻止重复启动。
+    ///   - onFailure: 命令失败时执行的可选回调。
+    ///   - completion: 成功后接收后端结果对象的回调。
     private func runInventory(
         _ arguments: [String],
         manageRunning: Bool = true,
@@ -4844,6 +5686,9 @@ final class AppModel: ObservableObject {
                         self.dashboardSyncStatus = "❌ \(reason)"
                         self.finishRunningInventoryStep(reason, "failure")
                         onFailure?(reason)
+                        if !self.orderRunning {
+                            self.runOrder(["list-index"]) { result in self.applyDashboardObject(result, includeChanges: false) }
+                        }
                         return
                     }
                     let errorText = self.inventoryRawErrors.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4853,6 +5698,9 @@ final class AppModel: ObservableObject {
                         self.dashboardSyncStatus = "❌ \(reason)"
                         self.finishRunningInventoryStep(reason, "failure")
                         onFailure?(reason)
+                        if !self.orderRunning {
+                            self.runOrder(["list-index"]) { result in self.applyDashboardObject(result, includeChanges: false) }
+                        }
                         return
                     }
                     if let fatal = object["fatal"] as? [String: Any] {
@@ -4861,6 +5709,9 @@ final class AppModel: ObservableObject {
                         self.dashboardSyncStatus = "❌ \(reason)"
                         self.finishRunningInventoryStep(reason, "failure")
                         onFailure?(reason)
+                        if !self.orderRunning {
+                            self.runOrder(["list-index"]) { result in self.applyDashboardObject(result, includeChanges: false) }
+                        }
                         return
                     }
                     completion(object)
@@ -4884,11 +5735,19 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 清除旧成功提示，并追加本次库存操作的运行步骤。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
     private func beginInventoryOperation(_ title: String) {
         inventorySuccessMessage = ""
         addInventoryStep(title, "任务已开始", "running")
     }
 
+    /// 追加带当前时间的库存操作步骤。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - detail: 操作或消息的详细说明。
+    ///   - state: 运行、成功、警告或失败等展示状态。
     private func addInventoryStep(_ title: String, _ detail: String, _ state: String) {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
@@ -4900,6 +5759,10 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// 将运行中的库存步骤更新为指定结果和详情。
+    /// - Parameters:
+    ///   - detail: 操作或消息的详细说明。
+    ///   - state: 运行、成功、警告或失败等展示状态。
     private func finishRunningInventoryStep(_ detail: String, _ state: String) {
         OperationLogWriter.shared.record(
             "app.step.finished",
@@ -4914,6 +5777,11 @@ final class AppModel: ObservableObject {
         inventorySteps[index] = InventoryStep(time: current.time, title: current.title, detail: detail, state: state)
     }
 
+    /// 按标题定位库存步骤并记录结束状态。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - detail: 操作或消息的详细说明。
+    ///   - state: 运行、成功、警告或失败等展示状态。
     private func finishInventoryStep(named title: String, detail: String, state: String) {
         guard let index = inventorySteps.lastIndex(where: { $0.title == title && $0.state == "running" }) else {
             return
@@ -4933,6 +5801,9 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// 缓冲并解析库存标准错误流，将进度与原始错误分别保存。
+    /// - Parameters:
+    ///   - chunk: 本次读取的日志文本片段。
     private func consumeInventoryLogChunk(_ chunk: String) {
         inventoryStderrBuffer += chunk
         let parts = inventoryStderrBuffer.components(separatedBy: "\n")
@@ -4946,14 +5817,17 @@ final class AppModel: ObservableObject {
                 continue
             }
             inventorySteps = appendingInventoryProgressStep(inventorySteps, message: message)
-            // Keep the order-center banner useful while the inventory page
-            // is navigating or filling a form. The inventory step history
-            // remains the detailed audit trail; this is only the concise
-            // current-operation summary.
+            // 库存页面导航或填写表单时，保持订单中心提示有用。
+            // 库存步骤历史仍是完整审计记录；这里仅提供当前操作的简要摘要。
             dashboardSyncStatus = dashboardInventoryProgressText(message)
         }
     }
 
+    /// 追加订单操作步骤并更新相关界面状态。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - detail: 操作或消息的详细说明。
+    ///   - state: 运行、成功、警告或失败等展示状态。
     private func addOrderStep(_ title: String, _ detail: String, _ state: String) {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
@@ -4973,6 +5847,10 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// 结束订单运行步骤，保存结果详情和耗时。
+    /// - Parameters:
+    ///   - detail: 操作或消息的详细说明。
+    ///   - state: 运行、成功、警告或失败等展示状态。
     private func finishOrderStep(_ detail: String, _ state: String) {
         OperationLogWriter.shared.record(
             "app.step.finished",
@@ -5000,10 +5878,17 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// 为指定来源追加一条看板进度记录。
+    /// - Parameters:
+    ///   - source: 看板操作来源键，如 aimes、server、inventory 或 sync。
+    ///   - message: 需要解析、记录或显示的业务消息。
     private func appendDashboardProgress(_ source: String, message: String) {
         dashboardOperationProgress[source, default: []].append(message)
     }
 
+    /// 解析订单服务日志中的阶段、计时和进度事件，更新看板及错误缓冲。
+    /// - Parameters:
+    ///   - chunk: 本次读取的日志文本片段。
     func consumeOrderLogChunk(_ chunk: String) {
         orderStderrBuffer += chunk
         let parts = orderStderrBuffer.components(separatedBy: "\n")
@@ -5033,9 +5918,7 @@ final class AppModel: ObservableObject {
                         duration: duration,
                         time: dashboardClockTime()
                     )
-                    // The stage has completed, so do not leave its previous
-                    // progress text as the current operation until the next
-                    // progress event arrives.
+                    // 此阶段已经完成，不要在下一个进度事件到达前继续把旧进度文字当作当前操作。
                     if source == "aimes" {
                         dashboardAimesStatus = "正在处理 AIMES…"
                         dashboardSyncStatus = dashboardAimesStatus
@@ -5059,6 +5942,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 提交订单中止操作并刷新订单中心状态。
+    /// - Parameters:
+    ///   - orderID: 目标业务订单号。
     func abortOrder(orderID: String) {
         guard !orderRunning, !inventoryRunning else { return }
         logUserAction("确认中止订单", details: ["order_id": orderID])
@@ -5071,16 +5957,29 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 读取订单人工五金及可编辑工厂单快照。
+    /// - Parameters:
+    ///   - orderID: 目标业务订单号。
+    ///   - completion: 接收结果对象的回调；失败时接收空值。
     func loadManualHardware(orderID: String, completion: @escaping ([String: Any]?) -> Void) {
         runOrder(["manual-hardware", "--order-id", orderID],
                  onFailure: { completion(nil) }, completion: completion)
     }
 
+    /// 查询可用于人工五金的启用商品。
+    /// - Parameters:
+    ///   - query: 商品 SKU 或名称搜索词。
+    ///   - completion: 接收结果对象的回调；失败时接收空值。
     func searchManualHardware(_ query: String, completion: @escaping ([String: Any]?) -> Void) {
         runOrder(["search-hardware-products", "--query", query],
                  onFailure: { completion(nil) }, completion: completion)
     }
 
+    /// 提交带版本号的人工五金增删草稿，成功后刷新列表和订单详情。
+    /// - Parameters:
+    ///   - orderID: 目标业务订单号。
+    ///   - payload: 向后端提交或保留的结构化请求内容。
+    ///   - completion: 接收操作是否成功的回调。
     func saveManualHardware(orderID: String, payload: [String: Any], completion: @escaping (Bool) -> Void) {
         guard let input = try? JSONSerialization.data(withJSONObject: payload) else {
             orderError = "人工五金编辑内容无法编码"
@@ -5095,7 +5994,7 @@ final class AppModel: ObservableObject {
                 return
             }
             completion(true)
-            // Reload both dashboard and selected detail from the committed facts.
+            // 从已提交事实同时重新载入看板和所选订单详情。
             self.runOrder(["list-index"], failureStatus: "人工五金已保存，订单列表刷新失败") { result in
                 self.applyDashboardObject(result, includeChanges: false)
                 if self.selectedOrderId == orderID,
@@ -5106,6 +6005,13 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 通过常驻服务串行执行订单命令，解析业务错误和 JSON 结果。
+    /// - Parameters:
+    ///   - arguments: 传给后端命令的参数数组。
+    ///   - input: 作为命令输入传递的字节数据；无需输入时为空。
+    ///   - failureStatus: 失败时优先展示的业务状态。
+    ///   - onFailure: 命令失败时执行的可选回调。
+    ///   - completion: 成功后接收后端结果对象的回调。
     private func runOrder(
         _ arguments: [String],
         input: Data? = nil,
@@ -5152,7 +6058,12 @@ final class AppModel: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 try service.start(command: command, environment: self.environmentForOperation(operationID))
-                let data = try service.request(id: operationID, arguments: arguments, inputData: input)
+                let data = try service.request(
+                    id: operationID,
+                    arguments: arguments,
+                    inputData: input,
+                    operationLogEnabled: OperationLogWriter.shared.isEnabled()
+                )
                 DispatchQueue.main.async {
                     self.finishOperationLog(
                         operationID,
@@ -5211,11 +6122,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 停止常驻订单后台服务并释放客户端引用。
+    /// 无参数。
     func stopResidentOrderService() {
         residentOrderService?.stop()
         residentOrderService = nil
     }
 
+    /// 重置旧订单选择并读取订单文件夹列表。
+    /// 无参数。
     func loadOrderFolders() {
         logUserAction("点击刷新订单文件夹列表")
         orderSteps.removeAll()
@@ -5254,6 +6169,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 读取指定订单文件夹预览，更新材料、工厂单和 Traveler 状态。
+    /// - Parameters:
+    ///   - item: 订单文件夹记录。
+    ///   - recordSelection: 是否记录此次订单选择动作。
     func previewOrderFolder(_ item: OrderFolderItem, recordSelection: Bool = true) {
         orderSteps.removeAll()
         selectedOrderPath = item.id
@@ -5330,6 +6249,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 在本地订单目录中查找对应订单的已有 Traveler 路径。
+    /// - Parameters:
+    ///   - orderId: 目标业务订单号。
     private func findLocalOrderTraveler(_ orderId: String) -> String {
         let manager = FileManager.default
         let root = URL(fileURLWithPath: activeOrderRoot, isDirectory: true)
@@ -5364,6 +6286,10 @@ final class AppModel: ObservableObject {
         })?.path ?? ""
     }
 
+    /// 解析订单预览中的材料、五金和工厂单，保护当前目标订单身份。
+    /// - Parameters:
+    ///   - object: 后端返回的 JSON 结果对象。
+    ///   - targetOrderID: 预览对应的目标订单号；为空时使用当前上下文。
     private func applyOrderPreview(_ object: [String: Any], targetOrderID: String? = nil) {
         let payload: [String: Any]
         if let targetOrderID,
@@ -5419,12 +6345,15 @@ final class AppModel: ObservableObject {
         orderFittings = fittings
     }
 
+    /// 清除旧订单内容，从数据库读取所选订单详情；忙时安排重试。
+    /// - Parameters:
+    ///   - item: 订单看板记录。
     func loadOrderDetailFromDatabase(_ item: OrderDashboardItem) {
         selectedOrderPath = item.sourceFolder
         selectedOrderId = item.orderId
         selectedOrderIsOptimized = item.stage == "已优化"
         selectedOrderIsCompleted = orderDashboardIsCompleted(item.stage)
-        // Discard the previous order's materials even when detail loading is queued.
+        // 即使详情读取进入等待队列，也先丢弃上一个订单的材料。
         orderMaterials = []
         orderEdgeBanding = [:]
         if orderRunning {
@@ -5493,6 +6422,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 延迟重试尚未载入的订单详情，避免与当前命令并发。
+    /// 无参数。
     private func schedulePendingOrderDetailRetry() {
         guard !orderDetailRetryScheduled else { return }
         orderDetailRetryScheduled = true
@@ -5511,6 +6442,14 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 保存订单备注与计划、实际安装安排，通过回调反馈结果。
+    /// - Parameters:
+    ///   - orderID: 目标业务订单号。
+    ///   - userNote: 用户填写的订单备注。
+    ///   - plannedDays: 待保存的计划安装日期与人员。
+    ///   - actualDays: 待保存的实际安装日期与人员。
+    ///   - onStatusChange: 接收保存状态提示的回调。
+    ///   - onSuccess: 保存成功后执行的回调。
     func saveOrderAnnotations(
         orderID: String,
         userNote: String,
@@ -5561,6 +6500,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 按五金身份保存忽略状态并重新载入预览。
+    /// - Parameters:
+    ///   - rows: 工厂单五金预览列表。
+    ///   - ignored: 是否将目标项目设为忽略。
     func setOrderFittingsIgnored(_ rows: [OrderFittingPreview], ignored: Bool) {
         let names = Array(Set(rows.map(\.name).filter { !$0.isEmpty })).sorted()
         guard !names.isEmpty else {
@@ -5590,6 +6533,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 为当前订单生成或更新 Traveler 并展示生成路径。
+    /// 无参数。
     func generateSelectedOrder() {
         logUserAction("点击生成 Traveler")
         guard orderCanGenerateTraveler else {
@@ -5614,6 +6559,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 调用后端补充缺失的材料文件并继续预览。
+    /// 无参数。
     func generateMissingMaterial() {
         logUserAction("点击自动生成 material 文件")
         guard !selectedOrderPath.isEmpty, !selectedOrderId.isEmpty else { return }
@@ -5637,6 +6584,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 查询当前订单所需材料的实时库存，显示缺料情况。
+    /// 无参数。
     func checkSelectedOrderStock() {
         logUserAction("点击查询材料库存")
         guard !selectedOrderIsCompleted else {
@@ -5679,6 +6628,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 计算当前订单成本，并可导出成本文件。
+    /// - Parameters:
+    ///   - export: 是否同时导出成本文件。
     func calculateSelectedOrderCost(export: Bool = false) {
         let orderID = selectedOrderId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canCalculateOrderCost else {
@@ -5712,6 +6664,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 将后端成本明细、分组汇总和缺失信息应用到界面。
+    /// - Parameters:
+    ///   - object: 后端返回的 JSON 结果对象。
     private func applyOrderCost(_ object: [String: Any]) {
         orderCostTotal = (object["total_cost"] as? NSNumber)?.doubleValue
         orderCostKnown = (object["known_cost"] as? NSNumber)?.doubleValue ?? 0
@@ -5748,6 +6703,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 检查路径后使用系统应用打开当前订单 Traveler。
+    /// 无参数。
     func openSelectedOrderTraveler() {
         logUserAction("打开已生成 Traveler")
         guard !orderExistingTravelerPath.isEmpty else {
@@ -5766,6 +6723,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 通过系统文件管理器打开订单或报表位置。
+    /// - Parameters:
+    ///   - path: 待解析或打开的文件、文件夹路径。
     func openDashboardLocation(_ path: String) {
         logUserAction("点击打开所在文件夹")
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -5779,6 +6739,7 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 取得后端脚本所在的本地项目根目录。
     var projectRoot: URL {
         let bundled = Bundle.main.resourceURL?.appendingPathComponent("project")
         if let bundled = bundled, FileManager.default.fileExists(atPath: bundled.path) { return bundled }
@@ -5828,7 +6789,7 @@ enum AppLayout {
     static let todoTableHeaderFontSize: CGFloat = 17
     static let todoTableBodyFontSize: CGFloat = 16
     static let materialNameFontSize: CGFloat = 18
-    // Keep the primary workspace at the approved screenshot size.
+    // 主工作区保持已确认截图中的尺寸。
     static let windowMinWidth: CGFloat = 1120
     static let windowMinHeight: CGFloat = 768
     static let windowIdealWidth: CGFloat = 1120
@@ -5839,6 +6800,9 @@ enum AppLayout {
 private struct FixedWindowSizeController: NSViewRepresentable {
     let size: CGSize
 
+    /// 创建窗口探针视图，并在挂载后应用主窗口固定尺寸。
+    /// - Parameters:
+    ///   - context: SwiftUI 提供的桥接上下文与协调器。
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
         DispatchQueue.main.async {
@@ -5847,12 +6811,19 @@ private struct FixedWindowSizeController: NSViewRepresentable {
         return view
     }
 
+    /// 窗口状态变化后重新应用主窗口固定尺寸。
+    /// - Parameters:
+    ///   - nsView: 已创建并需要更新或卸载的 AppKit 视图。
+    ///   - context: SwiftUI 提供的桥接上下文与协调器。
     func updateNSView(_ nsView: NSView, context: Context) {
         DispatchQueue.main.async {
             applyFixedSize(to: nsView.window)
         }
     }
 
+    /// 将主窗口固定为已确认的工作区尺寸并限制缩放。
+    /// - Parameters:
+    ///   - window: 需要约束尺寸的主窗口；尚未挂载时为空。
     private func applyFixedSize(to window: NSWindow?) {
         guard let window else { return }
         let fixedFrame = NSRect(origin: window.frame.origin, size: size)
@@ -5867,6 +6838,9 @@ private struct FixedWindowSizeController: NSViewRepresentable {
     }
 }
 
+/// 根据可用宽度计算库存操作按钮网格的列数。
+/// - Parameters:
+///   - availableWidth: 布局可用宽度，单位为逻辑点。
 func inventoryActionColumnCount(availableWidth: CGFloat) -> Int {
     max(1, Int((availableWidth + AppLayout.actionSpacing) /
         (AppLayout.inventoryActionMinWidth + AppLayout.actionSpacing)))
@@ -5886,10 +6860,19 @@ enum AppPalette {
     static let ignored = Color.gray
 }
 
+/// 格式化商品目录更新成功及适用的增删改数量摘要。
+/// - Parameters:
+///   - count: 参与当前统计的记录总数。
 func inventoryCatalogUpdateSuccessStatus(_ count: Int) -> String {
     "✅ 商品资料更新成功，共 \(count) 个商品"
 }
 
+/// 格式化商品目录更新成功及适用的增删改数量摘要。
+/// - Parameters:
+///   - count: 参与当前统计的记录总数。
+///   - added: 本次新增商品数量。
+///   - updated: 本次更新的商品数量。
+///   - removed: 本次移除的商品数量。
 func inventoryCatalogUpdateSuccessStatus(
     _ count: Int,
     added: Int,
@@ -5899,6 +6882,9 @@ func inventoryCatalogUpdateSuccessStatus(
     "✅ 商品资料更新成功，共 \(count) 个商品（新增 \(added)，更新 \(updated)，删除 \(removed)）"
 }
 
+/// 将商品目录更新错误转换为中文状态提示。
+/// - Parameters:
+///   - reason: 人工规则或操作的原因说明。
 func inventoryCatalogUpdateFailureStatus(_ reason: String) -> String {
     "❌ 商品资料更新失败：\(reason)"
 }
@@ -5931,6 +6917,9 @@ enum SettingsStatusKind: Equatable {
     }
 }
 
+/// 从设置提示中识别成功、警告、失败或普通状态。
+/// - Parameters:
+///   - status: 业务状态文字或状态代码。
 func settingsStatusKind(_ status: String) -> SettingsStatusKind {
     let text = status.trimmingCharacters(in: .whitespacesAndNewlines)
     if text.hasPrefix("✅") { return .success }
@@ -5940,6 +6929,9 @@ func settingsStatusKind(_ status: String) -> SettingsStatusKind {
     return .neutral
 }
 
+/// 清除设置状态前缀，返回供状态组件显示的正文。
+/// - Parameters:
+///   - status: 业务状态文字或状态代码。
 func settingsStatusDisplayText(_ status: String) -> String {
     status
         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -5978,6 +6970,8 @@ struct SettingsStatusBanner: View {
 }
 
 extension View {
+    /// 应用统一页面留白、最小尺寸和背景布局。
+    /// 无参数。
     func appPageFrame() -> some View {
         frame(minHeight: AppLayout.windowMinHeight - AppLayout.topNavHeight, alignment: .top)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -5986,15 +6980,24 @@ extension View {
             .background(LiquidGlassPreviewBackdrop())
     }
 
+    /// 应用统一输入框样式和最大宽度。
+    /// - Parameters:
+    ///   - maxWidth: 输入框最大宽度；为空时采用默认布局。
     func appInputField(maxWidth: CGFloat? = nil) -> some View {
         frame(maxWidth: maxWidth, minHeight: AppLayout.controlHeight, maxHeight: AppLayout.controlHeight)
     }
 
+    /// 应用统一操作按钮尺寸。
+    /// - Parameters:
+    ///   - minWidth: 操作按钮的最小宽度。
     func appActionButton(minWidth: CGFloat = AppLayout.actionButtonWidth) -> some View {
         controlSize(.regular)
             .frame(minWidth: minWidth, minHeight: AppLayout.controlHeight)
     }
 
+    /// 应用库存操作按钮的最小宽度及布局样式。
+    /// - Parameters:
+    ///   - minWidth: 操作按钮的最小宽度。
     func inventoryActionButton(minWidth: CGFloat = AppLayout.inventoryActionMinWidth) -> some View {
         controlSize(.regular)
             .frame(
@@ -6007,6 +7010,9 @@ extension View {
 }
 
 struct AppGlassGroupBoxStyle: GroupBoxStyle {
+    /// 为分组框组合标题与内容，并应用统一玻璃卡片样式。
+    /// - Parameters:
+    ///   - configuration: 系统提供的分组框标题与内容。
     func makeBody(configuration: Configuration) -> some View {
         VStack(alignment: .leading, spacing: AppLayout.cardInnerSpacing) {
             configuration.label
@@ -6024,6 +7030,10 @@ struct AppSurfaceCard<Content: View>: View {
     let padding: CGFloat
     @ViewBuilder let content: Content
 
+    /// 构造具有指定留白的通用卡片内容。
+    /// - Parameters:
+    ///   - padding: 卡片内容留白，单位为逻辑点。
+    ///   - content: 生成卡片或容器内部视图的闭包。
     init(padding: CGFloat = AppLayout.cardPadding, @ViewBuilder content: () -> Content) {
         self.padding = padding
         self.content = content()
@@ -6036,9 +7046,8 @@ struct AppSurfaceCard<Content: View>: View {
     }
 }
 
-// Shared light workspace background used by the production pages and sheets.
-// The standalone Liquid Glass design preview has been removed; keeping this
-// background here avoids coupling production UI to a test-only screen.
+// 生产页面和面板共用的浅色工作区背景。独立 Liquid Glass 设计预览已经移除；
+// 背景保留在此处，避免生产界面依赖仅用于测试的页面。
 struct LiquidGlassPreviewBackdrop: View {
     var body: some View {
         ZStack {
@@ -6108,6 +7117,10 @@ struct AppStatusBadge: View {
 private struct WidthPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
+    /// 合并子视图上报的尺寸偏好值。
+    /// - Parameters:
+    ///   - value: 当前已合并的尺寸偏好值，原位更新。
+    ///   - nextValue: 读取下一个子视图偏好值的闭包。
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
     }
@@ -6124,6 +7137,7 @@ struct ScrollingTextOnHover: View {
     @State private var isHovering = false
     @State private var scrollTask: Task<Void, Never>?
 
+    /// 计算长文件名超过可见区域的水平距离。
     private var overflow: CGFloat {
         max(0, textWidth - containerWidth)
     }
@@ -6143,9 +7157,8 @@ struct ScrollingTextOnHover: View {
                     )
                     .offset(x: offset)
             }
-                // GeometryReader can receive a narrow proposal inside an HStack. Make that
-                // proposal the explicit clipping boundary so a long filename never paints
-                // over the status column or the adjacent split-view pane.
+                // GeometryReader 在 HStack 内可能收到较窄的建议宽度。
+                // 明确以该宽度作为裁切边界，避免长文件名覆盖状态列或相邻分栏。
                 .frame(width: max(0, proxy.size.width), height: proxy.size.height, alignment: .leading)
                 .clipped()
                 .onPreferenceChange(WidthPreferenceKey.self) { textWidth = $0 }
@@ -6163,6 +7176,8 @@ struct ScrollingTextOnHover: View {
         .frame(height: 20)
     }
 
+    /// 启动长文本横向滚动，确保超宽文件名可被查看。
+    /// 无参数。
     private func startScrolling() {
         scrollTask?.cancel()
         offset = 0
@@ -6185,6 +7200,8 @@ struct ScrollingTextOnHover: View {
         }
     }
 
+    /// 停止长文本滚动并恢复初始偏移。
+    /// 无参数。
     private func stopScrolling() {
         scrollTask?.cancel()
         scrollTask = nil
@@ -6196,6 +7213,10 @@ struct InventoryActionGrid<Content: View>: View {
     let minColumnWidth: CGFloat
     @ViewBuilder let content: Content
 
+    /// 保存操作按钮内容与自适应网格的最小列宽。
+    /// - Parameters:
+    ///   - minColumnWidth: 按钮网格每列的最小宽度。
+    ///   - content: 生成卡片或容器内部视图的闭包。
     init(
         minColumnWidth: CGFloat = AppLayout.inventoryActionMinWidth,
         @ViewBuilder content: () -> Content
@@ -6230,6 +7251,11 @@ struct OperationLogCard: View {
     let emptyText: String
     let showsDuration: Bool
 
+    /// 保存操作步骤、空列表提示及耗时显示选项。
+    /// - Parameters:
+    ///   - steps: 操作步骤列表。
+    ///   - emptyText: 没有步骤记录时显示的提示。
+    ///   - showsDuration: 是否在步骤或消息中显示耗时。
     init(steps: [InventoryStep], emptyText: String, showsDuration: Bool = false) {
         self.steps = steps
         self.emptyText = emptyText
@@ -6639,6 +7665,13 @@ struct OrderWorkflowView: View {
         }
     }
 
+    /// 构造包含数值、详情和警告状态的摘要卡片。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - value: 需要显示的数值或状态文字。
+    ///   - detail: 操作或消息的详细说明。
+    ///   - color: 界面使用的强调颜色。
+    ///   - warning: 是否显示警告样式。
     private func summaryCard(title: String, value: String, detail: String, color: Color, warning: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title).font(.caption).foregroundColor(.secondary)
@@ -6659,6 +7692,10 @@ struct OrderWorkflowView: View {
         .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
+    /// 构造带强调色的子分区标题。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - color: 界面使用的强调颜色。
     private func subsectionTitle(_ title: String, color: Color) -> some View {
         HStack(spacing: 7) {
             Capsule().fill(color).frame(width: 4, height: 17)
@@ -6666,6 +7703,10 @@ struct OrderWorkflowView: View {
         }
     }
 
+    /// 构造居中的图标和标题组合。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - systemImage: 系统图标名称。
     private func centeredTitle(_ title: String, systemImage: String) -> some View {
         HStack {
             Spacer()
@@ -6682,6 +7723,12 @@ struct SettingsCard<Content: View>: View {
     let padding: CGFloat
     @ViewBuilder let content: Content
 
+    /// 保存设置分区的标题、图标、留白和内容。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - symbol: 系统图标名称。
+    ///   - padding: 卡片内容留白，单位为逻辑点。
+    ///   - content: 生成卡片或容器内部视图的闭包。
     init(
         title: String,
         symbol: String,
@@ -6712,6 +7759,10 @@ struct InventoryStepRowView: View {
     let step: InventoryStep
     let showsDuration: Bool
 
+    /// 保存单条操作步骤及是否显示耗时的选项。
+    /// - Parameters:
+    ///   - step: 待显示的一条操作步骤。
+    ///   - showsDuration: 是否在步骤或消息中显示耗时。
     init(step: InventoryStep, showsDuration: Bool = false) {
         self.step = step
         self.showsDuration = showsDuration
@@ -6745,6 +7796,7 @@ struct InventoryStepRowView: View {
         }
     }
 
+    /// 按显示选项生成步骤详情及耗时文字。
     private var detailText: String {
         guard showsDuration else { return step.detail }
         let elapsed = step.duration ?? step.startedAt.map { max(0, Date().timeIntervalSince($0)) } ?? 0
@@ -6780,10 +7832,17 @@ struct InventoryOperationLogView: View {
 struct OperationLogAutoScroller: NSViewRepresentable {
     let revision: String
 
+    /// 创建用于检测 AppKit 滚动视图的透明探针。
+    /// - Parameters:
+    ///   - context: SwiftUI 提供的桥接上下文与协调器。
     func makeNSView(context: Context) -> NSView {
         NSView(frame: .zero)
     }
 
+    /// 遍历父视图以更新日志区域的原生滚动行为。
+    /// - Parameters:
+    ///   - nsView: 已创建并需要更新或卸载的 AppKit 视图。
+    ///   - context: SwiftUI 提供的桥接上下文与协调器。
     func updateNSView(_ nsView: NSView, context: Context) {
         _ = revision
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -6806,6 +7865,11 @@ struct SelectableOperationLogView: View {
     let showsDuration: Bool
     @State private var selectedIDs: Set<UUID> = []
 
+    /// 保存可选择的日志步骤列表及显示选项。
+    /// - Parameters:
+    ///   - steps: 操作步骤列表。
+    ///   - emptyText: 没有步骤记录时显示的提示。
+    ///   - showsDuration: 是否在步骤或消息中显示耗时。
     init(steps: [InventoryStep], emptyText: String, showsDuration: Bool = false) {
         self.steps = steps
         self.emptyText = emptyText
@@ -6869,11 +7933,15 @@ struct SelectableOperationLogView: View {
         }
     }
 
+    /// 根据步骤身份、状态、内容和耗时生成滚动更新标识。
     private var scrollRevision: String {
         steps.map { "\($0.id.uuidString)|\($0.state)|\($0.title)|\($0.detail)|\($0.duration ?? -1)" }
             .joined(separator: "\n")
     }
 
+    /// 更新操作步骤的选择集合，供复制选中记录。
+    /// - Parameters:
+    ///   - id: 待选择操作步骤的唯一标识。
     private func select(_ id: UUID) {
         if NSEvent.modifierFlags.contains(.command) {
             if selectedIDs.contains(id) {
@@ -6886,6 +7954,8 @@ struct SelectableOperationLogView: View {
         }
     }
 
+    /// 将选中步骤的可读日志内容复制到系统剪贴板。
+    /// 无参数。
     private func copySelected() {
         let text = steps
             .filter { selectedIDs.contains($0.id) }
@@ -6960,6 +8030,12 @@ struct InventoryMappingSheet: View {
     let saveAction: ((String, String) -> Void)?
     @State private var query = ""
 
+    /// 初始化材料 SKU 搜索和映射面板的来源、显示绑定及保存回调。
+    /// - Parameters:
+    ///   - model: 共享的 App 状态及业务命令入口。
+    ///   - travelerName: Traveler 中的原始材料名称。
+    ///   - isPresented: 面板当前的显示状态或其双向绑定。
+    ///   - saveAction: 可选保存回调，接收来源名称与所选 SKU 或忽略原因。
     init(
         model: AppModel,
         travelerName: String,
@@ -7144,6 +8220,11 @@ struct PendingInventoryIgnoreSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var reason = "用户在待处理中心选择全局忽略"
 
+    /// 初始化待处理材料的忽略面板及可选保存回调。
+    /// - Parameters:
+    ///   - model: 共享的 App 状态及业务命令入口。
+    ///   - travelerName: Traveler 中的原始材料名称。
+    ///   - saveAction: 可选保存回调，接收来源名称与所选 SKU 或忽略原因。
     init(
         model: AppModel,
         travelerName: String,
@@ -7213,6 +8294,13 @@ struct InventoryView: View {
     @State private var showInventoryMappingSheet = false
     @State private var mappingTravelerName = ""
 
+    /// 保存库存工作区的模型、关闭回调及订单和工厂单上下文。
+    /// - Parameters:
+    ///   - model: 共享的 App 状态及业务命令入口。
+    ///   - onClose: 关闭库存页面时执行的可选回调。
+    ///   - orderContextID: 库存页面上下文中的订单号。
+    ///   - orderContextFactoryNames: 库存页面上下文中的工厂单名称。
+    ///   - orderContextFactoryOrders: 库存页面上下文中的工厂单号。
     init(
         model: AppModel,
         onClose: (() -> Void)? = nil,
@@ -7227,20 +8315,24 @@ struct InventoryView: View {
         self.orderContextFactoryOrders = orderContextFactoryOrders
     }
 
+    /// 按当前是否选择订单返回库存确认对象数量。
     private var selectedTravelerCount: Int {
         model.selectedInventoryOrderID.isEmpty ? 0 : 1
     }
 
+    /// 判断库存预览中是否存在已匹配 SKU 的出库行。
     private var hasMappedOutboundRows: Bool {
         model.inventoryPreviewRows.contains { $0.status == "已映射" }
     }
 
+    /// 判断是否存在已明确客户提供、余料或无需出库的项目。
     private var hasConfirmedNoOutboundRows: Bool {
         model.inventoryPreviewRows.contains {
             ["客户提供", "余料生产", "不需要出库", "不出库"].contains($0.status)
         }
     }
 
+    /// 判断当前预览包含客户提供项目，且没有已映射或未映射项目。
     private var customerSuppliedOnly: Bool {
         let statuses = Set(model.inventoryPreviewRows.map(\.status))
         return statuses.contains("客户提供")
@@ -7248,6 +8340,7 @@ struct InventoryView: View {
             && !statuses.contains("未映射")
     }
 
+    /// 根据生产、出货、重试及无需出库状态生成确认按钮文案。
     private var confirmationTitle: String {
         if !model.inventoryProductionBatchNumber.isEmpty { return model.inventoryWriteBlocked ? "重试生产出库" : "确认生产出库" }
         if model.inventoryShipmentOnly { return model.inventoryWriteBlocked ? "重试出货" : "确认出货" }
@@ -7255,10 +8348,14 @@ struct InventoryView: View {
         return customerSuppliedOnly || hasMappedOutboundRows ? "确认出库" : "确认无需出库"
     }
 
+    /// 显示库存上下文订单号，缺失时使用“当前订单”。
     private var selectedTravelerDisplayName: String {
         orderContextID.isEmpty ? "当前订单" : orderContextID
     }
 
+    /// 显示库存预览材料的数量、匹配结果和映射处理入口。
+    /// - Parameters:
+    ///   - row: 库存出库预览。
     @ViewBuilder
     private func previewRowContent(_ row: InventoryPreviewRow) -> some View {
         HStack(spacing: 8) {
@@ -7495,6 +8592,9 @@ struct InventoryView: View {
         }
     }
 
+    /// 将库存状态转换为对应的展示颜色。
+    /// - Parameters:
+    ///   - status: 业务状态文字或状态代码。
     private func statusColor(_ status: String) -> Color {
         switch status {
         case "已出库": return AppPalette.success
@@ -7504,6 +8604,11 @@ struct InventoryView: View {
         }
     }
 
+    /// 构造出库流程的序号、标题和活动状态标识。
+    /// - Parameters:
+    ///   - number: 流程步骤的显示序号。
+    ///   - title: 界面或操作记录的标题。
+    ///   - active: 该流程步骤是否处于活动状态。
     private func outboundStep(_ number: Int, _ title: String, active: Bool) -> some View {
         HStack(spacing: 7) {
             Text("\(number)")
@@ -7518,6 +8623,11 @@ struct InventoryView: View {
         }
     }
 
+    /// 构造出库确认信息的名称和值。
+    /// - Parameters:
+    ///   - label: 阶段、项目或信息行的显示名称。
+    ///   - value: 需要显示的数值或状态文字。
+    ///   - valueColor: 确认信息数值的文字颜色。
     private func confirmationRow(_ label: String, _ value: String, valueColor: Color = .primary) -> some View {
         HStack {
             Text(label).foregroundColor(.secondary)
@@ -7527,6 +8637,9 @@ struct InventoryView: View {
         .frame(minHeight: 44)
     }
 
+    /// 按材料预览的映射或忽略状态返回颜色。
+    /// - Parameters:
+    ///   - status: 业务状态文字或状态代码。
     private func previewStatusColor(_ status: String) -> Color {
         switch status {
         case "已映射": return AppPalette.success
@@ -7536,6 +8649,10 @@ struct InventoryView: View {
         }
     }
 
+    /// 构造居中的图标和标题组合。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - systemImage: 系统图标名称。
     private func centeredTitle(_ title: String, systemImage: String) -> some View {
         HStack {
             Spacer()
@@ -7545,6 +8662,9 @@ struct InventoryView: View {
         .frame(maxWidth: .infinity)
     }
 
+    /// 按步骤运行、成功或失败状态显示图标。
+    /// - Parameters:
+    ///   - state: 运行、成功、警告或失败等展示状态。
     @ViewBuilder
     private func stepIcon(_ state: String) -> some View {
         switch state {
@@ -7569,6 +8689,7 @@ struct TodoView: View {
     @State private var editingItem: TodoItem?
     @State private var pendingDelete: TodoItem?
 
+    /// 按待办完成和日期规则排列待办列表。
     private var sortedItems: [TodoItem] {
         model.todoItems.sorted { left, right in
             let leftDone = left.completedAt != nil
@@ -7590,11 +8711,13 @@ struct TodoView: View {
         }
     }
 
+    /// 从当前记录中取得所选身份对应的项目。
     private var selectedItem: TodoItem? {
         guard let selectedID else { return nil }
         return model.todoItems.first { $0.id == selectedID }
     }
 
+    /// 统计尚未完成的待办数量。
     private var openCount: Int {
         model.todoItems.filter { $0.completedAt == nil }.count
     }
@@ -7750,6 +8873,9 @@ struct TodoView: View {
         }
     }
 
+    /// 显示待办内容、截止日期和完成、编辑操作。
+    /// - Parameters:
+    ///   - item: 待办记录。
     @ViewBuilder
     private func todoRow(_ item: TodoItem) -> some View {
         HStack(spacing: 0) {
@@ -7804,11 +8930,13 @@ struct TodoView: View {
         .opacity(item.completedAt == nil ? 1 : 0.62)
     }
 
+    /// 根据当前待办选择状态生成操作提示。
     private var todoSelectionMessage: String? {
         guard let selectedItem else { return "点击一行以选择任务" }
         return selectedItem.completedAt == nil ? "未完成" : "已完成"
     }
 
+    /// 将待删除待办的存在状态映射为删除确认框的双向绑定。
     private var deleteAlertBinding: Binding<Bool> {
         Binding(
             get: { pendingDelete != nil },
@@ -7816,6 +8944,8 @@ struct TodoView: View {
         )
     }
 
+    /// 提交当前新增待办草稿，成功后清空输入和截止日期选择。
+    /// 无参数。
     private func addTodo() {
         model.addTodo(content: newContent, deadline: hasDeadline ? newDeadline : nil)
         guard model.todoStatus.isEmpty else { return }
@@ -7824,6 +8954,9 @@ struct TodoView: View {
         newDeadline = Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date()
     }
 
+    /// 将可选待办截止日期转换为提示文字。
+    /// - Parameters:
+    ///   - date: 待显示、选择或计算的日期时间。
     private func deadlineText(_ date: Date?) -> String {
         guard let date else { return "无截止时间" }
         let formatter = DateFormatter()
@@ -7832,6 +8965,9 @@ struct TodoView: View {
         return formatter.string(from: date)
     }
 
+    /// 根据待办完成状态和截止时间生成临期或逾期标识。
+    /// - Parameters:
+    ///   - item: 待办记录。
     private func deadlineBadge(_ item: TodoItem) -> String? {
         guard item.completedAt == nil, let deadline = item.deadline else { return nil }
         let calendar = Calendar.current
@@ -7844,6 +8980,9 @@ struct TodoView: View {
         return nil
     }
 
+    /// 按待办是否完成及是否到期选择截止日期颜色。
+    /// - Parameters:
+    ///   - item: 待办记录。
     private func deadlineColor(_ item: TodoItem) -> Color {
         guard item.completedAt == nil, let deadline = item.deadline else { return .secondary }
         let calendar = Calendar.current
@@ -7856,6 +8995,9 @@ struct TodoView: View {
     }
 }
 
+/// 格式化待办日期选择按钮上的日期和时间。
+/// - Parameters:
+///   - date: 待显示、选择或计算的日期时间。
 func todoDeadlinePickerDisplay(_ date: Date) -> String {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "zh_CN")
@@ -7925,6 +9067,10 @@ struct TodoEditorSheet: View {
     @State private var hasDeadline: Bool
     @State private var deadline: Date
 
+    /// 以现有待办初始化内容和截止时间编辑草稿。
+    /// - Parameters:
+    ///   - model: 共享的 App 状态及业务命令入口。
+    ///   - item: 待办记录。
     init(model: AppModel, item: TodoItem) {
         self.model = model
         self.item = item
@@ -8231,6 +9377,9 @@ struct SettingsView: View {
         }
     }
 
+    /// 构造宽度统一的设置行标题。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
     private func settingsRowLabel(_ title: String) -> some View {
         Text(title)
             .font(.caption)
@@ -8238,6 +9387,9 @@ struct SettingsView: View {
             .frame(width: 88, alignment: .leading)
     }
 
+    /// 将设置中的日期格式化为中文显示文本。
+    /// - Parameters:
+    ///   - value: 待格式化的日期时间。
     private func settingsDateDisplay(_ value: Date) -> String {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
@@ -8247,6 +9399,11 @@ struct SettingsView: View {
         return formatter.string(from: value)
     }
 
+    /// 构造包含标题和绑定输入框的设置行。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - placeholder: 输入框为空时显示的占位提示。
+    ///   - text: 设置输入内容的双向绑定。
     private func settingsFieldRow(
         _ title: String,
         placeholder: String,
@@ -8260,6 +9417,12 @@ struct SettingsView: View {
         }
     }
 
+    /// 构造带数量、帮助文字和管理入口的设置行。
+    /// - Parameters:
+    ///   - title: 界面或操作记录的标题。
+    ///   - count: 参与当前统计的记录总数。
+    ///   - help: 管理入口的辅助说明。
+    ///   - action: 用户确认或点击按钮后执行的动作。
     private func settingsManagementRow(
         _ title: String,
         count: Int,
@@ -8280,6 +9443,9 @@ struct SettingsView: View {
         .help(help)
     }
 
+    /// 以紧凑图标和文字呈现设置保存状态。
+    /// - Parameters:
+    ///   - status: 业务状态文字或状态代码。
     @ViewBuilder
     private func compactStatus(_ status: String) -> some View {
         let text = settingsStatusDisplayText(status)
@@ -8381,6 +9547,8 @@ struct InventoryIgnoredMappingsSheet: View {
         .onAppear { model.refreshInventoryMappings() }
     }
 
+    /// 清空映射编辑草稿并退出当前编辑状态。
+    /// 无参数。
     private func clearEditor() {
         name = ""
         reason = ""
@@ -8486,6 +9654,8 @@ struct InventoryManualMappingsSheet: View {
         .onAppear { model.refreshInventoryMappings() }
     }
 
+    /// 清空映射编辑草稿并退出当前编辑状态。
+    /// 无参数。
     private func clearEditor() {
         name = ""
         productCode = ""
@@ -8498,6 +9668,36 @@ struct OperationLogViewerView: View {
     let url: URL
     @Environment(\.dismiss) private var dismiss
     @State private var entries: [OperationLogEntry] = []
+    @State private var invalidLineCount = 0
+    @State private var readError: String?
+    @State private var failuresOnly = false
+    @State private var search = ""
+    @State private var expandedEntries: Set<UUID> = []
+
+    private var visibleEntries: [OperationLogEntry] {
+        OperationLogReader.filtered(entries, failuresOnly: failuresOnly, search: search)
+    }
+
+    /// 将操作日志字段名转换为界面显示标题；key 为字段标识。
+    private func detailTitle(_ key: String) -> String {
+        [
+            "action": "操作", "order_id": "订单号", "factory_order": "工厂单号",
+            "code": "错误代码", "error": "错误说明", "exception_type": "异常类型",
+            "stack": "代码位置", "exit_status": "退出状态", "app_version": "应用版本",
+            "app_build": "构建号", "stage": "处理阶段", "operation_log_enabled": "日志已启用",
+            "enabled_after_change": "变更后状态", "retained_entries": "保留记录数",
+            "removed_entries": "删除记录数",
+        ][key] ?? key
+    }
+
+    /// 重新读取日志并清除已展开的记录。
+    private func refresh() {
+        let result = OperationLogReader.read(from: url)
+        entries = result.entries
+        invalidLineCount = result.invalidLineCount
+        readError = result.error
+        expandedEntries.removeAll()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -8509,12 +9709,27 @@ struct OperationLogViewerView: View {
                         .foregroundColor(.secondary)
                 }
                 Spacer()
+                Button("刷新") { refresh() }
+                    .appActionButton(minWidth: 72)
                 Button("关闭") { dismiss() }
                     .buttonStyle(.glassProminent)
                     .appActionButton(minWidth: 72)
             }
             Divider()
-            if entries.isEmpty {
+            HStack {
+                TextField("搜索订单号或操作内容", text: $search)
+                    .textFieldStyle(.roundedBorder)
+                Toggle("只看失败", isOn: $failuresOnly)
+                    .toggleStyle(.checkbox)
+                    .fixedSize()
+            }
+            if let readError {
+                ContentUnavailableView("日志读取失败", systemImage: "exclamationmark.triangle", description: Text(readError))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if entries.isEmpty && invalidLineCount > 0 {
+                ContentUnavailableView("日志内容无法识别", systemImage: "exclamationmark.triangle", description: Text("发现 \(invalidLineCount) 行无效记录，请检查日志文件。"))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if entries.isEmpty {
                 ContentUnavailableView(
                     "暂无操作日志",
                     systemImage: "list.bullet.rectangle",
@@ -8522,6 +9737,16 @@ struct OperationLogViewerView: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                if invalidLineCount > 0 {
+                    Text("有 \(invalidLineCount) 行日志无法识别，以下显示其余记录。")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
+                if visibleEntries.isEmpty {
+                    Text("没有符合筛选条件的日志。")
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
                 HStack(spacing: 14) {
                     Text("时间")
                         .frame(width: 150, alignment: .leading)
@@ -8533,15 +9758,38 @@ struct OperationLogViewerView: View {
 
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(entries.reversed()) { entry in
-                            HStack(alignment: .top, spacing: 14) {
-                                Text(entry.displayTime)
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundColor(.secondary)
-                                    .frame(width: 150, alignment: .leading)
-                                Text(entry.operation)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .textSelection(.enabled)
+                        ForEach(visibleEntries.reversed()) { entry in
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(alignment: .top, spacing: 14) {
+                                    Text(entry.displayTime)
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundColor(.secondary)
+                                        .frame(width: 150, alignment: .leading)
+                                    Text(entry.operation)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .textSelection(.enabled)
+                                    Button(expandedEntries.contains(entry.id) ? "收起" : "详情") {
+                                        if !expandedEntries.insert(entry.id).inserted {
+                                            expandedEntries.remove(entry.id)
+                                        }
+                                    }
+                                    .buttonStyle(.borderless)
+                                    Button("复制本次诊断") {
+                                        let text = OperationLogReader.diagnosticText(for: entry, in: entries)
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(text, forType: .string)
+                                    }
+                                    .buttonStyle(.borderless)
+                                }
+                                if expandedEntries.contains(entry.id) {
+                                    if let duration = entry.durationSeconds {
+                                        Text(String(format: "耗时 %.2f 秒", duration))
+                                    }
+                                    ForEach(entry.safeDetails.keys.filter { $0 != "duration_seconds" }.sorted(), id: \.self) { key in
+                                        Text("\(detailTitle(key))：\(entry.safeDetails[key] ?? "")")
+                                            .textSelection(.enabled)
+                                    }
+                                }
                             }
                             .padding(.vertical, 10)
                             Divider()
@@ -8554,11 +9802,12 @@ struct OperationLogViewerView: View {
                     RoundedRectangle(cornerRadius: 8)
                         .stroke(Color.primary.opacity(0.08), lineWidth: 1)
                 )
+                }
             }
         }
         .padding(20)
         .frame(minWidth: 760, minHeight: 520)
-        .onAppear { entries = OperationLogReader.entries(from: url) }
+        .onAppear { refresh() }
     }
 }
 
@@ -8609,6 +9858,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         }
     }
 
+    /// 判断当前导航页面是否属于业务工作区。
     var isWorkSection: Bool {
         switch self {
         case .settings: return false
@@ -8652,7 +9902,7 @@ struct TopNavigationBar: View {
 
             Spacer(minLength: 12)
             contextualStatus
-            if selection == .orders && (!model.pendingCenterItems.isEmpty || model.hasAimesHistory) {
+            if selection == .orders && !model.pendingCenterItems.isEmpty {
                 Button {
                     model.showPendingCenterPrompt = true
                 } label: {
@@ -8663,11 +9913,7 @@ struct TopNavigationBar: View {
                         .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(
-                    model.pendingCenterItems.isEmpty
-                        ? "查看待处理中心"
-                        : "有 \(model.pendingCenterItems.count) 个待处理项目"
-                )
+                .accessibilityLabel("有 \(model.pendingCenterItems.count) 个待处理项目")
                 .help("打开待处理中心，查看待处理项目")
             }
 
@@ -8686,6 +9932,10 @@ struct TopNavigationBar: View {
         .sheet(isPresented: $model.showServerWriteConfirmation) {
             ServerWriteConfirmationSheet(model: model)
                 .frame(width: 720, height: 650)
+        }
+        .sheet(isPresented: $model.showAicncConfirmation) {
+            AicncConfirmationSheet(model: model)
+                .frame(width: 900, height: 720)
         }
         .sheet(isPresented: $model.showInventoryMappingWorkspace, onDismiss: model.inventoryMappingWorkspaceDidDismiss) {
             PendingInventoryMappingWorkspace(model: model)
@@ -8713,6 +9963,9 @@ struct TopNavigationBar: View {
         }
     }
 
+    /// 构造侧边导航按钮，切换页面并记录用户操作。
+    /// - Parameters:
+    ///   - section: 目标侧边导航页面。
     @ViewBuilder
     private func navButton(_ section: AppSection) -> some View {
         Button { selection = section } label: {
@@ -8746,8 +9999,14 @@ struct TravelerAssistantApp: App {
     @StateObject private var model = AppModel()
     @State private var selection = AppSection(rawValue: appDefaultSectionRawValue) ?? .orders
 
+    /// 从当前运行的 App 包读取，确保标题与实际安装版本一致。
+    private var windowTitle: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知版本"
+        return "PP FlowHub  V\(version)"
+    }
+
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(windowTitle) {
             VStack(spacing: 0) {
                 TopNavigationBar(selection: $selection, model: model)
                 Divider()
@@ -8762,9 +10021,8 @@ struct TravelerAssistantApp: App {
             .tint(AppPalette.accent)
             .groupBoxStyle(AppGlassGroupBoxStyle())
             .buttonStyle(.glass)
-            // The approved design is a light workspace with fixed white surfaces.
-            // Keep semantic primary/secondary text in the matching light palette;
-            // otherwise macOS dark mode produces white text on these white cards.
+            // 已确认的设计为浅色工作区和固定白色表面。主次语义文字保持匹配的浅色配色，
+            // 否则 macOS 深色模式会在白色卡片上显示白色文字。
             .preferredColorScheme(AppPalette.interfaceColorScheme)
             .background(LiquidGlassPreviewBackdrop())
             .background(

@@ -7,15 +7,15 @@ import math
 from pathlib import Path
 
 
-# These Server report SKUs count individual runners; inventory counts pairs.
+# 这些 SKU 在 Server 报表中按单支导轨计数，库存中按对计数。
 SERVER_PIECE_RAIL_SKUS = frozenset({"M1094", "M1095", "M1096", "M1097"})
 
 
 def server_hardware_quantity(product_code, quantity, unit, *, factory_order='', name=''):
-    """Convert raw Server counts once, before creating canonical hardware facts.
+    """在建立五金事实前，对指定导轨 SKU 的原始报表数量执行一次支数转对数。
 
-    Never call on database rows: existing H/L-Rail pair folding and manual
-    hardware already use their own quantity basis and must remain untouched.
+    参数：product_code 为 SKU；quantity 为原数量；unit 为原单位；factory_order 和 name 用于错误定位。
+    不可对数据库行调用；H/L-Rail 已有成对合并规则，人工五金也有自身数量口径。
     """
     quantity = float(quantity or 0)
     if str(product_code).strip().upper() not in SERVER_PIECE_RAIL_SKUS:
@@ -33,7 +33,10 @@ def server_hardware_quantity(product_code, quantity, unit, *, factory_order='', 
 
 
 def assert_source_isolation(database, sources, *, test_mode=False):
-    """测试来源只能写入独立数据库，不能污染正式业务库。"""
+    """防止测试来源写入正式库。
+
+    参数：database 为目标库路径；sources 为来源路径集合；test_mode 为显式测试标志。
+    """
     production = Path.home() / 'Documents/pp-flowhub/data/workflow.sqlite3'
     if Path(database).resolve() != production.resolve():
         return
@@ -45,7 +48,7 @@ def assert_source_isolation(database, sources, *, test_mode=False):
 
 
 def hardware_fingerprint(rows):
-    """Only canonical SKU quantities define current automatic hardware facts."""
+    """按订单、工厂单及 SKU 汇总 rows 中的数量并计算指纹，不以显示名称识别五金。"""
     totals = Counter()
     for row in rows:
         totals[(str(row['order_id']), str(row['factory_order']), str(row['product_code']))] += float(row['quantity'])
@@ -54,7 +57,11 @@ def hardware_fingerprint(rows):
 
 
 def replace_factory_hardware(connection, factory_order, rows, *, source_path='', observed_at='', reason='Server 五金同步', allow_empty=False):
-    """完整校验后按工厂单替换自动五金；调用方负责外层事务提交。"""
+    """校验后按工厂单原子替换自动五金，未变化时返回 False；调用方提交外层事务。
+
+    参数：connection 为连接；factory_order 为工厂单号；rows 为新记录；source_path 为来源；
+    observed_at 为观察时间；reason 为审计原因；allow_empty 决定是否允许清空自动五金。
+    """
     factory_order = str(factory_order).strip().upper()
     rows = [dict(row) for row in rows]
     if not factory_order:
@@ -83,8 +90,7 @@ def replace_factory_hardware(connection, factory_order, rows, *, source_path='',
     cursor = connection.execute("select * from hardware_items where factory_order=? and source_type='aicnc' order by id", (factory_order,))
     names = [col[0] for col in cursor.description]
     before = [dict(zip(names, row)) for row in cursor.fetchall()]
-    # Validate every SKU before deleting any old rows. Catalog labels may
-    # change; neither mapping rules nor source names may rebind saved facts.
+    # 删除旧行前校验所有 SKU；商品名称可变，映射规则或来源名称不能重绑已保存事实。
     from .core import RuleError
     for row in normalized:
         product = connection.execute(
@@ -96,7 +102,7 @@ def replace_factory_hardware(connection, factory_order, rows, *, source_path='',
     version = connection.execute('select fingerprint from hardware_source_versions where factory_order=?', (factory_order,)).fetchone()
     if hardware_fingerprint(before) == fingerprint and version and version[0] == fingerprint:
         return False
-    # SAVEPOINT prevents a caught insertion error from committing an earlier deletion.
+    # 保存点确保插入失败时撤销先前删除，避免外层捕获异常后提交残缺数据。
     if not connection.in_transaction:
         connection.execute('begin')
     connection.execute('savepoint replace_factory_hardware')
@@ -122,7 +128,12 @@ def replace_factory_hardware(connection, factory_order, rows, *, source_path='',
 
 
 def audit_factory_hardware(connection, factory_order, now=None):
-    """资料差异独立提示；不改变历史已出库事实。"""
+    """对比当前五金和历史出库单并更新差异提示，不改历史出库事实。
+
+    参数：connection 为连接；factory_order 为工厂单号；now 为可选审计时间。
+    """
+    from .database import prepare_pending_session
+    prepare_pending_session(connection)
     now = now or datetime.now().astimezone().isoformat(timespec='seconds')
     if not connection.execute("select 1 from sqlite_master where name='factory_orders'").fetchone():
         return
@@ -145,17 +156,20 @@ def audit_factory_hardware(connection, factory_order, now=None):
         totals.append(quantities)
     key = 'outbound_hardware_difference:' + factory_order
     if current in totals:
-        connection.execute("update active_issues set status='resolved',resolved_at=?,last_seen=? where issue_key=? and status='open'", (now, now, key))
+        connection.execute("update pending_issues set status='resolved',resolved_at=?,last_seen=? where issue_key=? and status='open'", (now, now, key))
         return
     message = '出库后五金资料与已确认出库单不一致，请核对资料；原出库事实保持有效。单据：' + '、'.join(row[0] for row in documents)
-    connection.execute("""insert into active_issues(issue_key,kind,order_id,factory_order,path,message,status,first_seen,last_seen,resolved_at)
+    connection.execute("""insert into pending_issues(issue_key,kind,order_id,factory_order,path,message,status,first_seen,last_seen,resolved_at)
         values(?,?,?,?,?,?,'open',?,?,'') on conflict(issue_key) do update set
         message=excluded.message,status='open',last_seen=excluded.last_seen,resolved_at=''""",
         (key, 'outbound_hardware_difference', factory[0], factory_order, '', message, now, now))
 
 
 def hardware_integrity_findings(connection, *, factory_orders=None):
-    """只读检查跨路径重复投影及有报表索引却无自动五金的工厂单。"""
+    """只读检查五金重复、缺失及人工处理版本一致性。
+
+    参数：connection 为连接；factory_orders 为可选工厂单范围，省略时检查全部有效工厂单。
+    """
     findings = []
     has_versions = bool(connection.execute("select 1 from sqlite_master where name='hardware_source_versions'").fetchone())
     scope = None if factory_orders is None else set(factory_orders)
@@ -169,7 +183,7 @@ def hardware_integrity_findings(connection, *, factory_orders=None):
         decision = json.loads(decision_row[0]) if decision_row else {}
         if decision.get('handling') == 'manual':
             revisions = decision.get('report_versions', {})
-            # Missing/changed indexed reports cannot inherit the old decision.
+            # 索引报表缺失或变化时，不能沿用旧的人工处理决定。
             if revisions and indexed_paths == revisions and not connection.execute(
                 "select 1 from hardware_items where factory_order=? and source_type='aicnc' limit 1", (factory,)).fetchone():
                 continue
@@ -184,7 +198,7 @@ def hardware_integrity_findings(connection, *, factory_orders=None):
         if repeated:
             findings.append({'factory_order': factory, 'order_id': order, 'message': '同一工厂单存在跨路径相同五金，请核对并保留唯一有效来源。'})
         elif not by_path:
-            # CUT TO SIZE contracts intentionally do not import automatic hardware.
+            # CUT TO SIZE 订单按业务约定不导入自动五金。
             if order.upper().startswith('CS'):
                 continue
             complete_empty = has_versions and connection.execute('select 1 from hardware_source_versions where factory_order=? and row_count=0', (factory,)).fetchone()
@@ -204,15 +218,17 @@ def hardware_integrity_findings(connection, *, factory_orders=None):
 
 
 def audit_hardware_integrity(connection):
-    """把完整性检查保存到待处理中心，不自动猜测或修复业务数量。"""
+    """通过连接 connection 将完整性检查写入待处理中心，不自动猜测或修复业务数量。"""
+    from .database import prepare_pending_session
+    prepare_pending_session(connection)
     now = datetime.now().astimezone().isoformat(timespec='seconds')
     findings = hardware_integrity_findings(connection)
     keys = {'hardware_integrity:' + row['factory_order'] for row in findings}
-    for key, in connection.execute("select issue_key from active_issues where kind='hardware_integrity' and status='open'").fetchall():
+    for key, in connection.execute("select issue_key from pending_issues where kind='hardware_integrity' and status='open'").fetchall():
         if key not in keys:
-            connection.execute("update active_issues set status='resolved',resolved_at=? where issue_key=?", (now, key))
+            connection.execute("update pending_issues set status='resolved',resolved_at=? where issue_key=?", (now, key))
     for row in findings:
-        connection.execute("""insert into active_issues(issue_key,kind,order_id,factory_order,path,message,status,first_seen,last_seen,resolved_at)
+        connection.execute("""insert into pending_issues(issue_key,kind,order_id,factory_order,path,message,status,first_seen,last_seen,resolved_at)
             values(?,'hardware_integrity',?,?, ?,?,'open',?,?,'') on conflict(issue_key) do update set
             path=excluded.path,message=excluded.message,status='open',last_seen=excluded.last_seen,resolved_at=''""",
             ('hardware_integrity:' + row['factory_order'], row['order_id'], row['factory_order'], row['path'], row['message'], now, now))
@@ -220,7 +236,10 @@ def audit_hardware_integrity(connection):
 
 
 def preserve_confirmed_shipment(connection, factory_order):
-    """预览中的旧状态不得覆盖已由库存单确认的工厂单出货事实。"""
+    """依据已确认库存单恢复出货状态，防止预览旧状态覆盖事实。
+
+    参数：connection 为连接；factory_order 为待保护的工厂单号。
+    """
     rows = connection.execute("""select d.document_number,coalesce(nullif(f.created_at,''),d.issued_at)
         from outbound_documents d join outbound_document_factories f on f.document_number=d.document_number
         join factory_orders fo on fo.factory_order=f.factory_order and fo.order_id=d.order_id

@@ -1,4 +1,4 @@
-"""Server piece-to-pair conversion through real reports, SKU mapping and writes."""
+"""通过真实报告格式、SKU 映射和隔离写入验证 Server 件数到套数的换算。"""
 import copy
 import sqlite3
 import tempfile
@@ -18,6 +18,8 @@ from tests.test_order_workflow import make_materials, make_board, make_fittings
 
 
 class ServerRailUnitsTests(unittest.TestCase):
+    # 建立导轨目录、人工映射和 Server 报告，隔离无关材料影响。
+    # self：当前测试用例或测试替身实例。
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -53,6 +55,9 @@ class ServerRailUnitsTests(unittest.TestCase):
         store.commit()
         store.close()
 
+    # 按给定 SKU 数量改写测试导轨五金报告。
+    # self：当前测试用例或测试替身实例。
+    # quantities：按商品 SKU 索引的原始导轨数量。
     def write_report(self, quantities):
         make_fittings(self.report, [('F100', 2)])
         wb = load_workbook(self.report)
@@ -64,10 +69,14 @@ class ServerRailUnitsTests(unittest.TestCase):
             ws.cell(row, 11, quantity)
         wb.save(self.report)
 
+    # 读取五金 SKU、数量和商品单位，供换算结果断言。
+    # self：当前测试用例或测试替身实例。
     def rows(self):
         with sqlite3.connect(self.config.workflow_database) as connection:
             return connection.execute('select h.product_code,h.quantity,p.unit from hardware_items h join products p on p.code=h.product_code order by h.product_code').fetchall()
 
+    # 验证预览和重复确认只对原始导轨件数执行一次单位换算。
+    # self：当前测试用例或测试替身实例。
     def test_preview_and_repeated_confirmation_convert_raw_counts_only_once(self):
         self.write_report({'M1094': 12, 'M1095': 6, 'M1096': 4, 'M1097': 2, 'M1142': 5})
         payload = preview_server_changes(self.config, [self.folder])['server_write_preview']
@@ -80,6 +89,8 @@ class ServerRailUnitsTests(unittest.TestCase):
             self.assertEqual(self.rows(), expected)
         self.assertEqual(payload['hardware_source_items'][0]['items'][0]['quantity'], 12)
 
+    # 验证奇数导轨报告阻止预览，并保留已有五金事实。
+    # self：当前测试用例或测试替身实例。
     def test_odd_report_blocks_preview_and_preserves_existing_facts(self):
         self.write_report({'M1094': 12})
         payload = preview_server_changes(self.config, [self.folder])['server_write_preview']
@@ -95,6 +106,8 @@ class ServerRailUnitsTests(unittest.TestCase):
             self.assertIn(text, str(error.exception))
         self.assertEqual(self.rows(), [('M1094', 6, 'Sets')])
 
+    # 验证确认前重新校验原始导轨件数，校验失败时不写入。
+    # self：当前测试用例或测试替身实例。
     def test_confirmation_revalidates_raw_counts_before_any_write(self):
         self.write_report({'M1094': 6, 'M1095': 4})
         payload = preview_server_changes(self.config, [self.folder])['server_write_preview']
@@ -104,12 +117,14 @@ class ServerRailUnitsTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 'server_rail_pair_quantity_invalid')
         self.assertEqual(self.rows(), [])
 
+    # 验证直接同步执行导轨换算，遇到奇数时报告错误且不替换原事实。
+    # self：当前测试用例或测试替身实例。
     def test_direct_sync_converts_and_reports_odd_quantity_without_replacing(self):
         self.write_report({'M1097': 10})
         sync_order_index(self.config, refresh_outbound_statuses=False, reconcile_outbound=False)
         self.assertEqual(self.rows(), [('M1097', 5, 'Sets')])
         self.write_report({'M1097': 7})
-        # A committed source now requires approval of the new revision first.
+        # 来源已确认后，需要先批准新的报告版本。
         from traveler_assistant.fittings import select_latest_fittings, fittings_candidate
         from traveler_assistant.hardware_source_decisions import load_source_decisions
         from traveler_assistant.report_read_context import report_read_session
@@ -117,14 +132,16 @@ class ServerRailUnitsTests(unittest.TestCase):
         choice = fittings_candidate(selected['F100'])['id']
         with report_read_session({'F100': choice}) as context:
             context.locked_decisions = load_source_decisions(self.config)
-            sync_order_index(self.config, refresh_outbound_statuses=False, reconcile_outbound=False)
+            result = sync_order_index(self.config, refresh_outbound_statuses=False, reconcile_outbound=False)
         self.assertEqual(self.rows(), [('M1097', 5, 'Sets')])
         store = OrderIndexStore(self.config.workflow_database)
         try:
-            self.assertTrue(any('M1097' in row['message'] and '偶数' in row['message'] for row in store.active_issues()))
+            self.assertTrue(any('M1097' in row['message'] and '偶数' in row['message'] for row in result['current_issues']))
         finally:
             store.close()
 
+    # 验证高低导轨来源配对后保持商品目录单位对应的数量。
+    # self：当前测试用例或测试替身实例。
     def test_h_and_l_rail_source_pairs_keep_canonical_quantity(self):
         self.write_report({'M1094': 6})
         wb = load_workbook(self.report)
@@ -141,6 +158,8 @@ class ServerRailUnitsTests(unittest.TestCase):
         confirm_server_material_preview_memory(self.config, payload, confirm_write=True)
         self.assertEqual(self.rows(), [('M1002', 3, '套'), ('M1003', 3, '套'), ('M1094', 3, 'Sets')])
 
+    # 验证旧订单预览持久化只换算一次，奇数数量导致事务回滚。
+    # self：当前测试用例或测试替身实例。
     def test_legacy_order_preview_persistence_converts_once_and_rolls_back_on_odd(self):
         from traveler_assistant.order_workflow import preview_order, persist_preview
         self.write_report({'M1095': 6})
@@ -154,6 +173,8 @@ class ServerRailUnitsTests(unittest.TestCase):
             persist_preview(self.config, preview)
         self.assertEqual(self.rows(), [('M1095', 3, 'Sets')])
 
+    # 验证已有配对规则保持有效，其他 SKU 数量不会被减半。
+    # self：当前测试用例或测试替身实例。
     def test_existing_pair_rules_and_other_skus_are_not_halved(self):
         for code in ['M1002', 'M1003', 'M1142']:
             self.assertEqual(server_hardware_quantity(code, 3, '套'), {'quantity': 3, 'unit': '套'})

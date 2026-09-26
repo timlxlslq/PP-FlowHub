@@ -12,6 +12,7 @@ from typing import Any
 
 
 def _run_wecom_command(args):
+    """运行企微命令并解析 JSON，移除附带身份上下文；args 为子命令及参数列表。"""
     result = subprocess.run(
         ["wecom-cli", *args],
         capture_output=True,
@@ -29,6 +30,7 @@ def _run_wecom_command(args):
 
 
 def get_smartsheet_info(doc_url):
+    """读取智能表格信息；doc_url 为传给企微命令的文档标识或链接。"""
     return _run_wecom_command(
         [
             "smartsheet",
@@ -45,7 +47,7 @@ _RECORDS_PAGE_LIMIT = 100
 
 
 def get_records(doc_url, sheet_id):
-    """拉取子表全部记录。外部接口必须分页，本函数把各页拼成一份结果。"""
+    """分页拉取子表记录并合并；doc_url 为文档标识或链接，sheet_id 为子表标识。"""
     all_records = []
     cursor = None
     last_page = {}
@@ -85,7 +87,7 @@ def get_records(doc_url, sheet_id):
     return result
 
 def get_text(values, field_name):
-    """安全提取 SmartSheet 文本字段"""
+    """提取文本字段，兼容文本列表和字符串；values 为字段字典，field_name 为字段名称。"""
     field_value = values.get(field_name)
 
     """
@@ -112,6 +114,7 @@ class WeComRepository:
     """wecom模块专用的数据仓库，独立管理数据库连接与事务"""
 
     def __init__(self, state_dir: Path):
+        """设置状态目录 state_dir 并确保数据库结构已创建。"""
         # database_path() 用 Path 的 / 拼接文件名；字符串没有这个运算。
         self.state_dir = Path(state_dir)
         self.db_path = database.database_path(self.state_dir)
@@ -120,14 +123,14 @@ class WeComRepository:
         database.ensure_schema(self.db_path)
 
     def _get_connection(self) -> sqlite3.Connection:
-        """创建一个全新的 SQLite 连接（随用随开）"""
+        """创建启用外键的新 SQLite 连接；无显式参数，使用当前仓库的数据库路径。"""
         conn = sqlite3.connect(self.db_path)
         # 开启外键支持（推荐）
         conn.execute("PRAGMA foreign_keys = ON;")
         return conn
 
     def get_db_order_status(self, order_id: str) -> list[tuple]:
-        """查询数据库中的订单状态"""
+        """按 order_id 查询本地订单状态；发生异常时打印诊断信息，并始终关闭连接。"""
         conn = self._get_connection()
         try:
             cursor = conn.execute(
@@ -147,7 +150,7 @@ class WeComRepository:
             conn.close()
 
     def update_wecom_order_status(self, order_id: str) -> list[tuple]:
-        """更新wecom中的订单状态"""
+        """预留企微订单状态更新接口，当前尚未实现；order_id 为待更新订单号。"""
 
 
 if __name__ == "__main__":
